@@ -152,8 +152,8 @@ Known gaps, accepted for now:
   fnm, volta, asdf or pyenv, and their global packages, are not.
 - `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` and `Pipfile.lock` are not read.
 - A Homebrew name that is a valid CPE name but the wrong product gets no CVEs and no warning.
-  Step 4 checks each product with no CVEs against NVD's CPE dictionary once and reports
-  the ones NVD does not know.
+  Step 4 checks each product with no CVEs against NVD's CPE dictionary (an unknown answer is
+  asked again after 30 days) and reports the ones NVD does not know.
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the login shell's `PATH` (`$SHELL -lc`), as the agent adapters do.
 
@@ -364,8 +364,9 @@ failure marks the target failed. A valid file counts even if the agent then exit
 agent that exits non-zero without one is not retried. One sweep runs at a time: it holds a
 `flock` on `sweeps/.lock`, which the system releases when the process ends.
 
-Homebrew products for which NVD returns no CVEs are checked once against NVD's CPE dictionary;
-a product NVD does not know is reported in the sweep report, so a wrong guessed name is visible.
+Homebrew products for which NVD returns no CVEs are checked against NVD's CPE dictionary (an
+unknown answer is asked again after 30 days); a product NVD does not know is reported in the
+sweep report, so a wrong guessed name is visible.
 
 ### Feeds
 
@@ -391,9 +392,9 @@ not an OSV ecosystem, so formulae go through NVD.
   the KEV catalog cannot be read, no CVE is filtered.
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
-- A product's cached CVEs are used without a request for 2 hours after they were fetched, and
-  a product NVD's CPE dictionary does not know is not asked for CVEs until that answer is
-  rechecked (30 days). On one Mac a repeated sweep had spent 11 minutes on NVD requests that
+- A product's cached CVEs are used without a request for 2 hours after the last fetch's
+  coverage ended, and a product NVD's CPE dictionary does not know, with no cached CVEs, is
+  not asked for CVEs for a week. On one Mac a repeated sweep had spent 11 minutes on NVD requests that
   found nothing (decided 2026-11-08).
 - `history.since` drops advisories both published and last modified before that date (NVD keeps
   a CVE's original published date when it later adds a product); records without either date

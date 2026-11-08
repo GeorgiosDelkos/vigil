@@ -2,9 +2,10 @@
 //! where `<vendor>` is `*` for a product given without one.
 //!
 //! API: <https://nvd.nist.gov/developers/vulnerabilities>. Each product's CVEs are cached in
-//! one file with the time the last fetch's coverage ended. The next fetch asks only for CVEs
-//! modified since then, which NVD allows for windows of at most 120 days; an older cache is
-//! fetched in full again.
+//! one file with the time the last fetch's coverage ended. A cache under [`FRESH`] old is used
+//! without asking; after that a fetch asks only for CVEs modified since then, which NVD allows
+//! for windows of at most 120 days; an older cache is fetched in full again. A product NVD's
+//! CPE dictionary does not know, with no cached CVEs, is not asked for [`UNKNOWN_SKIP`].
 //!
 //! Entries are never removed by a delta: a CVE whose configurations no longer name the
 //! product, or that NVD rejected, stays cached until the next full fetch. That errs towards
@@ -43,10 +44,17 @@ const WINDOW_DAYS: i64 = 120;
 const MAX_DELTA: SignedDuration = SignedDuration::from_hours(24 * WINDOW_DAYS);
 
 /// How long a product's cached CVEs are used without asking NVD for changes. Without an API
-/// key each request is paced to 6 s, so a sweep repeated within hours of the last (108
+/// key each request is paced to 6.6 s, so a sweep repeated within hours of the last (108
 /// products on one Mac, 2026-11-08) spent 11 minutes on requests that found nothing new.
 /// Two hours is arbitrary: CVEs change over days, and a sweep a day apart still asks.
 const FRESH: SignedDuration = SignedDuration::from_hours(2);
+
+/// How long a product NVD's CPE dictionary does not know is not asked for CVEs. Shorter than
+/// [`UNKNOWN_PRODUCT_RECHECK`] on purpose: NVD tends to add a product's CPE name when it
+/// analyses the product's first CVE, which is the one CVE that matters most, so the skip ends
+/// within a week and the CVE query runs again even while the dictionary answer is trusted.
+/// A week is arbitrary.
+const UNKNOWN_SKIP: SignedDuration = SignedDuration::from_hours(24 * 7);
 
 /// CVEs per page. NVD allows up to 2000; 500 keeps each response a few MB. Arbitrary.
 const PAGE: usize = 500;
@@ -306,11 +314,7 @@ pub(super) fn fetch(
     if let Some(fresh) = cached.take_if(|c| is_fresh(c.fetched_at, now)) {
         return Ok(advisories(fresh.cves, history));
     }
-    // A product NVD's CPE dictionary does not know has no CVEs to ask for; 33 of 108 on one
-    // Mac (2026-11-08), each a paced request every sweep. The answer is asked again after
-    // `UNKNOWN_PRODUCT_RECHECK`, so a product NVD adds later is found then.
-    let check: Option<ProductCheck> = feeds.cache.read("nvd-cpe", key)?;
-    if check.is_some_and(|c| !c.known && c.trusted_at(now)) {
+    if cached.as_ref().is_none_or(|c| c.cves.is_empty()) && recently_unknown(feeds, key, now)? {
         return Ok(Vec::new());
     }
     let window = cached
@@ -320,7 +324,27 @@ pub(super) fn fetch(
         (Some(c), Some(_)) => c.cves,
         _ => BTreeMap::new(),
     };
+    let first_page_time = request_all(feeds, product, window, &mut cves)?;
 
+    // The next delta starts where this fetch's coverage ends. A delta covers up to `to` on
+    // the local clock, but only up to NVD's present when it answered, so the earlier of the
+    // two: CVEs modified after it are picked up next time whichever clock is ahead. A full
+    // fetch covers up to NVD's time at the first page; later pages were answered after it,
+    // so starting there can only repeat CVEs, never skip them.
+    let fetched_at = window.map_or(first_page_time, |(_, to)| to.min(first_page_time));
+    let entry = ProductCache { fetched_at, cves };
+    feeds.cache.write("nvd", key, &entry)?;
+    Ok(advisories(entry.cves, history))
+}
+
+/// Requests every page of CVEs for `window` (the full history for `None`), adding them to
+/// `cves`. Returns NVD's time at the first page.
+fn request_all(
+    feeds: &Feeds,
+    product: &Product,
+    window: Option<(Timestamp, Timestamp)>,
+    cves: &mut BTreeMap<String, Box<RawValue>>,
+) -> Result<Timestamp, FeedError> {
     let mut first_page_time = None;
     let mut start = 0;
     for pages in 1.. {
@@ -343,24 +367,31 @@ pub(super) fn fetch(
             });
         }
     }
+    Ok(first_page_time.expect("the loop requests at least one page"))
+}
 
-    // The next delta starts where this fetch's coverage ends. A delta covers up to `to` on
-    // the local clock, but only up to NVD's present when it answered, so the earlier of the
-    // two: CVEs modified after it are picked up next time whichever clock is ahead. A full
-    // fetch covers up to NVD's time at the first page; later pages were answered after it,
-    // so starting there can only repeat CVEs, never skip them.
-    let first_page_time = first_page_time.expect("the loop requests at least one page");
-    let fetched_at = window.map_or(first_page_time, |(_, to)| to.min(first_page_time));
-    let entry = ProductCache { fetched_at, cves };
-    feeds.cache.write("nvd", key, &entry)?;
-    Ok(advisories(entry.cves, history))
+/// Whether NVD's CPE dictionary was found not to know the product less than
+/// [`UNKNOWN_SKIP`] ago, so its CVEs need not be asked for. 33 of 108 products on one Mac
+/// (2026-11-08) were such names, each a paced request every sweep. The caller asks only when
+/// it has no cached CVEs: the CVE query and the dictionary are different answers, and a
+/// product can have CVEs that `history.since` filtered out.
+fn recently_unknown(feeds: &Feeds, key: &str, now: Timestamp) -> Result<bool, FeedError> {
+    let check: Option<ProductCheck> = feeds.cache.read("nvd-cpe", key)?;
+    Ok(check.is_some_and(|c| !c.known && within(c.checked_at, now, UNKNOWN_SKIP)))
 }
 
 /// Whether a cache fetched at `fetched_at` is recent enough to use without a request (see
-/// [`FRESH`]). A cache dated after `now` is not: the clock moved back, and its age is unknown.
+/// [`FRESH`]). After a full fetch `fetched_at` is on NVD's clock, so a cache dated after `now`
+/// (NVD ahead of us, or our clock moved back) has no known age and is not fresh.
 fn is_fresh(fetched_at: Timestamp, now: Timestamp) -> bool {
-    let age = now.duration_since(fetched_at);
-    age >= SignedDuration::ZERO && age < FRESH
+    within(fetched_at, now, FRESH)
+}
+
+/// Whether `at` is less than `span` before `now`. A time after `now` is not: its age is
+/// unknown, and trusting it would last as long as the clock error.
+fn within(at: Timestamp, now: Timestamp, span: SignedDuration) -> bool {
+    let age = now.duration_since(at);
+    age >= SignedDuration::ZERO && age < span
 }
 
 /// Returns the `lastModStartDate`..`lastModEndDate` range for a cache fetched at
@@ -492,9 +523,9 @@ struct ProductCheck {
 
 impl ProductCheck {
     /// Whether the cached answer still holds at `now`: a known product always, an unknown one
-    /// for less than [`UNKNOWN_PRODUCT_RECHECK`].
+    /// for less than [`UNKNOWN_PRODUCT_RECHECK`], and not when it is dated after `now`.
     fn trusted_at(&self, now: Timestamp) -> bool {
-        self.known || now.duration_since(self.checked_at) < UNKNOWN_PRODUCT_RECHECK
+        self.known || within(self.checked_at, now, UNKNOWN_PRODUCT_RECHECK)
     }
 }
 
@@ -820,22 +851,38 @@ mod tests {
         );
     }
 
+    /// A product's cached CVEs and CPE check, as one sweep leaves them.
+    fn cached(cache: &Cache, name: &str, cves: &[&str], ago: SignedDuration, known: bool) {
+        let cves = cves
+            .iter()
+            .map(|id| {
+                let raw = format!(r#"{{"id":"{id}"}}"#);
+                ((*id).to_owned(), RawValue::from_string(raw).unwrap())
+            })
+            .collect();
+        let at = Timestamp::now() - ago;
+        let entry = ProductCache {
+            fetched_at: at,
+            cves,
+        };
+        cache.write("nvd", name, &entry).unwrap();
+        let check = ProductCheck {
+            known,
+            checked_at: at,
+        };
+        cache.write("nvd-cpe", name, &check).unwrap();
+    }
+
     #[test]
-    fn a_product_nvd_does_not_know_is_not_asked_for_cves() {
+    fn a_product_nvd_does_not_know_is_not_asked_for_cves_for_a_week() {
         let server =
             TestServer::start(|_: &Request| (200, page(0, "2026-11-01T10:00:00.000", &[])));
         let tmp = tempfile::tempdir().unwrap();
         let cache = Cache::new(tmp.path().to_owned());
-        let checked = |known: bool, ago: SignedDuration| ProductCheck {
-            known,
-            checked_at: Timestamp::now() - ago,
-        };
         let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+        let days = |n: i64| SignedDuration::from_hours(24 * n);
 
-        let week = SignedDuration::from_hours(24 * 7);
-        cache
-            .write("nvd-cpe", "abseil", &checked(false, week))
-            .unwrap();
+        cached(&cache, "abseil", &[], days(3), false);
         assert!(
             feeds
                 .nvd(&product("abseil"), History::All)
@@ -848,22 +895,56 @@ mod tests {
             "known to be unknown, so not asked"
         );
 
-        let months = SignedDuration::from_hours(24 * 40);
-        cache
-            .write("nvd-cpe", "abseil", &checked(false, months))
-            .unwrap();
+        cached(&cache, "abseil", &[], days(8), false);
         feeds.nvd(&product("abseil"), History::All).unwrap();
         assert_eq!(
             server.requests().len(),
             1,
-            "the answer is old, so the CVEs are asked for"
+            "a week on, the CVEs are asked for again"
         );
 
-        cache
-            .write("nvd-cpe", "curl", &checked(true, week))
-            .unwrap();
+        cached(&cache, "curl", &[], days(3), true);
         feeds.nvd(&product("curl"), History::All).unwrap();
         assert_eq!(server.requests().len(), 2, "a known product is asked");
+
+        // A product with cached CVEs is asked whatever the dictionary said: the two are
+        // different answers, and `history.since` may have hidden its CVEs.
+        cached(&cache, "zlib", &["CVE-OLD"], days(3), false);
+        let kept = feeds.nvd(&product("zlib"), History::All).unwrap();
+        assert_eq!(server.requests().len(), 3);
+        assert_eq!(kept.len(), 1, "the cached CVE is still returned");
+
+        // An answer dated after `now` (the clock moved back) has no known age.
+        cached(&cache, "abseil", &[], days(0) - days(2), false);
+        feeds.nvd(&product("abseil"), History::All).unwrap();
+        assert_eq!(server.requests().len(), 4);
+    }
+
+    #[test]
+    fn a_skipped_or_fresh_fetch_keeps_where_the_next_delta_starts() {
+        let server =
+            TestServer::start(|_: &Request| (200, page(0, "2026-11-01T10:00:00.000", &[])));
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(tmp.path().to_owned());
+        let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+        let ago = SignedDuration::from_hours(24 * 8);
+        cached(&cache, "abseil", &[], ago, false);
+        let fetched_at: ProductCache = cache.read("nvd", "abseil").unwrap().unwrap();
+        feeds.nvd(&product("abseil"), History::All).unwrap();
+        assert_eq!(
+            server.requests()[0].query("lastModStartDate"),
+            Some(nvd_time(fetched_at.fetched_at)),
+            "the delta covers the whole skip"
+        );
+    }
+
+    #[test]
+    fn fresh_means_under_two_hours_and_not_in_the_future() {
+        let t: Timestamp = "2026-11-08T00:00:00Z".parse().unwrap();
+        assert!(is_fresh(t, t));
+        assert!(is_fresh(t, t + FRESH - SignedDuration::from_secs(1)));
+        assert!(!is_fresh(t, t + FRESH), "exactly two hours is asked again");
+        assert!(!is_fresh(t + SignedDuration::from_nanos(1), t));
     }
 
     #[test]

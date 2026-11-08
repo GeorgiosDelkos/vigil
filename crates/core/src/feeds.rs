@@ -129,8 +129,11 @@ impl Feeds {
     /// Returns every NVD CVE whose configurations name `product` (any vendor) in the
     /// `history` window, in id order.
     ///
-    /// The first call for a product fetches its full history; later calls fetch only CVEs
-    /// modified since, unless the cache is older than NVD's 120-day window.
+    /// The first call for a product fetches its full history. A later call within two hours
+    /// returns the cache without a request; after that it fetches only CVEs modified since,
+    /// unless the cache is older than NVD's 120-day window. A product NVD's CPE dictionary was
+    /// found not to know in the last week, with nothing cached, returns no CVEs without a
+    /// request.
     ///
     /// # Errors
     ///
