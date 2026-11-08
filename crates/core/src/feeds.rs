@@ -11,6 +11,7 @@
 //! by [`cache_key`] first.
 
 mod cache;
+pub(crate) mod cpe;
 mod http;
 mod kev;
 mod nvd;
