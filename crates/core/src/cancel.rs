@@ -429,7 +429,9 @@ mod tests {
 
     use std::os::unix::fs::PermissionsExt as _;
 
-    /// A script at `dir/name` running `body`.
+    /// A script at `dir/name` running `body`. The scripts sleep 30 s at most: longer than any
+    /// wait in these tests (10 s), so a program that is not stopped fails the test, and short
+    /// enough that a mutant which stops nothing fails it instead of hanging the run.
     fn script(dir: &Path, name: &str, body: &str) -> Command {
         let path = dir.join(name);
         fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -504,7 +506,7 @@ mod tests {
     #[test]
     fn a_program_that_exits_takes_what_it_started_with_it() {
         let tmp = tempfile::tempdir().unwrap();
-        let command = script(tmp.path(), "a", "sleep 60 &\necho $! > left.pid\nexit 4");
+        let command = script(tmp.path(), "a", "sleep 30 &\necho $! > left.pid\nexit 4");
         let ended = watch(start(&command), &Cancel::new()).unwrap();
         assert!(
             matches!(ended, Ended::Exited(s) if s.code() == Some(4)),
@@ -520,8 +522,8 @@ mod tests {
     fn a_cancel_stops_the_program_its_children_and_those_that_left_its_group() {
         let tmp = tempfile::tempdir().unwrap();
         // perl, which macOS ships, stands in for a Node child spawned with `detached: true`.
-        let body = "perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"60\"' &\n\
-                    echo $! > away.pid\nsleep 60 &\necho $! > left.pid\nwait";
+        let body = "perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"30\"' &\n\
+                    echo $! > away.pid\nsleep 30 &\necho $! > left.pid\nwait";
         let child = start(&script(tmp.path(), "a", body));
         let cancel = Cancel::new();
         let canceller = cancel_when(&tmp.path().join("left.pid"), &cancel);
@@ -536,9 +538,27 @@ mod tests {
     }
 
     #[test]
+    fn a_program_gets_the_grace_period_to_exit_after_sigterm() {
+        let tmp = tempfile::tempdir().unwrap();
+        // It needs a moment after SIGTERM, then records that it got it, then exits.
+        let body = "trap 'sleep 1; echo done > graceful; exit 0' TERM\n\
+                    echo $$ > ready\nsleep 30 &\nwait";
+        let child = start(&script(tmp.path(), "a", body));
+        let cancel = Cancel::new();
+        let canceller = cancel_when(&tmp.path().join("ready"), &cancel);
+        let ended = watch(child, &cancel).unwrap();
+        canceller.join().unwrap();
+        assert!(matches!(ended, Ended::Cancelled));
+        assert!(
+            tmp.path().join("graceful").exists(),
+            "it was not killed before it could end"
+        );
+    }
+
+    #[test]
     fn a_program_that_ignores_sigterm_is_killed_after_the_grace_period() {
         let tmp = tempfile::tempdir().unwrap();
-        let body = "trap '' TERM\necho $$ > ready\nwhile :; do sleep 1; done";
+        let body = "trap '' TERM\necho $$ > ready\nsleep 30";
         let child = start(&script(tmp.path(), "a", body));
         let cancel = Cancel::new();
         let canceller = cancel_when(&tmp.path().join("ready"), &cancel);
@@ -556,7 +576,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // A short-lived process stands in for the app; it ends as if it crashed.
         let mut owner = Command::new("/bin/sleep").arg("1").spawn().unwrap();
-        let command = script(tmp.path(), "a", "sleep 60 &\necho $! > left.pid\nwait");
+        let command = script(tmp.path(), "a", "sleep 30 &\necho $! > left.pid\nwait");
         let mut child = supervised_by(&command, owner.id())
             .stdin(Stdio::null())
             .spawn()
@@ -572,7 +592,7 @@ mod tests {
     fn the_watchdog_kills_what_ignores_sigterm_once_its_owner_is_gone() {
         let tmp = tempfile::tempdir().unwrap();
         let mut owner = Command::new("/bin/sleep").arg("1").spawn().unwrap();
-        let body = "trap '' TERM\necho $$ > ready\nwhile :; do sleep 1; done";
+        let body = "trap '' TERM\necho $$ > ready\nsleep 30";
         let command = script(tmp.path(), "a", body);
         let mut child = supervised_by(&command, owner.id())
             .stdin(Stdio::null())
@@ -670,6 +690,28 @@ mod tests {
         assert!(
             running.join("mac").exists(),
             "a running sweep's folder is not interrupted"
+        );
+    }
+
+    #[test]
+    fn removing_a_folder_already_gone_succeeds_but_one_that_cannot_be_read_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        remove_unfinished(&tmp.path().join("gone"), &[]).unwrap();
+
+        let sweep = tmp.path().join("20261108T110000Z");
+        fs::create_dir_all(sweep.join("mac")).unwrap();
+        // The marker went already (a cancel and a cleanup racing): that is not an error.
+        remove_unfinished(&sweep, &[]).unwrap();
+        assert!(!sweep.exists());
+
+        let locked = tmp.path().join("locked");
+        fs::create_dir_all(locked.join("mac")).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = remove_unfinished(&locked, &[]);
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(unreadable, Err(SweepError::Read { .. })),
+            "{unreadable:?}"
         );
     }
 
