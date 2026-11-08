@@ -927,7 +927,9 @@ fn fetch_osv(
 
 /// NVD CVEs per product, merged by CVE id, and one note for every product NVD does not know.
 /// A CVE is linked only to the components whose installed version it may affect, and left out
-/// when it may affect none of them (see `feeds::cpe`).
+/// when it may affect none of them (see `feeds::cpe`). A CVE in the KEV catalog is linked to
+/// every component of its product: one exploited in the wild is worth the agent's look even
+/// when its CPE matches seem to rule the version out.
 fn fetch_nvd(
     sources: Sources<'_>,
     components: &[Component],
@@ -955,11 +957,18 @@ fn fetch_nvd(
             },
             Ok(advisories) => {
                 for advisory in advisories {
+                    let exploited = sources
+                        .kev
+                        .is_some_and(|kev| advisory.is_known_exploited(kev));
+                    let matches = cpe::Matches::parse(&advisory.record);
                     let affected: Vec<usize> = indexes
                         .iter()
                         .copied()
                         .filter(|&i| {
-                            cpe::may_affect(&advisory.record, product, &components[i].version)
+                            exploited
+                                || matches
+                                    .as_ref()
+                                    .is_none_or(|m| m.may_affect(product, &components[i].version))
                         })
                         .collect();
                     if affected.is_empty() {
@@ -1531,9 +1540,9 @@ mod tests {
     }
 
     /// OSV knows GHSA-1 for lodash and PYSEC-1 for django (whose record spells it `Django`);
-    /// NVD knows three CVEs for curl, CVE-9 for every version, CVE-8 for versions before 7 and
-    /// CVE-7 for versions before 6, and nothing for a made-up product that is also missing from
-    /// the CPE dictionary.
+    /// NVD knows four CVEs for curl, CVE-9 for every version, CVE-8 for versions before 7, and
+    /// CVE-7 and CVE-6 for versions before 6, and nothing for a made-up product that is also
+    /// missing from the CPE dictionary.
     fn feeds_server() -> TestServer {
         TestServer::start(|request: &Request| match request.path() {
             "/v1/querybatch" => {
@@ -1573,6 +1582,7 @@ mod tests {
                         {"cve": {"id": "CVE-9", "published": "2026-01-01T00:00:00.000"}},
                         before("CVE-8", "7.0.0"),
                         before("CVE-7", "6.0.0"),
+                        before("CVE-6", "6.0.0"),
                     ])
                 } else {
                     json!([])
@@ -1625,12 +1635,13 @@ mod tests {
             ..Inventory::default()
         };
         let history = Config::default_for_tests().history;
+        let kev = Kev::from_ids(&["CVE-7"]);
         let mut problems = Vec::new();
         let mut seen = Vec::new();
         let sources = Sources {
             feeds: &feeds,
             history,
-            kev: None,
+            kev: Some(&kev),
         };
         let fetched = fetch(sources, &inventory.components, &mut problems, &mut |p| {
             seen.push(format!("{p:?}"));
@@ -1645,11 +1656,13 @@ mod tests {
             [
                 ("GHSA-1", vec![0, 2]),
                 ("PYSEC-1", vec![4]),
+                ("CVE-7", vec![1, 5]),
                 ("CVE-8", vec![5]),
                 ("CVE-9", vec![1, 5]),
             ],
             "linked by query, so `Django` reaches django; an NVD CVE only to the versions it \
-             may affect, and CVE-7, which affects neither curl, is left out"
+             may affect, so CVE-6, which affects neither curl, is left out, unless it is \
+             exploited in the wild like CVE-7"
         );
         assert_eq!(
             problems,
