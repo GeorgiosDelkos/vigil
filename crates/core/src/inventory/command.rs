@@ -249,10 +249,16 @@ fn wait(
     let deadline = Instant::now() + timeout;
 
     let status = loop {
-        let polled = child.try_wait().map_err(|source| InventoryError::Spawn {
-            command: command.to_owned(),
-            source,
-        })?;
+        let polled = match child.try_wait() {
+            Ok(polled) => polled,
+            Err(e) => {
+                return Err(stop(
+                    &mut child,
+                    command,
+                    format!("cannot wait for it: {e}"),
+                ));
+            }
+        };
         if let Some(status) = polled {
             break status;
         }

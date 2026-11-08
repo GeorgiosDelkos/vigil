@@ -419,11 +419,9 @@ pub fn sweep(
         Ok(()) => Ok(reports),
         Err(SweepError::Cancelled) => {
             let finished: Vec<PathBuf> = reports.iter().map(|r| r.dir.clone()).collect();
-            // The cancel is what the caller asked about. A folder that could not be removed
-            // keeps the marker, and the next sweep or app start removes it.
-            if cancel::remove_unfinished(&dir, &finished).is_err() {
-                running.keep();
-            }
+            // Ignored: the cancel is what the caller asked about. A folder that could not be
+            // removed keeps the marker, and the next sweep or app start removes it.
+            drop(running.remove_unfinished(&finished));
             Err(SweepError::Cancelled)
         }
         Err(e) => Err(e),

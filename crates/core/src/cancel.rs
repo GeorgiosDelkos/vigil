@@ -70,8 +70,8 @@ const ARGV0: &str = "vigil-watchdog";
 /// - `kill 0` signals the watchdog's own process group, where the program runs.
 /// - The program's exit status is the watchdog's (128 plus the signal for one killed by it).
 /// - The owner's pid could be reused by another process within the second between checks; the
-///   watchdog would then wait for that one. Accepted: macOS hands out pids in order, so reuse
-///   that soon needs the whole range to wrap.
+///   watchdog would then wait for that one. Accepted: macOS has been seen to hand out pids in
+///   increasing order (observed, not documented), so reuse that soon needs the range to wrap.
 const WATCHDOG: &str = r#"owner=$1; grace=$2; shift 2
 "$@" <&0 &
 child=$!
@@ -141,7 +141,7 @@ fn supervised_by(command: &Command, owner: u32) -> Command {
     watched
         .args(["-c", WATCHDOG, ARGV0])
         .arg(owner.to_string())
-        .arg(GRACE.as_secs().to_string())
+        .arg(GRACE.as_secs_f64().to_string())
         .arg(command.get_program())
         .args(command.get_args())
         .process_group(0);
@@ -221,8 +221,9 @@ fn stop(child: &mut Child) {
 }
 
 /// Sends `signal` to process group `group` and to each process in `tree`. A pid in `tree` that
-/// exited during the grace period could have been reused by then; accepted, as macOS hands
-/// out pids in order and the period is seconds.
+/// exited during the grace period could have been reused by then; accepted, as macOS has been
+/// seen to hand out pids in increasing order (observed, not documented) and the period is
+/// seconds.
 fn signal(group: u32, tree: &BTreeSet<u32>, signal: &str) {
     signal_group(group, signal);
     if !tree.is_empty() {
@@ -301,14 +302,22 @@ pub(crate) fn mark_running(sweep: &Path) -> Result<Running, SweepError> {
 #[derive(Debug)]
 pub(crate) struct Running {
     marker: PathBuf,
-    /// Set by [`Running::keep`]: the marker stays.
+    /// Set when removing the unfinished targets failed: the marker stays.
     kept: bool,
 }
 
 impl Running {
-    /// Leaves the marker in place, so the next cleanup finishes what this sweep could not.
-    pub(crate) fn keep(mut self) {
-        self.kept = true;
+    /// Removes the sweep's unfinished target folders (see [`remove_unfinished`]), for a sweep
+    /// that was cancelled. On an error the marker stays, so the next cleanup finishes the job.
+    pub(crate) fn remove_unfinished(mut self, finished: &[PathBuf]) -> Result<(), SweepError> {
+        let sweep = self
+            .marker
+            .parent()
+            .expect("the marker is created inside its sweep folder")
+            .to_owned();
+        let removed = remove_unfinished(&sweep, finished);
+        self.kept = removed.is_err();
+        removed
     }
 }
 
@@ -354,7 +363,7 @@ pub(crate) fn clean_up_holding_lock(data_dir: &DataDir) -> Result<(), SweepError
 /// Removes a sweep's unfinished target folders, its marker, and the folder when nothing is left
 /// in it: what a cancelled or interrupted sweep leaves. A target is finished when it is in
 /// `finished` (the sweep reported it), or has a report: `report.json`, or `report.md`, which
-/// is written just before it. On an error the marker stays, so the next cleanup tries again.
+/// is written just before it. On an error it stops, and the marker is still there.
 pub(crate) fn remove_unfinished(sweep: &Path, finished: &[PathBuf]) -> Result<(), SweepError> {
     for target in subdirs(sweep)? {
         let reported = ["report.json", "report.md"]
@@ -624,17 +633,27 @@ mod tests {
         fs::create_dir_all(sweep.join("mac")).unwrap();
         fs::create_dir_all(sweep.join("github-o--r/bundle")).unwrap();
         let running = mark_running(&sweep).unwrap();
-        remove_unfinished(&sweep, &[sweep.join("mac")]).unwrap();
-        drop(running);
+        running.remove_unfinished(&[sweep.join("mac")]).unwrap();
         assert!(sweep.join("mac").exists());
         assert!(!sweep.join("github-o--r").exists());
     }
 
     #[test]
-    fn a_kept_marker_stays() {
+    fn a_cancel_whose_cleanup_fails_leaves_the_marker_for_the_next() {
         let tmp = tempfile::tempdir().unwrap();
-        mark_running(tmp.path()).unwrap().keep();
-        assert!(tmp.path().join(RUNNING).exists());
+        let sweep = tmp.path().join("20261108T110000Z");
+        let target = sweep.join("github-o--r");
+        fs::create_dir_all(target.join("bundle")).unwrap();
+        let running = mark_running(&sweep).unwrap();
+        // A folder whose entries cannot be removed.
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o555)).unwrap();
+        let failed = running.remove_unfinished(&[]);
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(failed.is_err());
+        assert!(
+            sweep.join(RUNNING).exists(),
+            "the next cleanup still sees it"
+        );
     }
 
     #[test]
