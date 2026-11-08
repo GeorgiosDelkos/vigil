@@ -219,7 +219,7 @@ const MAX_MARKED_TARGETS: usize = 12;
 )]
 fn overview(runner: State<'_, Runner>) -> Overview {
     let status = runner.status();
-    let busy = matches!(status, Status::Sweeping { .. } | Status::Fixing { .. });
+    let busy = status.is_busy();
     let config_path = runner.data_dir().config_file();
     let (config, problem) = match Config::load_or_default(&config_path, runner.home()) {
         Ok(config) => (Some(config), None),

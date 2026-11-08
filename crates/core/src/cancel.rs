@@ -42,9 +42,9 @@ use crate::paths::DataDir;
 use crate::sweep::Lock;
 use crate::sweep::SweepError;
 
-/// How long a stopped program gets to exit after `SIGTERM` before `SIGKILL`. Arbitrary: long
-/// enough for a CLI to flush its log and close its connection, short enough that quitting the
-/// app does not hang. The watchdog script below waits the same 3 s.
+/// How long a stopped program gets to exit after `SIGTERM` before `SIGKILL`, here and in the
+/// watchdog. Arbitrary: long enough for a CLI to flush its log and close its connection, short
+/// enough that quitting the app does not hang.
 pub(crate) const GRACE: Duration = Duration::from_secs(3);
 
 /// How often a running agent is checked for having exited or been cancelled. Arbitrary: a
@@ -54,27 +54,35 @@ const POLL: Duration = Duration::from_millis(200);
 /// The name of the marker a running sweep keeps in its folder.
 const RUNNING: &str = ".running";
 
-/// The watchdog, run as `sh -c WATCHDOG vigil-watchdog <owner pid> <program> <args>...`.
+/// The watchdog's name, its `$0`: the shell starts what it reports with it.
+const ARGV0: &str = "vigil-watchdog";
+
+/// The watchdog, run as `sh -c WATCHDOG vigil-watchdog <owner pid> <grace s> <program> <args>`.
 ///
 /// - The program gets this shell's stdin explicitly: `sh` gives a background command
 ///   `/dev/null` otherwise, and an inventory command may be fed its input on stdin.
 /// - The guard loop runs in the background with its output closed, so it never holds the
-///   caller's pipes open; it is killed once the program exits.
-/// - `trap '' TERM INT HUP` comes after both are started, so they keep the default handling
-///   (an ignored signal would be inherited), while the watchdog itself outlives a cancel's
-///   `SIGTERM` and keeps waiting until the program has exited.
+///   caller's pipes open. It ignores `SIGTERM`, since the `SIGTERM` it sends to the group
+///   reaches it too and it must live on to send `SIGKILL`; it is killed once the program exits.
+/// - `trap '' TERM INT HUP` comes after the program is started, so the program keeps the default
+///   handling (an ignored signal would be inherited), while the watchdog itself outlives a
+///   cancel's `SIGTERM` and keeps waiting until the program has exited.
 /// - `kill 0` signals the watchdog's own process group, where the program runs.
 /// - The program's exit status is the watchdog's (128 plus the signal for one killed by it).
-const WATCHDOG: &str = r#"owner=$1; shift
+/// - The owner's pid could be reused by another process within the second between checks; the
+///   watchdog would then wait for that one. Accepted: macOS hands out pids in order, so reuse
+///   that soon needs the whole range to wrap.
+const WATCHDOG: &str = r#"owner=$1; grace=$2; shift 2
 "$@" <&0 &
 child=$!
-( while kill -0 "$owner" 2>/dev/null; do sleep 1; done
-  kill -s TERM 0; sleep 3; kill -s KILL 0 ) </dev/null >/dev/null 2>&1 &
+( trap '' TERM
+  while kill -0 "$owner" 2>/dev/null; do sleep 1; done
+  kill -s TERM 0; sleep "$grace"; kill -s KILL 0 ) </dev/null >/dev/null 2>&1 &
 guard=$!
 trap '' TERM INT HUP
 wait "$child"
 status=$?
-kill "$guard" 2>/dev/null
+kill -s KILL "$guard" 2>/dev/null
 exit "$status"
 "#;
 
@@ -131,8 +139,9 @@ pub(crate) fn supervised(command: &Command) -> Command {
 fn supervised_by(command: &Command, owner: u32) -> Command {
     let mut watched = Command::new("/bin/sh");
     watched
-        .args(["-c", WATCHDOG, "vigil-watchdog"])
+        .args(["-c", WATCHDOG, ARGV0])
         .arg(owner.to_string())
+        .arg(GRACE.as_secs().to_string())
         .arg(command.get_program())
         .args(command.get_args())
         .process_group(0);
@@ -148,16 +157,35 @@ fn supervised_by(command: &Command, owner: u32) -> Command {
     watched
 }
 
+/// Why the watchdog could not run its program (a removed interpreter, no permission), from its
+/// exit status and the start of its stderr, where a spawn of the program itself would have
+/// failed; `None` when the program ran.
+pub(crate) fn not_run(status: ExitStatus, stderr: &[u8]) -> Option<String> {
+    let prefix = format!("{ARGV0}: ");
+    if !matches!(status.code(), Some(126 | 127)) || !stderr.starts_with(prefix.as_bytes()) {
+        return None;
+    }
+    let text = String::from_utf8_lossy(stderr);
+    Some(text.lines().next().unwrap_or_default().to_owned())
+}
+
 /// Waits for `child`, started from [`supervised`], and stops it with its group and every
 /// descendant when `cancel` is set. Whatever it leaves in its group is killed once it exits.
 ///
 /// # Errors
 ///
-/// Fails when waiting for it fails.
+/// Fails when waiting for it fails, after stopping it.
 pub(crate) fn watch(mut child: Child, cancel: &Cancel) -> io::Result<Ended> {
     let group = child.id();
     let ended = loop {
-        if let Some(status) = child.try_wait()? {
+        let polled = match child.try_wait() {
+            Ok(polled) => polled,
+            Err(e) => {
+                stop(&mut child);
+                return Err(e);
+            }
+        };
+        if let Some(status) = polled {
             break Ended::Exited(status);
         }
         if cancel.is_cancelled() {
@@ -179,10 +207,12 @@ pub(crate) fn watch(mut child: Child, cancel: &Cancel) -> io::Result<Ended> {
 fn stop(child: &mut Child) {
     let group = child.id();
     // Taken first: once the leader exits its children are re-parented and cannot be found.
-    let tree = descendants(group);
+    let mut tree = descendants(group);
     signal(group, &tree, "TERM");
     let deadline = Instant::now() + GRACE;
     while Instant::now() < deadline && matches!(child.try_wait(), Ok(None)) {
+        // Taken again while the leader lives: a child started since may have left the group.
+        tree.extend(descendants(group));
         thread::sleep(POLL);
     }
     signal(group, &tree, "KILL");
@@ -251,7 +281,8 @@ fn descendants(root: u32) -> BTreeSet<u32> {
 
 /// Marks `sweep` as running; the marker goes when the returned guard is dropped, which a sweep
 /// that ends (by returning or panicking) always does, and one whose process is killed never
-/// does.
+/// does. A process killed between creating the folder and marking it leaves an empty, unmarked
+/// folder; accepted, as the window is one file write.
 pub(crate) fn mark_running(sweep: &Path) -> Result<Running, SweepError> {
     let marker = sweep.join(RUNNING);
     fs::write(&marker, "").map_err(|source| SweepError::Write {
@@ -501,6 +532,31 @@ mod tests {
         let status = child.wait().unwrap();
         assert!(!status.success(), "{status:?}");
         assert!(gone(left));
+    }
+
+    #[test]
+    fn the_watchdog_kills_what_ignores_sigterm_once_its_owner_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut owner = Command::new("/bin/sleep").arg("1").spawn().unwrap();
+        let body = "trap '' TERM\necho $$ > ready\nwhile :; do sleep 1; done";
+        let command = script(tmp.path(), "a", body);
+        let mut child = supervised_by(&command, owner.id())
+            .stdin(Stdio::null())
+            .spawn()
+            .unwrap();
+        let program = pid_in(&tmp.path().join("ready"));
+        owner.wait().unwrap();
+        let ended = gone(program);
+        if !ended {
+            // Without this, the test run would hang on the program it failed to stop.
+            drop(
+                Command::new("/bin/kill")
+                    .args(["-9", "--", &format!("-{}", child.id())])
+                    .status(),
+            );
+        }
+        drop(child.wait());
+        assert!(ended, "SIGKILL follows the grace period");
     }
 
     #[test]

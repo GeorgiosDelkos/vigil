@@ -95,23 +95,6 @@ enum Quit {
     Ready,
 }
 
-impl Status {
-    /// Whether a sweep or a fix runs.
-    fn is_busy(&self) -> bool {
-        matches!(self, Self::Sweeping { .. } | Self::Fixing { .. })
-    }
-}
-
-/// Whether an exit request must wait for [`quit`]: while it waits, and when something runs
-/// that it has not been asked to stop.
-fn must_wait(quit: Quit, status: &Status) -> bool {
-    match quit {
-        Quit::No => status.is_busy(),
-        Quit::Waiting => true,
-        Quit::Ready => false,
-    }
-}
-
 /// What the sweep is doing, as the popover and the tray icon show it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -150,6 +133,23 @@ pub(crate) enum Status {
         /// Why, one line.
         error: String,
     },
+}
+
+impl Status {
+    /// Whether a sweep or a fix runs.
+    pub(crate) fn is_busy(&self) -> bool {
+        matches!(self, Self::Sweeping { .. } | Self::Fixing { .. })
+    }
+}
+
+/// Whether an exit request must wait for [`quit`]: while it waits, and when something runs
+/// that it has not been asked to stop.
+fn must_wait(quit: Quit, status: &Status) -> bool {
+    match quit {
+        Quit::No => status.is_busy(),
+        Quit::Waiting => true,
+        Quit::Ready => false,
+    }
 }
 
 impl Runner {
@@ -491,10 +491,7 @@ pub(crate) fn schedule(app: AppHandle) {
                     // Under one lock, so a running sweep's status is never overwritten. The
                     // failure shows until the next sweep sets the status again.
                     let mut shared = runner.lock();
-                    if !matches!(
-                        shared.status,
-                        Status::Sweeping { .. } | Status::Fixing { .. }
-                    ) {
+                    if !shared.status.is_busy() {
                         shared.status = Status::Failed {
                             error: format!("cannot check the schedule: {e}"),
                         };

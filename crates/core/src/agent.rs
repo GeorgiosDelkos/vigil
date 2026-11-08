@@ -290,21 +290,16 @@ impl AgentKind {
                 source,
             })?;
         match cancel::watch(child, cancel) {
-            // The watchdog's shell reports an agent it could not run (a removed interpreter)
-            // with 126 or 127 and its own name first in the log, where a spawn would have
-            // failed.
-            Ok(Ended::Exited(status))
-                if matches!(status.code(), Some(126 | 127))
-                    && fs::read_to_string(log).is_ok_and(|t| t.starts_with("vigil-watchdog: ")) =>
-            {
-                let reason = fs::read_to_string(log).unwrap_or_default();
-                let reason = reason.lines().next().unwrap_or_default().to_owned();
-                Err(AgentError::Start {
-                    agent: self,
-                    source: io::Error::other(reason),
-                })
+            Ok(Ended::Exited(status)) => {
+                let head = fs::read(log).unwrap_or_default();
+                match cancel::not_run(status, &head) {
+                    Some(reason) => Err(AgentError::Start {
+                        agent: self,
+                        source: io::Error::other(reason),
+                    }),
+                    None => Ok(status),
+                }
             }
-            Ok(Ended::Exited(status)) => Ok(status),
             Ok(Ended::Cancelled) => Err(AgentError::Cancelled { agent: self }),
             Err(source) => Err(AgentError::Watch {
                 agent: self,
@@ -399,7 +394,7 @@ pub enum AgentError {
         #[source]
         source: io::Error,
     },
-    /// The running agent could not be recorded or waited for; it was stopped.
+    /// Waiting for the running agent failed; it was stopped.
     #[error("cannot follow {agent} while it runs")]
     Watch {
         /// The agent.

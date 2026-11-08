@@ -417,7 +417,9 @@ pub fn sweep(
     };
     let reports = each_target();
     if matches!(reports, Err(SweepError::Cancelled)) {
-        cancel::remove_unfinished(&dir)?;
+        // Best effort: the cancel is what the caller asked about; a folder left behind is
+        // removed by the next sweep, as one an interrupted sweep leaves.
+        drop(cancel::remove_unfinished(&dir));
     }
     reports
 }

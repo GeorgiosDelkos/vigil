@@ -194,14 +194,7 @@ fn run_raw(
         thread::spawn(move || drop(stdin.write_all(&input)));
     }
     let (status, stdout, stderr) = wait(child, &command, timeout)?;
-    // The watchdog's shell reports a program it could not run (a removed interpreter) with
-    // 126 or 127 and its own name first, where a spawn would have failed.
-    if matches!(status.code(), Some(126 | 127)) && stderr.starts_with(b"vigil-watchdog: ") {
-        let reason = String::from_utf8_lossy(&stderr)
-            .lines()
-            .next()
-            .unwrap_or("")
-            .to_owned();
+    if let Some(reason) = cancel::not_run(status, &stderr) {
         let source = io::Error::other(reason);
         return Err(InventoryError::Spawn { command, source });
     }
