@@ -387,7 +387,8 @@ not an OSV ecosystem, so formulae go through NVD.
   (service `io.github.georgiosdelkos.vigil`, account `nvd-api-key`). A CVE reaches the bundle
   only for the installed versions its CPE matches may cover (`feeds::cpe`, which lists the
   rules); whatever it cannot tell is kept, a CVE that names the product only as not vulnerable
-  (the platform another product runs on) is dropped, and a CVE in KEV is always kept.
+  (the platform another product runs on) is dropped, and a CVE in KEV is always kept; when
+  the KEV catalog cannot be read, no CVE is filtered.
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
 - `history.since` drops advisories both published and last modified before that date (NVD keeps

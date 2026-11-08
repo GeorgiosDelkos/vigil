@@ -929,7 +929,8 @@ fn fetch_osv(
 /// A CVE is linked only to the components whose installed version it may affect, and left out
 /// when it may affect none of them (see `feeds::cpe`). A CVE in the KEV catalog is linked to
 /// every component of its product: one exploited in the wild is worth the agent's look even
-/// when its CPE matches seem to rule the version out.
+/// when its CPE matches seem to rule the version out. When the catalog could not be read,
+/// any CVE may be in it, so none is filtered.
 fn fetch_nvd(
     sources: Sources<'_>,
     components: &[Component],
@@ -959,16 +960,13 @@ fn fetch_nvd(
                 for advisory in advisories {
                     let exploited = sources
                         .kev
-                        .is_some_and(|kev| advisory.is_known_exploited(kev));
+                        .is_none_or(|kev| advisory.is_known_exploited(kev));
                     let matches = cpe::Matches::parse(&advisory.record);
                     let affected: Vec<usize> = indexes
                         .iter()
                         .copied()
                         .filter(|&i| {
-                            exploited
-                                || matches
-                                    .as_ref()
-                                    .is_none_or(|m| m.may_affect(product, &components[i].version))
+                            exploited || matches.may_affect(product, &components[i].version)
                         })
                         .collect();
                     if affected.is_empty() {
@@ -1670,6 +1668,12 @@ mod tests {
         );
         assert!(seen[0].contains("packages: 2, products: 2"), "{seen:?}");
         assert!(seen[1].contains("done: 1, total: 2"), "{seen:?}");
+
+        // Without the KEV catalog any CVE may be exploited, so none is left out.
+        let unknown = Sources { kev: None, ..sources };
+        let fetched = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
+        let ids: Vec<&str> = fetched.iter().map(|(a, _)| a.id.as_str()).collect();
+        assert!(ids.contains(&"CVE-6"), "{ids:?}");
     }
 
     #[test]

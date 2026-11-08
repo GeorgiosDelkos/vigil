@@ -8,14 +8,16 @@
 //! only drops the CVEs that cannot be, and keeps a CVE whenever it cannot tell:
 //!
 //! - a CVE is kept when any match that marks the product vulnerable could cover the version;
-//! - a range covers a version unless the version compares cleanly outside a bound. `1.0.2`
-//!   against `1.0.2k`, `r3222` against `0.164` and `1.2.3-1` against `1.2.3` do not compare
-//!   cleanly (a patch or a pre-release, a different scheme);
+//! - a range covers a version unless one of its bounds puts the version cleanly outside.
+//!   `1.0.2` against `1.0.2k`, `r3222` against `0.164` and `1.2.3-1` against `1.2.3` do not
+//!   compare cleanly (a patch or a pre-release, a different scheme), so such a bound does not;
 //! - a match that names one version (`openssl:1.1.1:w`, the release `1.1.1w`) covers that
 //!   version, any update of it when the update is `*` (`macos:15:*` covers `15.1`), and an
 //!   installed version that cannot be read as one (a cask's `1.2,345` or `latest`). It does
 //!   not cover another version (`1.1.1` is not `1.1.1w`), or anything when it names a
-//!   snapshot without digits (`ffmpeg:cvs`);
+//!   snapshot without digits (`ffmpeg:cvs`). An installed version is taken as written: macOS's
+//!   `10.15.7` is not `10.15.7` with `security_update_2020-001`, although `sw_vers` cannot show
+//!   that update; a CVE needing one names an old release anyway;
 //! - a match in a negated node, a record that does not parse, and a record whose matches never
 //!   name the product all keep the CVE.
 //!
@@ -24,8 +26,8 @@
 //! name only when it is in the inventory (macOS, Homebrew, toolchains, lockfiles), so a CVE
 //! for an app installed some other way (Zoom from its own installer) no longer reaches the
 //! agent through macOS. The user chose this (2026-11-08): those platform matches were 4031 of
-//! the 10304 advisories, nearly all for software not installed. CVEs in CISA's KEV catalog
-//! skip this filter (`sweep::fetch_nvd`).
+//! the 10304 advisories, nearly all for software not installed. CVEs in CISA's KEV catalog,
+//! and every CVE when the catalog could not be read, skip this filter (`sweep::fetch_nvd`).
 //!
 //! Matches inside an AND configuration are judged one by one, so a CVE that needs a
 //! vulnerable product on a particular platform is kept whatever the platform. The agent reads
@@ -42,25 +44,27 @@ use crate::feeds::Product;
 /// The CPE matches of one NVD CVE record, read once and tested against each installed version.
 #[derive(Debug)]
 pub(crate) struct Matches {
-    nodes: Vec<Node>,
+    /// The configuration nodes, or `None` when the record did not parse: then the CVE may
+    /// affect every version.
+    nodes: Option<Vec<Node>>,
 }
 
 impl Matches {
-    /// Reads the matches, or returns `None` when the record does not parse; such a CVE is kept.
-    pub(crate) fn parse(record: &RawValue) -> Option<Self> {
-        let record: Record = serde_json::from_str(record.get()).ok()?;
-        let nodes = record
-            .configurations
-            .into_iter()
-            .flat_map(|c| c.nodes)
-            .collect();
-        Some(Self { nodes })
+    /// Reads the matches.
+    pub(crate) fn parse(record: &RawValue) -> Self {
+        let nodes = serde_json::from_str::<Record>(record.get())
+            .ok()
+            .map(|r| r.configurations.into_iter().flat_map(|c| c.nodes).collect());
+        Self { nodes }
     }
 
     /// Returns whether the CVE may affect `product` installed at `version`.
     pub(crate) fn may_affect(&self, product: &Product, version: &str) -> bool {
+        let Some(nodes) = &self.nodes else {
+            return true;
+        };
         let mut named = false;
-        for node in &self.nodes {
+        for node in nodes {
             for cpe in &node.cpe_match {
                 let Some(name) = Cpe::parse(&cpe.criteria) else {
                     // A name that cannot be read could be the product.
@@ -136,20 +140,22 @@ impl CpeMatch {
         if !any_update && update != "-" {
             return None;
         }
-        let mut covered = true;
-        if let Some(bound) = &self.version_start_including {
-            covered &= compare(installed, bound)?.is_ge();
+        // Whether each bound given puts `installed` outside, or `None` where it does not
+        // compare. One bound that excludes it is enough, whatever the others say.
+        let bound = |bound: &Option<String>, outside: fn(Ordering) -> bool| {
+            bound.as_deref().map(|b| compare(installed, b).map(outside))
+        };
+        let outside = [
+            bound(&self.version_start_including, Ordering::is_lt),
+            bound(&self.version_start_excluding, Ordering::is_le),
+            bound(&self.version_end_including, Ordering::is_gt),
+            bound(&self.version_end_excluding, Ordering::is_ge),
+        ];
+        let mut given = outside.iter().flatten();
+        if given.clone().any(|o| *o == Some(true)) {
+            return Some(false);
         }
-        if let Some(bound) = &self.version_start_excluding {
-            covered &= compare(installed, bound)?.is_gt();
-        }
-        if let Some(bound) = &self.version_end_including {
-            covered &= compare(installed, bound)?.is_le();
-        }
-        if let Some(bound) = &self.version_end_excluding {
-            covered &= compare(installed, bound)?.is_lt();
-        }
-        Some(covered)
+        given.all(Option::is_some).then_some(true)
     }
 }
 
@@ -183,13 +189,19 @@ fn same_version(named: &str, installed: &str) -> Option<bool> {
         return None;
     }
     let zero = |r: &Run| r.digits && r.text.trim_start_matches('0').is_empty();
-    let same =
-        (0..named.len().max(installed.len())).all(|i| match (named.get(i), installed.get(i)) {
-            (Some(a), Some(b)) => a.same_as(b),
+    for i in 0..named.len().max(installed.len()) {
+        let same = match (named.get(i), installed.get(i)) {
+            // Digits against letters at the same place (`1.8.0update401` against `1.8.0_401`)
+            // are two ways of writing that cannot be told apart.
+            (Some(a), Some(b)) => a.compare(b)? == Ordering::Equal,
             (Some(r), None) | (None, Some(r)) => zero(r),
-            (None, None) => true,
-        });
-    Some(same)
+            (None, None) => unreachable!("i is below the longer length"),
+        };
+        if !same {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 /// Whether the runs of `short` begin the runs of `long`: `15` begins `15.1`, `1.1.1` begins
@@ -360,7 +372,7 @@ mod tests {
     fn nodes(nodes: &Value) -> Matches {
         let record = json!({"id": "CVE-1", "configurations": [{"nodes": nodes}]});
         let raw = RawValue::from_string(record.to_string()).unwrap();
-        Matches::parse(&raw).expect("the test record parses")
+        Matches::parse(&raw)
     }
 
     fn record(matches: &[Value]) -> Matches {
@@ -442,6 +454,21 @@ mod tests {
         assert!(!affects("1.0"));
         assert!(!affects("1.1.1"));
 
+        let mixed = record(&[json!({
+            "vulnerable": true,
+            "criteria": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*",
+            "versionStartIncluding": "1.0.2k",
+            "versionEndExcluding": "3.0.0",
+        })]);
+        assert!(
+            !mixed.may_affect(&product("openssl"), "3.6.4"),
+            "one bound rules it out, though the other does not compare"
+        );
+        assert!(
+            mixed.may_affect(&product("openssl"), "1.0.2"),
+            "unclear either way"
+        );
+
         let every_beta = record(&[vulnerable("cpe:2.3:a:openssl:openssl:*:beta:*:*:*:*:*:*")]);
         assert!(every_beta.may_affect(&product("openssl"), "9.9"));
     }
@@ -501,6 +528,11 @@ mod tests {
         assert!(!release(w, "openssl", "1.1.1v"));
         let rc1 = "cpe:2.3:a:python:python:3.13.0:rc1:*:*:*:*:*:*";
         assert!(release(rc1, "python", "3.13.0rc1"));
+        let jdk = "cpe:2.3:a:oracle:jdk:1.8.0:update_401:*:*:*:*:*:*";
+        assert!(
+            release(jdk, "jdk", "1.8.0_401"),
+            "another way of writing it"
+        );
         let p1 = "cpe:2.3:a:openbsd:openssh:9.8:p1:*:*:*:*:*:*";
         assert!(release(p1, "openssh", "9.8p1"));
         let any = "cpe:2.3:a:openssl:openssl:1.1.1:*:*:*:*:*:*:*";
@@ -576,19 +608,19 @@ mod tests {
     #[test]
     fn unreadable_records_and_names_are_kept() {
         let broken = RawValue::from_string("[1, 2]".to_owned()).unwrap();
-        assert!(Matches::parse(&broken).is_none());
+        assert!(Matches::parse(&broken).may_affect(&product("openssl"), "3.6.4"));
 
         let no_flag = json!({"id": "CVE-1", "configurations": [{"nodes": [{"cpeMatch": [
             {"criteria": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*", "versionEndExcluding": "1.0"}
         ]}]}]});
         let no_flag = RawValue::from_string(no_flag.to_string()).unwrap();
         assert!(
-            Matches::parse(&no_flag).is_none(),
-            "`vulnerable` is required"
+            Matches::parse(&no_flag).may_affect(&product("openssl"), "3.6.4"),
+            "`vulnerable` is required, so the record does not parse"
         );
 
         let empty = RawValue::from_string(r#"{"id": "CVE-1"}"#.to_owned()).unwrap();
-        let empty = Matches::parse(&empty).unwrap();
+        let empty = Matches::parse(&empty);
         assert!(empty.may_affect(&product("openssl"), "3.6.4"));
 
         let truncated = record(&[vulnerable("cpe:2.3:a:openssl")]);
