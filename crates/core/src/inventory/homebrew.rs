@@ -16,11 +16,13 @@ use crate::inventory::Lookup;
 
 /// Formula names whose NVD product differs, as (name without `@version`, NVD product). Each
 /// product was checked against NVD's CPE dictionary on 2026-11-05 (`/rest/json/cpes/2.0`
-/// with `cpeMatchString`). A vendor is named where other vendors use the same product name
-/// (`cli`, `kerberos_5`, `http_server`, `network_security_services`).
+/// with `cpeMatchString`; `git-scm:git` on 2026-11-08). A vendor is named where other vendors
+/// use the same product name (`cli`, `git`, `kerberos_5`, `http_server`,
+/// `network_security_services`): Jenkins' git plugin is `jenkins:git`.
 const FORMULA_ALIASES: &[(&str, &str)] = &[
     ("expat", "libexpat"),
     ("gh", "github:cli"),
+    ("git", "git-scm:git"),
     ("httpd", "apache:http_server"),
     ("icu4c", "international_components_for_unicode"),
     ("jpeg-turbo", "libjpeg-turbo"),
@@ -230,6 +232,7 @@ mod tests {
         let name = |s: &str| product(s, FORMULA_ALIASES).map(|p| p.to_string());
         assert_eq!(name("python@3.13").as_deref(), Some("python"));
         assert_eq!(name("gh").as_deref(), Some("github:cli"));
+        assert_eq!(name("git").as_deref(), Some("git-scm:git"));
         assert_eq!(
             name("icu4c@78").as_deref(),
             Some("international_components_for_unicode")

@@ -42,6 +42,7 @@ use crate::feeds::NvdAccess;
 use crate::feeds::OsvAdvisory;
 use crate::feeds::OsvQuery;
 use crate::feeds::Product;
+use crate::feeds::cpe;
 use crate::findings;
 use crate::findings::Finding;
 use crate::findings::Fix;
@@ -865,7 +866,9 @@ fn fetch(
     });
 
     let mut fetched = fetch_osv(sources, &packages, problems);
-    fetched.extend(fetch_nvd(sources, &products, problems, progress));
+    fetched.extend(fetch_nvd(
+        sources, components, &products, problems, progress,
+    ));
     fetched
 }
 
@@ -923,8 +926,11 @@ fn fetch_osv(
 }
 
 /// NVD CVEs per product, merged by CVE id, and one note for every product NVD does not know.
+/// A CVE is linked only to the components whose installed version it may affect, and left out
+/// when it may affect none of them (see `feeds::cpe`).
 fn fetch_nvd(
     sources: Sources<'_>,
+    components: &[Component],
     products: &BTreeMap<String, (Product, Vec<usize>)>,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
@@ -949,10 +955,20 @@ fn fetch_nvd(
             },
             Ok(advisories) => {
                 for advisory in advisories {
+                    let affected: Vec<usize> = indexes
+                        .iter()
+                        .copied()
+                        .filter(|&i| {
+                            cpe::may_affect(&advisory.record, product, &components[i].version)
+                        })
+                        .collect();
+                    if affected.is_empty() {
+                        continue;
+                    }
                     let entry = found
                         .entry(advisory.id.clone())
                         .or_insert_with(|| (advisory, BTreeSet::new()));
-                    entry.1.extend(indexes);
+                    entry.1.extend(affected);
                 }
             }
             Err(e) => problems.push(format!("NVD product {name}: {}", error_chain(&e))),
@@ -1515,8 +1531,9 @@ mod tests {
     }
 
     /// OSV knows GHSA-1 for lodash and PYSEC-1 for django (whose record spells it `Django`);
-    /// NVD knows CVE-9 for curl and nothing for a made-up product that is also missing from the
-    /// CPE dictionary.
+    /// NVD knows three CVEs for curl, CVE-9 for every version, CVE-8 for versions before 7 and
+    /// CVE-7 for versions before 6, and nothing for a made-up product that is also missing from
+    /// the CPE dictionary.
     fn feeds_server() -> TestServer {
         TestServer::start(|request: &Request| match request.path() {
             "/v1/querybatch" => {
@@ -1540,8 +1557,23 @@ mod tests {
             "/rest/json/cves/2.0" => {
                 let curl =
                     request.query("virtualMatchString").as_deref() == Some("cpe:2.3:*:*:curl");
+                let before = |id: &str, version: &str| {
+                    json!({"cve": {
+                        "id": id,
+                        "published": "2026-01-01T00:00:00.000",
+                        "configurations": [{"nodes": [{"cpeMatch": [{
+                            "vulnerable": true,
+                            "criteria": "cpe:2.3:a:haxx:curl:*:*:*:*:*:*:*:*",
+                            "versionEndExcluding": version,
+                        }]}]}],
+                    }})
+                };
                 let cves = if curl {
-                    json!([{"cve": {"id": "CVE-9", "published": "2026-01-01T00:00:00.000"}}])
+                    json!([
+                        {"cve": {"id": "CVE-9", "published": "2026-01-01T00:00:00.000"}},
+                        before("CVE-8", "7.0.0"),
+                        before("CVE-7", "6.0.0"),
+                    ])
                 } else {
                     json!([])
                 };
@@ -1588,6 +1620,7 @@ mod tests {
                 component("npm:lodash", "4.17.21"),
                 component("made-up-product", "1"),
                 component("pypi:django", "4.2"),
+                component("curl", "6.5.0"),
             ],
             ..Inventory::default()
         };
@@ -1612,9 +1645,11 @@ mod tests {
             [
                 ("GHSA-1", vec![0, 2]),
                 ("PYSEC-1", vec![4]),
-                ("CVE-9", vec![1])
+                ("CVE-8", vec![5]),
+                ("CVE-9", vec![1, 5]),
             ],
-            "linked by query, so `Django` reaches django"
+            "linked by query, so `Django` reaches django; an NVD CVE only to the versions it \
+             may affect, and CVE-7, which affects neither curl, is left out"
         );
         assert_eq!(
             problems,
