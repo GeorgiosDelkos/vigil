@@ -120,6 +120,8 @@ enum StatusView {
         percent: usize,
         /// Where the current target's share of the bar ends, from 0 to 100.
         target_end: usize,
+        /// Where the bar marks the boundaries between targets, from 0 to 100.
+        ticks: Vec<f64>,
         /// Whether the current step has no known length, so the bar moves instead of filling.
         open_ended: bool,
         started: Timestamp,
@@ -152,17 +154,16 @@ impl StatusView {
             } => {
                 let position = done.len() + usize::from(current.is_some());
                 let total = position + pending.len();
-                let finished = position.saturating_sub(1) * 1000 + thousandths;
+                // Thousandths of the whole sweep: the targets before this one, then this one's
+                // share. `thousandths` stays under 1000, so before the first target it is 0.
+                let finished = (position * 1000 + thousandths).saturating_sub(1000);
                 Self::Sweeping {
                     step,
                     total,
                     position,
-                    percent: if position == 0 {
-                        0
-                    } else {
-                        finished * 100 / (total * 1000)
-                    },
+                    percent: finished * 100 / (total.max(1) * 1000),
                     target_end: position * 100 / total.max(1),
+                    ticks: ticks(total),
                     open_ended,
                     step_started,
                     current: current.map(|t| target_label(&t).to_owned()),
@@ -176,6 +177,22 @@ impl StatusView {
         }
     }
 }
+
+/// The boundaries between `total` targets, as percentages of the bar, or none past
+/// [`MAX_MARKED_TARGETS`] targets, where they would crowd the bar.
+fn ticks(total: usize) -> Vec<f64> {
+    if total > MAX_MARKED_TARGETS {
+        return Vec::new();
+    }
+    let total = u32::try_from(total).expect("at most MAX_MARKED_TARGETS");
+    (1..total)
+        .map(|i| f64::from(i * 100) / f64::from(total))
+        .collect()
+}
+
+/// How many targets the bar still marks apart. Arbitrary: in a 320 px bar, twelve leave
+/// about 25 px between marks.
+const MAX_MARKED_TARGETS: usize = 12;
 
 // Async: Tauri runs it off the main thread, so reading every report never stalls the UI.
 #[tauri::command(async)]
@@ -381,6 +398,30 @@ mod tests {
             (0, 2, 0),
             "before the first target"
         );
+        let StatusView::Sweeping {
+            percent,
+            target_end,
+            ticks,
+            ..
+        } = StatusView::of(sweeping(Some("mac"), &[], &[]))
+        else {
+            panic!("still sweeping");
+        };
+        assert_eq!(
+            (percent, target_end),
+            (50, 100),
+            "the agent of the only target"
+        );
+        assert_eq!(ticks, Vec::<f64>::new());
         assert!(matches!(StatusView::of(Status::Idle), StatusView::Idle));
+    }
+
+    #[test]
+    fn the_bar_marks_target_boundaries_until_they_would_crowd_it() {
+        assert_eq!(ticks(1), Vec::<f64>::new());
+        assert_eq!(ticks(2), [50.0]);
+        assert_eq!(ticks(4), [25.0, 50.0, 75.0]);
+        assert_eq!(ticks(MAX_MARKED_TARGETS).len(), MAX_MARKED_TARGETS - 1);
+        assert_eq!(ticks(MAX_MARKED_TARGETS + 1), Vec::<f64>::new());
     }
 }

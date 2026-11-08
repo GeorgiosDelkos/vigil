@@ -124,8 +124,9 @@ describe("the popover", () => {
         pending: ["web"],
         position: 2,
         total: 3,
-        percent: 41,
+        percent: 50,
         target_end: 66,
+        ticks: [33.3, 66.6],
         open_ended: true,
         started: new Date().toISOString(),
         step_started: new Date(Date.now() - 3 * 60_000).toISOString(),
@@ -136,17 +137,45 @@ describe("the popover", () => {
     expect(await screen.findByText("Sweeping me/app")).toBeTruthy();
     expect(screen.getByText(/target 2 of 3/)).toBeTruthy();
     expect(screen.getByText("reading Homebrew")).toBeTruthy();
-    expect(screen.getByText("41%")).toBeTruthy();
+    expect(screen.getByText("50%")).toBeTruthy();
     expect(screen.getByText("3 min")).toBeTruthy();
 
     const bar = screen.getByRole("progressbar", { name: "Sweep progress" });
-    expect(bar.getAttribute("aria-valuenow")).toBe("41");
-    expect(bar.getAttribute("aria-valuetext")).toBe("41%, reading Homebrew");
-    const fill = bar.querySelector<HTMLElement>(".bar-fill");
-    const work = bar.querySelector<HTMLElement>(".bar-work");
-    expect(fill?.style.width).toBe("41%");
-    expect([work?.style.left, work?.style.width]).toEqual(["41%", "25%"]);
-    expect(bar.querySelectorAll(".bar-tick")).toHaveLength(2);
+    expect(bar.getAttribute("aria-valuenow")).toBe("50");
+    expect(bar.getAttribute("aria-valuetext")).toBe("50%, reading Homebrew");
+    const fill = bar.querySelector<HTMLElement>(".sweep-bar-fill");
+    const work = bar.querySelector<HTMLElement>(".sweep-bar-work");
+    expect(fill?.style.width).toBe("50%");
+    expect([work?.style.left, work?.style.width]).toEqual(["50%", "16%"]);
+    const ticks = [...bar.querySelectorAll<HTMLElement>(".sweep-bar-tick")];
+    expect(ticks.map((t) => t.style.left)).toEqual(["33.3%", "66.6%"]);
+  });
+
+  it("fills the bar without the moving part while a step has a known length", async () => {
+    shown = overview({
+      busy: true,
+      status: {
+        state: "sweeping",
+        step: "NVD 1/1: apple:macos",
+        current: "This Mac",
+        done: [],
+        pending: [],
+        position: 1,
+        total: 1,
+        percent: 27,
+        target_end: 100,
+        ticks: [],
+        open_ended: false,
+        started: new Date().toISOString(),
+        step_started: new Date().toISOString(),
+      },
+    });
+    answer();
+    render(() => <App />);
+    const bar = await screen.findByRole("progressbar", { name: "Sweep progress" });
+    expect(bar.querySelector<HTMLElement>(".sweep-bar-fill")?.style.width).toBe("27%");
+    expect(bar.querySelector(".sweep-bar-work")).toBeNull();
+    expect(bar.querySelectorAll(".sweep-bar-tick")).toHaveLength(0);
   });
 
   it("shows all clear once a sweep found nothing", async () => {

@@ -262,7 +262,7 @@ fn clean_sweep_writes_bundle_and_report() {
     assert!(out.status.success(), "{stderr}");
     assert!(stderr.contains("listing what is installed"), "{stderr}");
     assert!(
-        stderr.contains("claude is judging 0 advisories"),
+        stderr.contains("claude is reviewing the target"),
         "{stderr}"
     );
     assert!(stderr.contains("NVD 1/1: apple:macos"), "{stderr}");

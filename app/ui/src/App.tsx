@@ -501,20 +501,19 @@ function Detail(props: {
   );
 }
 
-/** The sweep's progress bar, one equal share per target, as Rust measures it. While the
+/** The sweep's progress bar, as Rust measures it, with a mark between targets. While the
  * agent runs, the rest of its target's share moves instead of filling: that step has no
  * known length. */
 function Bar(props: {
   percent: number;
   targetEnd: number;
   openEnded: boolean;
-  total: number;
+  ticks: readonly number[];
   label: string;
 }) {
-  const ticks = () => Array.from({ length: Math.max(props.total - 1, 0) }, (_, i) => i + 1);
   return (
     <div
-      class="bar"
+      class="sweep-bar"
       role="progressbar"
       aria-label="Sweep progress"
       aria-valuemin={0}
@@ -522,15 +521,15 @@ function Bar(props: {
       aria-valuenow={props.percent}
       aria-valuetext={`${props.percent}%, ${props.label}`}
     >
-      <span class="bar-fill" style={{ width: `${props.percent}%` }} />
+      <span class="sweep-bar-fill" style={{ width: `${props.percent}%` }} />
       <Show when={props.openEnded}>
         <span
-          class="bar-work"
+          class="sweep-bar-work"
           style={{ left: `${props.percent}%`, width: `${props.targetEnd - props.percent}%` }}
         />
       </Show>
-      <For each={ticks()}>
-        {(i) => <span class="bar-tick" style={{ left: `${(i * 100) / props.total}%` }} />}
+      <For each={props.ticks}>
+        {(at) => <span class="sweep-bar-tick" style={{ left: `${at}%` }} />}
       </For>
     </div>
   );
@@ -543,19 +542,21 @@ function Busy(props: { status: Status; now: Date }) {
         {(s) => (
           <section class="summary">
             <div class="headline">
-              <div>
+              <div class="headline-text">
                 <h1>Sweeping {s().current ?? ""}</h1>
                 <p class="sub">
                   target {s().position} of {s().total} · started {since(s().started, props.now)} ago
                 </p>
               </div>
-              <span class="pct">{s().percent}%</span>
+              <span class="pct" aria-hidden="true">
+                {s().percent}%
+              </span>
             </div>
             <Bar
               percent={s().percent}
               targetEnd={s().target_end}
               openEnded={s().open_ended}
-              total={s().total}
+              ticks={s().ticks}
               label={s().step}
             />
             <div class="group steps">
@@ -573,7 +574,7 @@ function Busy(props: { status: Status; now: Date }) {
                   <div class="step now">
                     <span class="spin" />
                     <span class="step-text">
-                      <span>{current()}</span>
+                      <span class="step-name">{current()}</span>
                       <span class="step-detail">{s().step}</span>
                     </span>
                     <span class="st">{since(s().step_started, props.now)}</span>

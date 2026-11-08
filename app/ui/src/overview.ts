@@ -22,6 +22,8 @@ export type Status =
       readonly percent: number;
       /** Where the current target's share of the bar ends, 0 to 100. */
       readonly target_end: number;
+      /** Where the bar marks the boundaries between targets, 0 to 100. */
+      readonly ticks: readonly number[];
       /** The current step has no known length (the agent is running). */
       readonly open_ended: boolean;
       readonly started: string;

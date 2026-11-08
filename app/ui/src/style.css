@@ -560,56 +560,67 @@ kbd {
   letter-spacing: -0.01em;
   color: var(--l1);
 }
-.bar {
+.headline-text {
+  min-width: 0;
+}
+.headline-text h1 {
+  overflow-wrap: anywhere;
+}
+.sweep-bar {
   position: relative;
   height: 6px;
   border-radius: 3px;
   overflow: hidden;
-  background: rgba(255, 255, 255, 0.08);
-  box-shadow: inset 0 0 0 0.5px var(--hair);
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
 }
-.bar-fill {
+.sweep-bar-fill {
   position: absolute;
   inset: 0 auto 0 0;
   border-radius: 3px;
   background: linear-gradient(90deg, #4b74ea, var(--run));
   box-shadow: 0 0 10px -2px rgba(110, 155, 255, 0.7);
-  transition: width 400ms ease;
 }
-/* The agent's step: no known length, so it moves instead of filling. */
-.bar-work {
+/* The agent's step: no known length, so it moves instead of filling. The stripes stay
+   visible without motion. */
+.sweep-bar-work {
   position: absolute;
   top: 0;
   bottom: 0;
   background: repeating-linear-gradient(
     -45deg,
-    rgba(110, 155, 255, 0.35) 0 6px,
-    rgba(110, 155, 255, 0.12) 6px 12px
+    rgba(110, 155, 255, 0.55) 0 6px,
+    rgba(110, 155, 255, 0.2) 6px 12px
   );
+  /* One period of 12 px stripes at 45 degrees is 12 * sqrt(2), about 17 px, along the bar,
+     so moving the background by that much loops without a seam. */
   background-size: 17px 100%;
 }
 @media (prefers-reduced-motion: no-preference) {
-  .bar-work {
-    animation: bar-work 0.8s linear infinite;
+  .sweep-bar-work {
+    animation: sweep-bar-work 0.8s linear infinite;
   }
 }
-@keyframes bar-work {
+@keyframes sweep-bar-work {
   to {
     background-position: 17px 0;
   }
 }
-.bar-tick {
+.sweep-bar-tick {
   position: absolute;
   top: 0;
   bottom: 0;
   width: 2px;
   margin-left: -1px;
-  background: rgba(0, 0, 0, 0.45);
+  background: rgba(255, 255, 255, 0.5);
 }
 .step-text {
   display: grid;
   min-width: 0;
   gap: 1px;
+}
+.step-name {
+  overflow-wrap: anywhere;
 }
 .step-detail {
   font-weight: 400;
