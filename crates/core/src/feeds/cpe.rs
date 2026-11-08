@@ -474,6 +474,15 @@ mod tests {
 
         let every_beta = record(&[vulnerable("cpe:2.3:a:openssl:openssl:*:beta:*:*:*:*:*:*")]);
         assert!(every_beta.may_affect(&product("openssl"), "9.9"));
+        let old_betas = record(&[json!({
+            "vulnerable": true,
+            "criteria": "cpe:2.3:a:openssl:openssl:*:beta:*:*:*:*:*:*",
+            "versionEndExcluding": "1.0",
+        })]);
+        assert!(
+            old_betas.may_affect(&product("openssl"), "3.0"),
+            "an update of every version is not a range this can rule out"
+        );
     }
 
     #[test]
@@ -540,6 +549,9 @@ mod tests {
         assert!(release(p1, "openssh", "9.8p1"));
         let any = "cpe:2.3:a:openssl:openssl:1.1.1:*:*:*:*:*:*:*";
         assert!(release(any, "openssl", "1.1.1w"), "any update of 1.1.1");
+        let point = "cpe:2.3:a:openssl:openssl:1.2:-:*:*:*:*:*:*";
+        assert!(!release(point, "openssl", "1.2.5"), "1.2.5 is not 1.2");
+        assert!(release(point, "openssl", "1.2.0"), "1.2.0 is");
         let none = "cpe:2.3:a:openssl:openssl:1.1.1:-:*:*:*:*:*:*";
         assert!(
             !release(none, "openssl", "1.1.1w"),
@@ -589,6 +601,15 @@ mod tests {
 
     #[test]
     fn the_vendor_must_match_when_given() {
+        // The same vendor's other product does not name this one, so the record never does and
+        // is kept.
+        let safari = record(&[json!({
+            "vulnerable": true,
+            "criteria": "cpe:2.3:a:apple:safari:*:*:*:*:*:*:*:*",
+            "versionEndExcluding": "10.0",
+        })]);
+        assert!(safari.may_affect(&product("apple:macos"), "27.2"));
+
         let jenkins_git = record(&[json!({
             "vulnerable": true,
             "criteria": "cpe:2.3:a:jenkins:git:*:*:*:*:*:jenkins:*:*",
