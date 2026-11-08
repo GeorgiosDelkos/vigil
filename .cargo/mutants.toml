@@ -7,4 +7,12 @@ exclude_globs = ["app/**"]
 # These two run /usr/bin/security against the user's login Keychain, which no test may touch,
 # so a mutant there cannot be caught. Their decisions are in `saved` and `keychain_script`,
 # which are mutated and tested.
-exclude_re = ["NvdAccess::has_keychain_key", "NvdAccess::save_to_keychain"]
+#
+# `replace < with <= in stop` changes `Instant::now() < deadline` in the grace loop of
+# `cancel::stop`. The two differ only at the very instant of the deadline, and both then send
+# SIGKILL, so no test can tell them apart: an equivalent mutant.
+exclude_re = [
+    "NvdAccess::has_keychain_key",
+    "NvdAccess::save_to_keychain",
+    "replace < with <= in stop$",
+]
