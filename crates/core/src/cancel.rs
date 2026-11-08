@@ -556,6 +556,22 @@ mod tests {
     }
 
     #[test]
+    fn a_program_that_obeys_sigterm_is_not_held_for_the_grace_period() {
+        let tmp = tempfile::tempdir().unwrap();
+        let body = "echo $$ > ready\nsleep 30";
+        let child = start(&script(tmp.path(), "a", body));
+        let cancel = Cancel::new();
+        pid_in(&tmp.path().join("ready"));
+        cancel.cancel();
+        let started = Instant::now();
+        let ended = watch(child, &cancel).unwrap();
+        assert!(matches!(ended, Ended::Cancelled));
+        // The one timing assertion here: `sleep` dies on SIGTERM at once, so stopping it takes
+        // a few polls, far less than the grace period a stop that ignored its exit would wait.
+        assert!(started.elapsed() < GRACE, "{:?}", started.elapsed());
+    }
+
+    #[test]
     fn a_program_that_ignores_sigterm_is_killed_after_the_grace_period() {
         let tmp = tempfile::tempdir().unwrap();
         let body = "trap '' TERM\necho $$ > ready\nsleep 30";
