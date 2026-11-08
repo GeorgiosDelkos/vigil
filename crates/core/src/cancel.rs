@@ -220,7 +220,9 @@ fn stop(child: &mut Child) {
     drop(child.wait());
 }
 
-/// Sends `signal` to process group `group` and to each process in `tree`.
+/// Sends `signal` to process group `group` and to each process in `tree`. A pid in `tree` that
+/// exited during the grace period could have been reused by then; accepted, as macOS hands
+/// out pids in order and the period is seconds.
 fn signal(group: u32, tree: &BTreeSet<u32>, signal: &str) {
     signal_group(group, signal);
     if !tree.is_empty() {
@@ -289,18 +291,34 @@ pub(crate) fn mark_running(sweep: &Path) -> Result<Running, SweepError> {
         path: marker.clone(),
         source,
     })?;
-    Ok(Running(marker))
+    Ok(Running {
+        marker,
+        kept: false,
+    })
 }
 
 /// The marker of a running sweep, removed on drop.
 #[derive(Debug)]
-pub(crate) struct Running(PathBuf);
+pub(crate) struct Running {
+    marker: PathBuf,
+    /// Set by [`Running::keep`]: the marker stays.
+    kept: bool,
+}
+
+impl Running {
+    /// Leaves the marker in place, so the next cleanup finishes what this sweep could not.
+    pub(crate) fn keep(mut self) {
+        self.kept = true;
+    }
+}
 
 impl Drop for Running {
     fn drop(&mut self) {
         // Best effort: a marker left behind makes the next cleanup remove only target folders
         // without a report, which an ended sweep does not have unless it failed to save one.
-        drop(fs::remove_file(&self.0));
+        if !self.kept {
+            drop(fs::remove_file(&self.marker));
+        }
     }
 }
 
@@ -327,17 +345,22 @@ pub fn clean_up_interrupted(data_dir: &DataDir) -> Result<(), SweepError> {
 pub(crate) fn clean_up_holding_lock(data_dir: &DataDir) -> Result<(), SweepError> {
     for sweep in subdirs(&data_dir.sweeps_dir())? {
         if sweep.join(RUNNING).exists() {
-            remove_unfinished(&sweep)?;
+            remove_unfinished(&sweep, &[])?;
         }
     }
     Ok(())
 }
 
-/// Removes a sweep's target folders that have no report, its marker, and the folder when
-/// nothing is left in it: what a cancelled or interrupted sweep leaves.
-pub(crate) fn remove_unfinished(sweep: &Path) -> Result<(), SweepError> {
+/// Removes a sweep's unfinished target folders, its marker, and the folder when nothing is left
+/// in it: what a cancelled or interrupted sweep leaves. A target is finished when it is in
+/// `finished` (the sweep reported it), or has a report: `report.json`, or `report.md`, which
+/// is written just before it. On an error the marker stays, so the next cleanup tries again.
+pub(crate) fn remove_unfinished(sweep: &Path, finished: &[PathBuf]) -> Result<(), SweepError> {
     for target in subdirs(sweep)? {
-        if !target.join("report.json").exists() {
+        let reported = ["report.json", "report.md"]
+            .iter()
+            .any(|name| target.join(name).exists());
+        if !reported && !finished.contains(&target) {
             remove(&target)?;
         }
     }
@@ -578,6 +601,11 @@ mod tests {
         let ended = sweeps.join("20261108T100000Z/mac");
         fs::create_dir_all(&ended).unwrap();
         fs::write(ended.join("report.md"), "# report").unwrap();
+        // Interrupted between the markdown report and the JSON one: the target is kept.
+        let between = sweeps.join("20261108T130000Z");
+        fs::create_dir_all(between.join("mac")).unwrap();
+        fs::write(between.join("mac/report.md"), "# report").unwrap();
+        fs::write(between.join(RUNNING), "").unwrap();
 
         clean_up_interrupted(&data_dir).unwrap();
         assert!(interrupted.join("mac/report.json").exists());
@@ -585,6 +613,28 @@ mod tests {
         assert!(!interrupted.join(RUNNING).exists());
         assert!(!early.exists(), "nothing was left in it");
         assert!(ended.join("report.md").exists());
+        assert!(between.join("mac/report.md").exists());
+    }
+
+    #[test]
+    fn a_cancel_keeps_the_targets_its_sweep_finished() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweep = tmp.path().join("20261108T110000Z");
+        // The sweep reported this one, though its report failed to save.
+        fs::create_dir_all(sweep.join("mac")).unwrap();
+        fs::create_dir_all(sweep.join("github-o--r/bundle")).unwrap();
+        let running = mark_running(&sweep).unwrap();
+        remove_unfinished(&sweep, &[sweep.join("mac")]).unwrap();
+        drop(running);
+        assert!(sweep.join("mac").exists());
+        assert!(!sweep.join("github-o--r").exists());
+    }
+
+    #[test]
+    fn a_kept_marker_stays() {
+        let tmp = tempfile::tempdir().unwrap();
+        mark_running(tmp.path()).unwrap().keep();
+        assert!(tmp.path().join(RUNNING).exists());
     }
 
     #[test]

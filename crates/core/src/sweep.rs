@@ -362,7 +362,7 @@ pub fn sweep(
         ));
     }
     let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
-    let _running = cancel::mark_running(&dir)?;
+    let running = cancel::mark_running(&dir)?;
 
     let feeds = Feeds::new(data_dir, nvd_access(&mut notes));
     let kev = match feeds.kev() {
@@ -396,8 +396,8 @@ pub fn sweep(
         notes: &notes,
     };
 
+    let mut reports = Vec::new();
     let mut each_target = || {
-        let mut reports = Vec::new();
         cancel.check()?;
         if wanted("mac") {
             progress(Progress::Target { target: "mac" });
@@ -413,15 +413,21 @@ pub fn sweep(
             cancel.check()?;
             reports.push(shared.sweep_server(&dir, server, progress)?);
         }
-        Ok(reports)
+        Ok(())
     };
-    let reports = each_target();
-    if matches!(reports, Err(SweepError::Cancelled)) {
-        // Best effort: the cancel is what the caller asked about; a folder left behind is
-        // removed by the next sweep, as one an interrupted sweep leaves.
-        drop(cancel::remove_unfinished(&dir));
+    match each_target() {
+        Ok(()) => Ok(reports),
+        Err(SweepError::Cancelled) => {
+            let finished: Vec<PathBuf> = reports.iter().map(|r| r.dir.clone()).collect();
+            // The cancel is what the caller asked about. A folder that could not be removed
+            // keeps the marker, and the next sweep or app start removes it.
+            if cancel::remove_unfinished(&dir, &finished).is_err() {
+                running.keep();
+            }
+            Err(SweepError::Cancelled)
+        }
+        Err(e) => Err(e),
     }
-    reports
 }
 
 /// What a sweep should raise a notification for: each finding and issue that is critical or
