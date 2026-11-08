@@ -314,7 +314,7 @@ pub(super) fn fetch(
     if let Some(fresh) = cached.take_if(|c| is_fresh(c.fetched_at, now)) {
         return Ok(advisories(fresh.cves, history));
     }
-    if cached.as_ref().is_none_or(|c| c.cves.is_empty()) && recently_unknown(feeds, key, now)? {
+    if recently_unknown(feeds, key, cached.as_ref(), now)? {
         return Ok(Vec::new());
     }
     let window = cached
@@ -370,12 +370,20 @@ fn request_all(
     Ok(first_page_time.expect("the loop requests at least one page"))
 }
 
-/// Whether NVD's CPE dictionary was found not to know the product less than
-/// [`UNKNOWN_SKIP`] ago, so its CVEs need not be asked for. 33 of 108 products on one Mac
-/// (2026-11-08) were such names, each a paced request every sweep. The caller asks only when
-/// it has no cached CVEs: the CVE query and the dictionary are different answers, and a
-/// product can have CVEs that `history.since` filtered out.
-fn recently_unknown(feeds: &Feeds, key: &str, now: Timestamp) -> Result<bool, FeedError> {
+/// Whether the product's CVEs need not be asked for: nothing is cached for it, and NVD's CPE
+/// dictionary was found not to know it less than [`UNKNOWN_SKIP`] ago. 33 of 108 products on
+/// one Mac (2026-11-08) were such names, each a paced request every sweep. A product with
+/// cached CVEs is always asked: the CVE query and the dictionary are different answers, and
+/// `history.since` can filter out every CVE of a product NVD has.
+fn recently_unknown(
+    feeds: &Feeds,
+    key: &str,
+    cached: Option<&ProductCache>,
+    now: Timestamp,
+) -> Result<bool, FeedError> {
+    if cached.is_some_and(|c| !c.cves.is_empty()) {
+        return Ok(false);
+    }
     let check: Option<ProductCheck> = feeds.cache.read("nvd-cpe", key)?;
     Ok(check.is_some_and(|c| !c.known && within(c.checked_at, now, UNKNOWN_SKIP)))
 }
@@ -915,7 +923,7 @@ mod tests {
         assert_eq!(kept.len(), 1, "the cached CVE is still returned");
 
         // An answer dated after `now` (the clock moved back) has no known age.
-        cached(&cache, "abseil", &[], days(0) - days(2), false);
+        cached(&cache, "abseil", &[], -days(2), false);
         feeds.nvd(&product("abseil"), History::All).unwrap();
         assert_eq!(server.requests().len(), 4);
     }
@@ -927,15 +935,37 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = Cache::new(tmp.path().to_owned());
         let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
-        let ago = SignedDuration::from_hours(24 * 8);
-        cached(&cache, "abseil", &[], ago, false);
-        let fetched_at: ProductCache = cache.read("nvd", "abseil").unwrap().unwrap();
+        let start = |name: &str| -> Timestamp {
+            let entry: ProductCache = cache.read("nvd", name).unwrap().unwrap();
+            entry.fetched_at
+        };
+
+        cached(
+            &cache,
+            "abseil",
+            &[],
+            SignedDuration::from_hours(24 * 3),
+            false,
+        );
+        let before = start("abseil");
         feeds.nvd(&product("abseil"), History::All).unwrap();
         assert_eq!(
-            server.requests()[0].query("lastModStartDate"),
-            Some(nvd_time(fetched_at.fetched_at)),
-            "the delta covers the whole skip"
+            start("abseil"),
+            before,
+            "a skip does not move the delta start"
         );
+
+        cached(
+            &cache,
+            "curl",
+            &["CVE-1"],
+            SignedDuration::from_mins(30),
+            true,
+        );
+        let before = start("curl");
+        feeds.nvd(&product("curl"), History::All).unwrap();
+        assert_eq!(start("curl"), before, "nor does a fresh cache");
+        assert_eq!(server.requests().len(), 0);
     }
 
     #[test]

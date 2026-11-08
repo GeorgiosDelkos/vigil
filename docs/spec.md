@@ -394,8 +394,8 @@ not an OSV ecosystem, so formulae go through NVD.
   actively exploited.
 - A product's cached CVEs are used without a request for 2 hours after the last fetch's
   coverage ended, and a product NVD's CPE dictionary does not know, with no cached CVEs, is
-  not asked for CVEs for a week. On one Mac a repeated sweep had spent 11 minutes on NVD requests that
-  found nothing (decided 2026-11-08).
+  not asked for CVEs for a week. On one Mac a repeated sweep had spent 11 minutes on NVD
+  requests that found nothing (decided 2026-11-08).
 - `history.since` drops advisories both published and last modified before that date (NVD keeps
   a CVE's original published date when it later adds a product); records without either date
   are kept. NVD rarely leaves an old CVE untouched: all 10294 NVD records in one Mac's bundle
