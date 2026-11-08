@@ -308,7 +308,8 @@ pub(crate) struct Running {
 
 impl Running {
     /// Removes the sweep's unfinished target folders (see [`remove_unfinished`]), for a sweep
-    /// that was cancelled. On an error the marker stays, so the next cleanup finishes the job.
+    /// that was cancelled. When a target or the marker cannot be removed, the marker stays, so
+    /// the next cleanup finishes the job.
     pub(crate) fn remove_unfinished(mut self, finished: &[PathBuf]) -> Result<(), SweepError> {
         let sweep = self
             .marker
@@ -363,8 +364,9 @@ pub(crate) fn clean_up_holding_lock(data_dir: &DataDir) -> Result<(), SweepError
 /// Removes a sweep's unfinished target folders, its marker, and the folder when nothing is left
 /// in it: what a cancelled or interrupted sweep leaves. A target is finished when it is in
 /// `finished` (the sweep reported it), or has a report: `report.json`, or `report.md`, which
-/// is written just before it. On an error it stops, and the marker is still there.
-pub(crate) fn remove_unfinished(sweep: &Path, finished: &[PathBuf]) -> Result<(), SweepError> {
+/// is written just before it. When a target or the marker cannot be removed it stops, and the
+/// marker is still there.
+fn remove_unfinished(sweep: &Path, finished: &[PathBuf]) -> Result<(), SweepError> {
     for target in subdirs(sweep)? {
         let reported = ["report.json", "report.md"]
             .iter()

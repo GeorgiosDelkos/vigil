@@ -251,12 +251,13 @@ fn wait(
     let status = loop {
         let polled = match child.try_wait() {
             Ok(polled) => polled,
-            Err(e) => {
-                return Err(stop(
-                    &mut child,
-                    command,
-                    format!("cannot wait for it: {e}"),
-                ));
+            Err(source) => {
+                // Stopped first, so a tool that cannot be waited for does not run on.
+                drop(stop(&mut child, command, String::new()));
+                return Err(InventoryError::Spawn {
+                    command: command.to_owned(),
+                    source,
+                });
             }
         };
         if let Some(status) = polled {
