@@ -1670,7 +1670,10 @@ mod tests {
         assert!(seen[1].contains("done: 1, total: 2"), "{seen:?}");
 
         // Without the KEV catalog any CVE may be exploited, so none is left out.
-        let unknown = Sources { kev: None, ..sources };
+        let unknown = Sources {
+            kev: None,
+            ..sources
+        };
         let fetched = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
         let ids: Vec<&str> = fetched.iter().map(|(a, _)| a.id.as_str()).collect();
         assert!(ids.contains(&"CVE-6"), "{ids:?}");
