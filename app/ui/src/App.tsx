@@ -501,6 +501,40 @@ function Detail(props: {
   );
 }
 
+/** The sweep's progress bar, as Rust measures it, with a mark between targets. While the
+ * agent runs, the rest of its target's share moves instead of filling: that step has no
+ * known length. */
+function Bar(props: {
+  percent: number;
+  targetEnd: number;
+  openEnded: boolean;
+  ticks: readonly number[];
+  label: string;
+}) {
+  return (
+    <div
+      class="sweep-bar"
+      role="progressbar"
+      aria-label="Sweep progress"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={props.percent}
+      aria-valuetext={`${props.percent}%, ${props.label}`}
+    >
+      <span class="sweep-bar-fill" style={{ width: `${props.percent}%` }} />
+      <Show when={props.openEnded}>
+        <span
+          class="sweep-bar-work"
+          style={{ left: `${props.percent}%`, width: `${props.targetEnd - props.percent}%` }}
+        />
+      </Show>
+      <For each={props.ticks}>
+        {(at) => <span class="sweep-bar-tick" style={{ left: `${at}%` }} />}
+      </For>
+    </div>
+  );
+}
+
 function Busy(props: { status: Status; now: Date }) {
   return (
     <Switch>
@@ -508,14 +542,23 @@ function Busy(props: { status: Status; now: Date }) {
         {(s) => (
           <section class="summary">
             <div class="headline">
-              <div>
+              <div class="headline-text">
                 <h1>Sweeping {s().current ?? ""}</h1>
                 <p class="sub">
                   target {s().position} of {s().total} · started {since(s().started, props.now)} ago
                 </p>
               </div>
-              <span class="spin" aria-label="Sweeping" />
+              <span class="pct" aria-hidden="true">
+                {s().percent}%
+              </span>
             </div>
+            <Bar
+              percent={s().percent}
+              targetEnd={s().target_end}
+              openEnded={s().open_ended}
+              ticks={s().ticks}
+              label={s().step}
+            />
             <div class="group steps">
               <For each={s().done}>
                 {(t) => (
@@ -527,10 +570,16 @@ function Busy(props: { status: Status; now: Date }) {
                 )}
               </For>
               <Show when={s().current}>
-                <div class="step now">
-                  <span class="spin" />
-                  <span>{s().step}</span>
-                </div>
+                {(current) => (
+                  <div class="step now">
+                    <span class="spin" />
+                    <span class="step-text">
+                      <span class="step-name">{current()}</span>
+                      <span class="step-detail">{s().step}</span>
+                    </span>
+                    <span class="st">{since(s().step_started, props.now)}</span>
+                  </div>
+                )}
               </Show>
               <For each={s().pending}>
                 {(t) => (

@@ -135,7 +135,40 @@ pub enum Progress<'a> {
         agent: AgentKind,
         /// Which try this is.
         attempt: u8,
+        /// How many advisories the bundle gives it.
+        advisories: usize,
     },
+}
+
+impl Progress<'_> {
+    /// How far into its target the sweep is when this event arrives, in thousandths, for a
+    /// progress bar: listing what is installed up to 50, fetching advisories up to 500, and the
+    /// agent the rest, from 800 on its second try. Each NVD product has an equal slot, and its
+    /// event, sent as its request starts, is the middle of the slot: the bar moves as each
+    /// request starts instead of only after it ends.
+    ///
+    /// The shares are rough and arbitrary, from sweeps of one Mac on 2026-11-08: listing
+    /// takes seconds, NVD one paced request per product, the agent minutes. A bar that moves
+    /// steadily matters more here than one that is exact; the agent's share is shown as
+    /// [`open_ended`](Self::open_ended).
+    pub fn thousandths(&self) -> usize {
+        match self {
+            Self::Target { .. } => 0,
+            Self::Inventory => 20,
+            Self::Advisories { .. } => 50,
+            Self::Product { done, total, .. } => {
+                50 + 450 * (2 * done).saturating_sub(1) / (2 * total.max(&1))
+            }
+            Self::Agent { attempt: 1, .. } => 500,
+            Self::Agent { .. } => 800,
+        }
+    }
+
+    /// Whether the step this event starts has no known length: the agent's run, which takes
+    /// seconds or many minutes, so a progress bar shows it moving instead of filling.
+    pub fn open_ended(&self) -> bool {
+        matches!(self, Self::Agent { .. })
+    }
 }
 
 impl fmt::Display for Progress<'_> {
@@ -153,7 +186,21 @@ impl fmt::Display for Progress<'_> {
                 total,
                 product,
             } => write!(f, "NVD {done}/{total}: {product}"),
-            Self::Agent { agent, attempt: 1 } => write!(f, "{agent} is judging the advisories"),
+            Self::Agent {
+                agent,
+                attempt: 1,
+                advisories: 0,
+            } => write!(f, "{agent} is reviewing the target"),
+            Self::Agent {
+                agent,
+                attempt: 1,
+                advisories: 1,
+            } => write!(f, "{agent} is judging 1 advisory"),
+            Self::Agent {
+                agent,
+                attempt: 1,
+                advisories,
+            } => write!(f, "{agent} is judging {advisories} advisories"),
             Self::Agent { agent, .. } => write!(f, "{agent} is fixing its rejected findings"),
         }
     }
@@ -1002,7 +1049,11 @@ fn judge(
     let mut prompt = PROMPT_LINE.to_owned();
     let mut last = Vec::new();
     for attempt in 1..=2 {
-        progress(Progress::Agent { agent, attempt });
+        progress(Progress::Agent {
+            agent,
+            attempt,
+            advisories: known.advisories.len(),
+        });
         let log = dir.join(format!("agent-{attempt}.log"));
         let status = agent
             .run_sweep(located, &bundle, &prompt, &log)
@@ -1730,6 +1781,54 @@ mod tests {
     }
 
     #[test]
+    fn progress_moves_forward_through_a_target_and_marks_the_agent_open_ended() {
+        let product = |done| Progress::Product {
+            done,
+            total: 4,
+            product: "openssl",
+        };
+        let agent = |attempt| Progress::Agent {
+            agent: AgentKind::Grok,
+            attempt,
+            advisories: 3,
+        };
+        let steps = [
+            Progress::Target { target: "mac" },
+            Progress::Inventory,
+            Progress::Advisories {
+                packages: 1,
+                products: 4,
+            },
+            product(1),
+            product(2),
+            product(4),
+            agent(1),
+            agent(2),
+        ];
+        let shares: Vec<usize> = steps.iter().map(Progress::thousandths).collect();
+        assert_eq!(shares, [0, 20, 50, 106, 218, 443, 500, 800]);
+        let open: Vec<bool> = steps.iter().map(Progress::open_ended).collect();
+        assert_eq!(open, [false, false, false, false, false, false, true, true]);
+
+        let none = Progress::Product {
+            done: 0,
+            total: 0,
+            product: "x",
+        };
+        assert_eq!(none.thousandths(), 50, "no products cannot divide by zero");
+        let only = Progress::Product {
+            done: 1,
+            total: 1,
+            product: "apple:macos",
+        };
+        assert_eq!(
+            only.thousandths(),
+            275,
+            "a single product is half done as it starts"
+        );
+    }
+
+    #[test]
     fn progress_reads_as_one_line_per_step() {
         let lines = [
             (Progress::Target { target: "mac" }, "sweeping mac"),
@@ -1753,13 +1852,31 @@ mod tests {
                 Progress::Agent {
                     agent: AgentKind::Claude,
                     attempt: 1,
+                    advisories: 154,
                 },
-                "claude is judging the advisories",
+                "claude is judging 154 advisories",
+            ),
+            (
+                Progress::Agent {
+                    agent: AgentKind::Claude,
+                    attempt: 1,
+                    advisories: 1,
+                },
+                "claude is judging 1 advisory",
+            ),
+            (
+                Progress::Agent {
+                    agent: AgentKind::Claude,
+                    attempt: 1,
+                    advisories: 0,
+                },
+                "claude is reviewing the target",
             ),
             (
                 Progress::Agent {
                     agent: AgentKind::Claude,
                     attempt: 2,
+                    advisories: 154,
                 },
                 "claude is fixing its rejected findings",
             ),

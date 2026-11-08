@@ -80,8 +80,14 @@ pub(crate) enum Status {
         done: Vec<String>,
         /// The targets still to come, in order.
         pending: Vec<String>,
+        /// How far into the current target it is, in thousandths ([`Progress::thousandths`]).
+        thousandths: usize,
+        /// Whether the current step has no known length ([`Progress::open_ended`]).
+        open_ended: bool,
         /// When it started.
         started: Timestamp,
+        /// When the current step started.
+        step_started: Timestamp,
     },
     /// A confirmed fix is running.
     Fixing {
@@ -154,46 +160,49 @@ impl Runner {
 /// Fails when a sweep or a fix started from the app is already running.
 pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
     let runner = app.state::<Runner>();
-    let pending = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
-        .map(|config| target_names(&config))
-        .unwrap_or_default();
+    // Read once: the targets shown as pending are the ones the sweep takes, so its place and
+    // percentage cannot disagree with an edit made while it starts.
+    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+        .map_err(|e| e.to_string());
+    let pending = config.as_ref().map(target_names).unwrap_or_default();
+    let now = Timestamp::now();
     runner.claim(Status::Sweeping {
         step: "starting".to_owned(),
         current: None,
         done: Vec::new(),
         pending,
-        started: Timestamp::now(),
+        thousandths: 0,
+        open_ended: false,
+        started: now,
+        step_started: now,
     })?;
     changed(app);
     let app = app.clone();
     thread::spawn(move || {
         // A panic in the sweep would otherwise leave the status at sweeping for good, and
         // every later start would be refused.
-        let status = panic::catch_unwind(AssertUnwindSafe(|| run(&app))).unwrap_or_else(|_| {
-            Status::Failed {
-                error: "the sweep stopped unexpectedly".to_owned(),
-            }
-        });
+        let status =
+            panic::catch_unwind(AssertUnwindSafe(|| run(&app, config))).unwrap_or_else(|_| {
+                Status::Failed {
+                    error: "the sweep stopped unexpectedly".to_owned(),
+                }
+            });
         app.state::<Runner>().set(status);
         changed(&app);
     });
     Ok(())
 }
 
-/// Runs one sweep and returns the status it leaves.
-fn run(app: &AppHandle) -> Status {
+/// Runs one sweep with the config `start` read, and returns the status it leaves.
+fn run(app: &AppHandle, config: Result<Config, String>) -> Status {
     let runner = app.state::<Runner>();
-    let config_path = runner.data_dir().config_file();
-    let swept = Config::load_or_default(&config_path, runner.home())
-        .map_err(|e| e.to_string())
-        .and_then(|config| {
-            let mut progress = |p: Progress<'_>| {
-                advance(&mut runner.lock().status, &p);
-                changed(app);
-            };
-            sweep(runner.data_dir(), &config, Targets::All, &mut progress)
-                .map_err(|e| e.to_string())
-        });
+    let swept = config.and_then(|config| {
+        let mut progress = |p: Progress<'_>| {
+            advance(&mut runner.lock().status, &p);
+            changed(app);
+        };
+        sweep(runner.data_dir(), &config, Targets::All, &mut progress).map_err(|e| e.to_string())
+    });
     match swept {
         Ok(reports) => {
             if let Some((title, body)) = notification(&alerts(&reports)) {
@@ -214,6 +223,9 @@ fn advance(status: &mut Status, progress: &Progress<'_>) {
         current,
         done,
         pending,
+        thousandths,
+        open_ended,
+        step_started,
         ..
     } = status
     else {
@@ -225,6 +237,9 @@ fn advance(status: &mut Status, progress: &Progress<'_>) {
         *current = Some((*target).to_owned());
     }
     *step = progress.to_string();
+    *thousandths = progress.thousandths();
+    *open_ended = progress.open_ended();
+    *step_started = Timestamp::now();
 }
 
 /// How a fix ended, for the popover.
@@ -378,10 +393,43 @@ mod tests {
             current: None,
             done: Vec::new(),
             pending: vec!["mac".to_owned(), "server:web".to_owned()],
+            thousandths: 0,
+            open_ended: false,
             started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
         };
         advance(&mut status, &Progress::Target { target: "mac" });
         advance(&mut status, &Progress::Inventory);
+        let Status::Sweeping {
+            thousandths,
+            open_ended,
+            step_started,
+            ..
+        } = &status
+        else {
+            panic!("still sweeping");
+        };
+        assert_eq!((*thousandths, *open_ended), (20, false));
+        assert!(
+            *step_started > Timestamp::UNIX_EPOCH,
+            "each step restarts the clock"
+        );
+        advance(
+            &mut status,
+            &Progress::Agent {
+                agent: vigil_core::AgentKind::Grok,
+                attempt: 1,
+                advisories: 3,
+            },
+        );
+        assert!(matches!(
+            status,
+            Status::Sweeping {
+                thousandths: 500,
+                open_ended: true,
+                ..
+            }
+        ));
         advance(
             &mut status,
             &Progress::Target {
@@ -393,12 +441,19 @@ mod tests {
             current,
             done,
             pending,
+            thousandths,
+            open_ended,
             ..
         } = status
         else {
             panic!("still sweeping");
         };
         assert_eq!(step, "sweeping server:web");
+        assert_eq!(
+            (thousandths, open_ended),
+            (0, false),
+            "a new target starts at its beginning"
+        );
         assert_eq!(current.as_deref(), Some("server:web"));
         assert_eq!(done, ["mac"]);
         assert_eq!(pending, Vec::<String>::new());
