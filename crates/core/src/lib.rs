@@ -71,6 +71,7 @@ pub use crate::findings::Subject;
 pub use crate::fix::Confirmed;
 pub use crate::fix::FixError;
 pub use crate::fix::FixPlan;
+pub use crate::fix::FixProgress;
 pub use crate::fix::FixRecord;
 pub use crate::fix::Outcome;
 pub use crate::fix::plan_fix;

@@ -300,7 +300,9 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
     } else {
         Confirmed::Asked
     };
-    let record = run_fix(data_dir, &plan, confirmed, &cancel_on_ctrl_c()?)?;
+    let record = run_fix(data_dir, &plan, confirmed, &cancel_on_ctrl_c()?, &mut |p| {
+        status(&p.to_string());
+    })?;
     let pull_request = record
         .pull_request
         .as_ref()

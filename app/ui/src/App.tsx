@@ -612,13 +612,49 @@ function Busy(props: { status: Status; now: Date; onCancel: () => void }) {
         {(f) => (
           <section class="summary">
             <div class="headline">
-              <div>
+              <div class="headline-text">
                 <h1>Fixing</h1>
-                <p class="sub">{f().title}</p>
+                <p class="sub">
+                  {f().destination} · started {since(f().started, props.now)} ago
+                </p>
               </div>
               <span class="spin" aria-label="Fixing" />
             </div>
-            <p class="hint">The agent is working with full access; this shows how it ends.</p>
+            <p class="fix-title">{f().title}</p>
+            <ol class="group steps" aria-label="Fix progress">
+              <For each={f().steps}>
+                {(step) => (
+                  <li
+                    class={`step ${step.state}`}
+                    aria-current={step.state === "now" ? "step" : undefined}
+                  >
+                    <Switch>
+                      <Match when={step.state === "done"}>
+                        <Icon name="done" />
+                      </Match>
+                      <Match when={step.state === "now"}>
+                        <span class="spin" />
+                      </Match>
+                      <Match when={step.state === "next"}>
+                        <Icon name="wait" />
+                      </Match>
+                    </Switch>
+                    <span class="step-detail-now">{step.label}</span>
+                    <span class="st">
+                      {step.state === "now"
+                        ? since(f().step_started, props.now)
+                        : step.state === "done"
+                          ? "done"
+                          : "next"}
+                    </span>
+                  </li>
+                )}
+              </For>
+            </ol>
+            <p class="hint">
+              The agent is working with full access. A fix cannot be stopped halfway, since that
+              could leave a change half made; you can close this.
+            </p>
           </section>
         )}
       </Match>

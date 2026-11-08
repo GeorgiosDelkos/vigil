@@ -28,6 +28,7 @@ use vigil_core::AgentKind;
 use vigil_core::Config;
 use vigil_core::DataDir;
 use vigil_core::FindingKey;
+use vigil_core::FixProgress;
 use vigil_core::ParseFindingKeyError;
 use vigil_core::PopoverView;
 use vigil_core::latest;
@@ -144,6 +145,11 @@ enum StatusView {
     },
     Fixing {
         title: String,
+        destination: String,
+        /// Every step of the fix in order, each done, now or next.
+        steps: Vec<StepView>,
+        started: Timestamp,
+        step_started: Timestamp,
     },
     Failed {
         error: String,
@@ -189,10 +195,58 @@ impl StatusView {
                     started,
                 }
             }
-            Status::Fixing { title } => Self::Fixing { title },
+            Status::Fixing {
+                title,
+                destination,
+                agent,
+                step,
+                started,
+                step_started,
+            } => Self::Fixing {
+                title,
+                destination,
+                steps: fix_steps(agent, step),
+                started,
+                step_started,
+            },
             Status::Failed { error } => Self::Failed { error },
         }
     }
+}
+
+/// One step of a running fix, as the popover lists it.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+struct StepView {
+    label: String,
+    state: StepState,
+}
+
+/// Where a step is, relative to the one that runs.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StepState {
+    Done,
+    Now,
+    Next,
+}
+
+/// The steps of a fix by `agent` whose current step is `current` (`None` before the first),
+/// with the steps before it done and those after it next.
+fn fix_steps(agent: AgentKind, current: Option<FixProgress>) -> Vec<StepView> {
+    let steps = FixProgress::steps(agent);
+    let at = current.and_then(|c| steps.iter().position(|s| *s == c));
+    steps
+        .iter()
+        .enumerate()
+        .map(|(i, step)| StepView {
+            label: step.to_string(),
+            state: match at {
+                Some(at) if i < at => StepState::Done,
+                Some(at) if i == at => StepState::Now,
+                _ => StepState::Next,
+            },
+        })
+        .collect()
 }
 
 /// The boundaries between `total` targets, as percentages of the bar, or none past
@@ -442,6 +496,33 @@ mod tests {
         );
         assert_eq!(ticks, Vec::<f64>::new());
         assert!(matches!(StatusView::of(Status::Idle), StatusView::Idle));
+    }
+
+    #[test]
+    fn a_fix_lists_its_steps_done_now_and_next() {
+        let states = |current| -> Vec<(String, StepState)> {
+            fix_steps(AgentKind::Grok, current)
+                .into_iter()
+                .map(|s| (s.label, s.state))
+                .collect()
+        };
+        assert_eq!(
+            states(Some(FixProgress::Agent {
+                agent: AgentKind::Grok
+            })),
+            [
+                ("preparing the fix".to_owned(), StepState::Done),
+                ("grok is applying the fix".to_owned(), StepState::Now),
+                ("recording the result".to_owned(), StepState::Next),
+            ]
+        );
+        assert!(
+            states(None).iter().all(|(_, s)| *s == StepState::Next),
+            "before the first step"
+        );
+        let last = states(Some(FixProgress::Recording));
+        assert_eq!(last[2].1, StepState::Now);
+        assert_eq!(last[0].1, StepState::Done);
     }
 
     #[test]

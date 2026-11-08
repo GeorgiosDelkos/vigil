@@ -267,8 +267,40 @@ pub enum Confirmed {
     YesFlag,
 }
 
+/// What a fix is doing, for a progress display. The steps come in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixProgress {
+    /// Writing the fix folder: the prompt, the brief and the result schema.
+    Preparing,
+    /// The agent is applying the fix, with full access.
+    Agent {
+        /// The agent.
+        agent: AgentKind,
+    },
+    /// Reading the agent's result and recording the run.
+    Recording,
+}
+
+impl FixProgress {
+    /// The steps of a fix by `agent`, in order.
+    pub fn steps(agent: AgentKind) -> [Self; 3] {
+        [Self::Preparing, Self::Agent { agent }, Self::Recording]
+    }
+}
+
+impl fmt::Display for FixProgress {
+    /// One line for a progress display: "grok is applying the fix".
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Preparing => f.write_str("preparing the fix"),
+            Self::Agent { agent } => write!(f, "{agent} is applying the fix"),
+            Self::Recording => f.write_str("recording the result"),
+        }
+    }
+}
+
 /// Runs the confirmed `plan` with full access and records the run in `state/fixes.jsonl`.
-/// Call it only after the user confirmed what the plan shows.
+/// Call it only after the user confirmed what the plan shows. Calls `progress` at each step.
 ///
 /// Blocks until the agent finishes; there is no time limit. An agent that cannot start is
 /// recorded as `unknown` with the reason, like one that writes no result, and so is one that
@@ -285,11 +317,13 @@ pub fn run_fix(
     plan: &FixPlan,
     confirmed: Confirmed,
     cancel: &Cancel,
+    progress: &mut dyn FnMut(FixProgress),
 ) -> Result<FixRecord, FixError> {
     let _lock = Lock::acquire(&data_dir.sweeps_dir())?;
     if current_report(data_dir, plan.key)? != plan.report {
         return Err(FixError::Changed { key: plan.key });
     }
+    progress(FixProgress::Preparing);
     let started = Timestamp::now();
     let fixes = data_dir.fixes_dir();
     fs::create_dir_all(&fixes).map_err(|source| FixError::Write {
@@ -310,11 +344,13 @@ pub fn run_fix(
         fs::write(&path, text).map_err(|source| FixError::Write { path, source })?;
     }
 
+    progress(FixProgress::Agent { agent: plan.agent });
     let ran = plan.agent.run(
         &plan.agent.fix_command(&plan.located, &dir, PROMPT_LINE),
         &dir.join("agent.log"),
         cancel,
     );
+    progress(FixProgress::Recording);
     let repo = plan.target.strip_prefix("github:");
     let (exit_code, result) = match ran {
         Ok(status) => (status.code(), read_result(&dir.join("result.json"), repo)),
@@ -700,12 +736,26 @@ mod tests {
         let unrun = || !data_dir.state_dir().join("fixes.jsonl").exists();
 
         lifecycle::dismiss(&data_dir, key, "accepted").unwrap();
-        let err = run_fix(&data_dir, &plan, Confirmed::Asked, &Cancel::new()).unwrap_err();
+        let err = run_fix(
+            &data_dir,
+            &plan,
+            Confirmed::Asked,
+            &Cancel::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert!(matches!(err, FixError::Dismissed { .. }), "{err:?}");
         lifecycle::undismiss(&data_dir, key).unwrap();
 
         save_report(&data_dir, "20261106T000000Z", "2026-11-06T00:00:00Z", key);
-        let err = run_fix(&data_dir, &plan, Confirmed::Asked, &Cancel::new()).unwrap_err();
+        let err = run_fix(
+            &data_dir,
+            &plan,
+            Confirmed::Asked,
+            &Cancel::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert!(matches!(err, FixError::Changed { .. }), "{err:?}");
         assert!(unrun(), "nothing ran and nothing was recorded");
 
@@ -714,7 +764,14 @@ mod tests {
         let empty = json!({"started": "2026-11-07T00:00:00Z", "target": "mac",
             "failure": null, "findings": [], "issues": []});
         fs::write(gone.join("report.json"), empty.to_string()).unwrap();
-        let err = run_fix(&data_dir, &plan, Confirmed::Asked, &Cancel::new()).unwrap_err();
+        let err = run_fix(
+            &data_dir,
+            &plan,
+            Confirmed::Asked,
+            &Cancel::new(),
+            &mut |_| {},
+        )
+        .unwrap_err();
         assert!(matches!(err, FixError::Stale { .. }), "{err:?}");
         assert!(unrun());
     }

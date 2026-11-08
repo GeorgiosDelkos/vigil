@@ -619,6 +619,19 @@ kbd {
   min-width: 0;
   gap: 1px;
 }
+.fix-title {
+  margin: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+ol.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.step-detail-now::first-letter {
+  text-transform: uppercase;
+}
 .step-name {
   overflow-wrap: anywhere;
 }

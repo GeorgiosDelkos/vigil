@@ -29,12 +29,14 @@ use tauri::AppHandle;
 use tauri::Emitter as _;
 use tauri::Manager as _;
 use tauri_plugin_notification::NotificationExt as _;
+use vigil_core::AgentKind;
 use vigil_core::Cancel;
 use vigil_core::Config;
 use vigil_core::Confirmed;
 use vigil_core::DataDir;
 use vigil_core::FindingKey;
 use vigil_core::FixPlan;
+use vigil_core::FixProgress;
 use vigil_core::Progress;
 use vigil_core::Report;
 use vigil_core::SweepError;
@@ -96,8 +98,7 @@ enum Quit {
 }
 
 /// What the sweep is doing, as the popover and the tray icon show it.
-#[derive(Debug, Clone, Serialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub(crate) enum Status {
     /// No sweep is running, and the last one, if any, had a verdict for every target.
     Idle,
@@ -126,6 +127,16 @@ pub(crate) enum Status {
     Fixing {
         /// What it fixes, one line.
         title: String,
+        /// Where it runs: "this Mac", the repository, or the server.
+        destination: String,
+        /// The agent applying it.
+        agent: AgentKind,
+        /// Its current step, or `None` before the first.
+        step: Option<FixProgress>,
+        /// When it started.
+        started: Timestamp,
+        /// When the current step started.
+        step_started: Timestamp,
     },
     /// The last sweep stopped, a target in it got no verdict, or the schedule could not be
     /// checked.
@@ -341,6 +352,17 @@ fn run(app: &AppHandle, config: Result<Config, String>, cancel: &Cancel) -> Stat
     }
 }
 
+/// Moves a running fix's status on to step `progress`.
+fn advance_fix(status: &mut Status, progress: FixProgress) {
+    if let Status::Fixing {
+        step, step_started, ..
+    } = status
+    {
+        *step = Some(progress);
+        *step_started = Timestamp::now();
+    }
+}
+
 /// Moves a running sweep's status on by one progress event: a new target finishes the one
 /// before it.
 fn advance(status: &mut Status, progress: &Progress<'_>) {
@@ -394,8 +416,15 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
     if plan.found() != found {
         return Err("a newer sweep ran; open the finding again to see its fix".to_owned());
     }
-    let title = plan.fix().summary.clone();
-    let cancel = app.state::<Runner>().claim(Status::Fixing { title })?;
+    let now = Timestamp::now();
+    let cancel = app.state::<Runner>().claim(Status::Fixing {
+        title: plan.fix().summary.clone(),
+        destination: plan.destination().to_owned(),
+        agent: plan.agent(),
+        step: None,
+        started: now,
+        step_started: now,
+    })?;
     changed(app);
     let app = app.clone();
     thread::spawn(move || fix_thread(&app, key, &plan, &cancel));
@@ -406,7 +435,18 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
 fn fix_thread(app: &AppHandle, key: FindingKey, plan: &FixPlan, cancel: &Cancel) {
     let done = panic::catch_unwind(AssertUnwindSafe(|| {
         let runner = app.state::<Runner>();
-        run_fix(runner.data_dir(), plan, Confirmed::Asked, cancel).map_err(|e| e.to_string())
+        let mut progress = |p: FixProgress| {
+            advance_fix(&mut runner.lock().status, p);
+            changed(app);
+        };
+        run_fix(
+            runner.data_dir(),
+            plan,
+            Confirmed::Asked,
+            cancel,
+            &mut progress,
+        )
+        .map_err(|e| e.to_string())
     }))
     .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
     let event = match done {
@@ -596,11 +636,41 @@ mod tests {
         );
     }
 
+    /// A fix in its first moments.
+    fn fixing() -> Status {
+        Status::Fixing {
+            title: "t".to_owned(),
+            destination: "this Mac".to_owned(),
+            agent: AgentKind::Grok,
+            step: None,
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        }
+    }
+
+    #[test]
+    fn a_fix_moves_through_its_steps() {
+        let mut status = fixing();
+        advance_fix(&mut status, FixProgress::Recording);
+        let Status::Fixing {
+            step, step_started, ..
+        } = status
+        else {
+            panic!("still fixing");
+        };
+        assert_eq!(step, Some(FixProgress::Recording));
+        assert!(
+            step_started > Timestamp::UNIX_EPOCH,
+            "each step restarts the clock"
+        );
+        let mut idle = Status::Idle;
+        advance_fix(&mut idle, FixProgress::Recording);
+        assert!(matches!(idle, Status::Idle), "only a running fix advances");
+    }
+
     #[test]
     fn an_exit_waits_while_anything_runs_or_quitting_waits() {
-        let busy = Status::Fixing {
-            title: "t".to_owned(),
-        };
+        let busy = fixing();
         assert!(must_wait(Quit::No, &busy), "asked to quit while a fix runs");
         assert!(!must_wait(Quit::No, &Status::Idle));
         assert!(
@@ -614,9 +684,7 @@ mod tests {
     fn nothing_new_starts_while_quitting() {
         let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
         runner.lock().quit = Quit::Waiting;
-        let refused = runner.claim(Status::Fixing {
-            title: "t".to_owned(),
-        });
+        let refused = runner.claim(fixing());
         assert_eq!(refused.unwrap_err(), "the app is quitting");
     }
 

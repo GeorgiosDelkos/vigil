@@ -274,8 +274,53 @@ describe("a finding", () => {
     expect(await screen.findByText("2 findings need you")).toBeTruthy();
   });
 
+  it("shows a running fix's steps as Rust places them", async () => {
+    shown = {
+      ...two(),
+      busy: true,
+      status: {
+        state: "fixing",
+        title: "other",
+        destination: "this Mac",
+        steps: [
+          { label: "preparing the fix", state: "done" },
+          { label: "grok is applying the fix", state: "now" },
+          { label: "recording the result", state: "next" },
+        ],
+        started: new Date().toISOString(),
+        step_started: new Date(Date.now() - 2 * 60_000).toISOString(),
+      },
+    };
+    answer();
+    render(() => <App />);
+    const steps = await screen.findByRole("list", { name: "Fix progress" });
+    const rows = within(steps).getAllByRole("listitem");
+    expect(rows.map((r) => r.className)).toEqual(["step done", "step now", "step next"]);
+    expect(rows[1]?.getAttribute("aria-current")).toBe("step");
+    expect(within(rows[1] as HTMLElement).getByText("grok is applying the fix")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("2 min")).toBeTruthy();
+    expect(screen.getByText("other")).toBeTruthy();
+    expect(screen.getByText(/this Mac · started/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
   it("cannot be fixed while a sweep runs", async () => {
-    shown = { ...two(), busy: true, status: { state: "fixing", title: "other" } };
+    shown = {
+      ...two(),
+      busy: true,
+      status: {
+        state: "fixing",
+        title: "other",
+        destination: "this Mac",
+        steps: [
+          { label: "preparing the fix", state: "done" },
+          { label: "grok is applying the fix", state: "now" },
+          { label: "recording the result", state: "next" },
+        ],
+        started: new Date().toISOString(),
+        step_started: new Date(Date.now() - 2 * 60_000).toISOString(),
+      },
+    };
     answer();
     render(() => <App />);
     expect(await screen.findByText("Fixing")).toBeTruthy();
@@ -529,7 +574,22 @@ describe("the detail", () => {
     fireEvent.click(await screen.findByText("openssl"));
     const fix = screen.getByText("Fix…") as HTMLButtonElement;
     expect(fix.disabled).toBe(false);
-    shown = { ...two(), busy: true, status: { state: "fixing", title: "other" } };
+    shown = {
+      ...two(),
+      busy: true,
+      status: {
+        state: "fixing",
+        title: "other",
+        destination: "this Mac",
+        steps: [
+          { label: "preparing the fix", state: "done" },
+          { label: "grok is applying the fix", state: "now" },
+          { label: "recording the result", state: "next" },
+        ],
+        started: new Date().toISOString(),
+        step_started: new Date(Date.now() - 2 * 60_000).toISOString(),
+      },
+    };
     handlers.get("changed")?.({ payload: null });
     await vi.waitFor(() => expect(fix.disabled).toBe(true));
   });
