@@ -364,8 +364,8 @@ pub(crate) fn clean_up_holding_lock(data_dir: &DataDir) -> Result<(), SweepError
 /// Removes a sweep's unfinished target folders, its marker, and the folder when nothing is left
 /// in it: what a cancelled or interrupted sweep leaves. A target is finished when it is in
 /// `finished` (the sweep reported it), or has a report: `report.json`, or `report.md`, which
-/// is written just before it. When a target or the marker cannot be removed it stops, and the
-/// marker is still there.
+/// is written just before it. When it cannot list or remove a target folder, or remove the
+/// marker, it stops with the marker still there.
 fn remove_unfinished(sweep: &Path, finished: &[PathBuf]) -> Result<(), SweepError> {
     for target in subdirs(sweep)? {
         let reported = ["report.json", "report.md"]
