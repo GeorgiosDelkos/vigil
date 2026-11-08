@@ -314,7 +314,7 @@ pub(super) fn fetch(
     if let Some(fresh) = cached.take_if(|c| is_fresh(c.fetched_at, now)) {
         return Ok(advisories(fresh.cves, history));
     }
-    if recently_unknown(feeds, key, cached.as_ref(), now)? {
+    if skip_cve_request(feeds, key, cached.as_ref(), now)? {
         return Ok(Vec::new());
     }
     let window = cached
@@ -370,12 +370,12 @@ fn request_all(
     Ok(first_page_time.expect("the loop requests at least one page"))
 }
 
-/// Whether the product's CVEs need not be asked for: nothing is cached for it, and NVD's CPE
+/// Whether the product's CVEs need not be asked for: no CVEs are cached for it, and NVD's CPE
 /// dictionary was found not to know it less than [`UNKNOWN_SKIP`] ago. 33 of 108 products on
 /// one Mac (2026-11-08) were such names, each a paced request every sweep. A product with
 /// cached CVEs is always asked: the CVE query and the dictionary are different answers, and
 /// `history.since` can filter out every CVE of a product NVD has.
-fn recently_unknown(
+fn skip_cve_request(
     feeds: &Feeds,
     key: &str,
     cached: Option<&ProductCache>,
