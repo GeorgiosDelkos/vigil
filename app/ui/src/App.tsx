@@ -16,6 +16,7 @@ import {
 import {
   SEVERITIES,
   type FixDone,
+  type FixedItem,
   type FixPreview,
   type Listed,
   type Overview,
@@ -27,7 +28,7 @@ import type { Section } from "./settings.ts";
 import { Glyph, Icon } from "./icons.tsx";
 import { since } from "./time.ts";
 
-type Tab = "needs" | "targets" | "all";
+type Tab = "needs" | "targets" | "all" | "fixed";
 
 export function App() {
   const [overview, { refetch }] = createResource(() => invoke<Overview>("overview"));
@@ -150,6 +151,9 @@ export function App() {
                     onOpen={setSelected}
                   />
                 </Match>
+                <Match when={tab() === "fixed"}>
+                  <FixedRows items={o().fixed} now={now()} />
+                </Match>
               </Switch>
             </Match>
           </Switch>
@@ -215,6 +219,7 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
     ["needs", "Needs you", props.overview.needs_you],
     ["targets", "Targets", props.overview.targets.length],
     ["all", "All open", props.overview.findings.length],
+    ["fixed", "Fixed", props.overview.fixed.length],
   ];
   return (
     <div class="seg" role="tablist" aria-label="View">
@@ -231,6 +236,42 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
         )}
       </For>
     </div>
+  );
+}
+
+/** Findings a fix reported fixed, newest first: what was fixed, where, when, and how. */
+function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
+  return (
+    <Show
+      when={props.items.length > 0}
+      fallback={<p class="quiet">Nothing has been fixed since the last sweep.</p>}
+    >
+      <ul class="group list" aria-label="Fixed">
+        <For each={props.items}>
+          {(item) => (
+            <li class="row fixed-row">
+              <Icon name="done" />
+              <span class="what">
+                <span class="t">
+                  {item.name}
+                  <Show when={item.version}>{(v) => <span class="ver">{v()}</span>}</Show>
+                </span>
+                <span class="where">
+                  {item.target} · {item.title}
+                </span>
+                <span class="fix">{item.summary}</span>
+                <Show when={item.pull_request}>
+                  {(url) => <span class="pr">Pull request: {url()}</span>}
+                </Show>
+              </span>
+              <span class="side">
+                <span class="age">fixed {since(item.fixed_at, props.now)} ago</span>
+              </span>
+            </li>
+          )}
+        </For>
+      </ul>
+    </Show>
   );
 }
 
@@ -627,6 +668,9 @@ function AllClear(props: { overview: Overview; now: Date }) {
         <Show when={dismissed() > 0}>; {dismissed()} dismissed</Show>.
       </p>
       <Targets targets={props.overview.targets} now={props.now} />
+      <Show when={props.overview.fixed.length > 0}>
+        <FixedRows items={props.overview.fixed} now={props.now} />
+      </Show>
     </section>
   );
 }

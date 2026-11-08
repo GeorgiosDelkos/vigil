@@ -178,6 +178,39 @@ describe("the popover", () => {
     expect(bar.querySelectorAll(".sweep-bar-tick")).toHaveLength(0);
   });
 
+  it("lists fixed findings apart, in a tab of their own and when all is clear", async () => {
+    const { needs_you: _, ...base } = finding("f", { name: "curl", version: "8.0.0" });
+    const fixedItem = {
+      ...base,
+      fixed_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+      summary: "upgraded curl to 8.11",
+      pull_request: "https://github.com/o/r/pull/9",
+    };
+    shown = { ...two(), fixed: [fixedItem] };
+    answer();
+    render(() => <App />);
+    const tab = await screen.findByRole("tab", { name: /Fixed/ });
+    expect(within(tab).getByText("1")).toBeTruthy();
+    fireEvent.click(tab);
+    const list = await screen.findByRole("list", { name: "Fixed" });
+    expect(within(list).getByText("upgraded curl to 8.11")).toBeTruthy();
+    expect(within(list).getByText("fixed 5 min ago")).toBeTruthy();
+    expect(within(list).getByText(/pull\/9/)).toBeTruthy();
+    expect(screen.queryByText("curl")?.closest("button")).toBeNull();
+
+    cleanup();
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      all_clear: true,
+      fixed: [fixedItem],
+    });
+    answer();
+    render(() => <App />);
+    expect(await screen.findByText("All clear")).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Fixed" })).toBeTruthy();
+  });
+
   it("shows all clear once a sweep found nothing", async () => {
     shown = overview({
       last_swept: "2026-11-06T11:00:00Z",

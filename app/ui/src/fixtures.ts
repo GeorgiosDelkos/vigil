@@ -91,6 +91,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     last_swept: null,
     first_sweep_hint: "Sweep checks your targets against the newest advisories.",
     all_clear: false,
+    fixed: [],
     target_count: "1 target",
     targets: [
       {

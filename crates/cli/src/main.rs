@@ -205,8 +205,12 @@ fn findings_text(all: &[Latest]) -> String {
             0 => String::new(),
             n => format!(", {n} dismissed"),
         };
+        let fixed = match target.fixed.len() {
+            0 => String::new(),
+            n => format!(", {n} fixed"),
+        };
         out.push_str(&format!(
-            "{} (swept {swept}): {} open{dismissed}\n",
+            "{} (swept {swept}): {} open{fixed}{dismissed}\n",
             target.target,
             target.open.len()
         ));
@@ -214,6 +218,12 @@ fn findings_text(all: &[Latest]) -> String {
             out.push_str(&format!(
                 "  {:<8} {}  {}\n           fix: {}\n",
                 open.severity, open.key, open.title, open.fix
+            ));
+        }
+        for fixed in &target.fixed {
+            out.push_str(&format!(
+                "  fixed    {}  {}\n           at {}: {}\n",
+                fixed.open.key, fixed.open.title, fixed.fixed_at, fixed.summary
             ));
         }
     }

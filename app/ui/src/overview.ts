@@ -60,10 +60,19 @@ export type TargetLine = {
   readonly dismissed: number;
 };
 
+/** A finding a fix reported fixed since the sweep that found it. */
+export type FixedItem = Omit<Listed, "needs_you"> & {
+  readonly fixed_at: string;
+  readonly summary: string;
+  readonly pull_request: string | null;
+};
+
 export type Overview = {
   readonly status: Status;
   readonly busy: boolean;
   readonly findings: readonly Listed[];
+  /** Fixed since their sweep, newest fix first; not in `findings` or the counts. */
+  readonly fixed: readonly FixedItem[];
   readonly needs_you: number;
   readonly exploited: number;
   readonly counts: Counts;

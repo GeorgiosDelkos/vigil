@@ -26,6 +26,7 @@ use serde::de::IgnoredAny;
 use crate::config::Config;
 use crate::findings::Severity;
 use crate::findings::is_forging;
+use crate::fix::Outcome;
 use crate::paths::DataDir;
 use crate::sweep;
 
@@ -314,10 +315,27 @@ pub struct Latest {
     pub swept: Option<Timestamp>,
     /// How many components that sweep checked.
     pub components: usize,
-    /// The findings and issues not dismissed, most severe first.
+    /// The findings and issues not dismissed or fixed, most severe first.
     pub open: Vec<Open>,
+    /// The ones a fix reported fixed after that sweep, newest fix first. A later sweep that
+    /// still finds one lists it as open again: the fix did not hold.
+    pub fixed: Vec<Fixed>,
     /// How many are dismissed.
     pub dismissed: usize,
+}
+
+/// A finding or issue a fix reported fixed.
+#[derive(Debug, Serialize)]
+pub struct Fixed {
+    /// The finding as the sweep before the fix found it.
+    #[serde(flatten)]
+    pub open: Open,
+    /// When the fix finished.
+    pub fixed_at: Timestamp,
+    /// The agent's one-line summary of what it did.
+    pub summary: String,
+    /// The pull request it opened, for a repository.
+    pub pull_request: Option<String>,
 }
 
 /// One open finding or issue.
@@ -362,6 +380,7 @@ pub struct Open {
 pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateError> {
     let sweeps = data_dir.sweeps_dir();
     let dismissals = Dismissals::load(data_dir)?;
+    let fixes = last_fixes(data_dir)?;
     let mut all = Vec::new();
     for (target, dir_name) in sweep::configured_targets(config) {
         let Some((_, saved)) = newest_verdict(&sweeps, &dir_name)? else {
@@ -370,28 +389,81 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
                 swept: None,
                 components: 0,
                 open: Vec::new(),
+                fixed: Vec::new(),
                 dismissed: 0,
             });
             continue;
         };
-        let (dismissed, open): (Vec<_>, Vec<_>) = saved
+        let (dismissed, kept): (Vec<_>, Vec<_>) = saved
             .entries()
             .partition(|e| dismissals.get(e.key, e.modified).is_some());
         let new = |key: FindingKey| saved.changes.as_ref().is_some_and(|c| c.new.contains(&key));
-        let mut open: Vec<Open> = open
-            .into_iter()
-            .map(|e| open_entry(e, new(e.key)))
-            .collect();
+        let (mut open, mut fixed) = (Vec::new(), Vec::new());
+        for entry in kept {
+            let shown = open_entry(entry, new(entry.key));
+            // Fixed after this sweep found it; a sweep that started after the fix and still
+            // lists it would be the newest report, and the fix did not hold.
+            match fixes.get(&entry.key) {
+                Some(fix) if fix.outcome == Outcome::Fixed && fix.finished > saved.started => {
+                    fixed.push(Fixed {
+                        open: shown,
+                        fixed_at: fix.finished,
+                        summary: sweep::plain(&fix.summary),
+                        pull_request: fix.pull_request.clone(),
+                    });
+                }
+                _ => open.push(shown),
+            }
+        }
         open.sort_by_key(|o| o.severity);
+        fixed.sort_by_key(|f| std::cmp::Reverse(f.fixed_at));
         all.push(Latest {
             target,
             swept: Some(saved.started),
             components: saved.components,
             open,
+            fixed,
             dismissed: dismissed.len(),
         });
     }
     Ok(all)
+}
+
+/// The newest fix run of each finding or issue, from `state/fixes.jsonl`.
+///
+/// A line that does not parse is skipped: `fix::append` leaves a run cut off by a crash as a
+/// torn line and starts the next record on a new one, so a torn line is expected and says
+/// nothing about any fix.
+fn last_fixes(data_dir: &DataDir) -> Result<BTreeMap<FindingKey, FixLine>, StateError> {
+    let path = data_dir.state_dir().join("fixes.jsonl");
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
+        Err(source) => return Err(StateError::Read { path, source }),
+    };
+    let mut last: BTreeMap<FindingKey, FixLine> = BTreeMap::new();
+    for line in text.lines() {
+        let Ok(fix) = serde_json::from_str::<FixLine>(line) else {
+            continue;
+        };
+        if last
+            .get(&fix.key)
+            .is_none_or(|seen| seen.finished <= fix.finished)
+        {
+            last.insert(fix.key, fix);
+        }
+    }
+    Ok(last)
+}
+
+/// The fields of a `fixes.jsonl` record that decide whether a finding is fixed.
+#[derive(Debug, Deserialize)]
+struct FixLine {
+    key: FindingKey,
+    finished: Timestamp,
+    outcome: Outcome,
+    summary: String,
+    pull_request: Option<String>,
 }
 
 /// `entry` as shown. Every text is a plain line: it holds agent text and names from the
@@ -926,6 +998,65 @@ mod tests {
         );
         assert_eq!(mac.open[0].fix, "up grade", "one line");
         assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
+    }
+
+    #[test]
+    fn a_finding_fixed_after_its_sweep_moves_to_fixed_until_a_later_sweep_finds_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let sweeps = data_dir.sweeps_dir();
+        let [fixed, partial, earlier, refixed] = [1, 2, 3, 4].map(FindingKey);
+        let keys = [fixed, partial, earlier, refixed];
+        save(
+            &sweeps,
+            "20261105T100000Z/mac",
+            &report("2026-11-05T10:00:00Z", None, &keys, "2026-11-01T00:00:00Z"),
+        );
+        let fix = |key: FindingKey, finished: &str, outcome: &str| {
+            json!({"key": key, "target": "mac", "agent": "grok",
+                "started": finished, "finished": finished, "exit_code": 0,
+                "outcome": outcome, "summary": "upgraded\nit", "pull_request": null,
+                "confirmed": "asked", "dir": "/x"})
+            .to_string()
+        };
+        let state = data_dir.state_dir();
+        fs::create_dir_all(&state).unwrap();
+        let lines = [
+            fix(fixed, "2026-11-05T11:00:00Z", "fixed"),
+            fix(partial, "2026-11-05T11:00:00Z", "partial"),
+            // Fixed before the sweep that still found it: the fix did not hold.
+            fix(earlier, "2026-11-05T09:00:00Z", "fixed"),
+            // A crash left a torn line; the next record starts on a new one.
+            r#"{"key": "#.to_owned(),
+            // Fixed, then a later run failed: the newest run decides.
+            fix(refixed, "2026-11-05T11:00:00Z", "fixed"),
+            fix(refixed, "2026-11-05T12:00:00Z", "failed"),
+        ];
+        fs::write(state.join("fixes.jsonl"), lines.join("\n") + "\n").unwrap();
+
+        let mac = &latest(&data_dir, &config).unwrap()[0];
+        let open: Vec<FindingKey> = mac.open.iter().map(|o| o.key).collect();
+        assert_eq!(open, [partial, earlier, refixed]);
+        let moved: Vec<FindingKey> = mac.fixed.iter().map(|f| f.open.key).collect();
+        assert_eq!(moved, [fixed]);
+        assert_eq!(mac.fixed[0].summary, "upgraded it", "one line");
+        assert_eq!(
+            mac.fixed[0].fixed_at,
+            "2026-11-05T11:00:00Z".parse::<Timestamp>().unwrap()
+        );
+
+        // A sweep after the fix that still finds it lists it as open again.
+        save(
+            &sweeps,
+            "20261105T130000Z/mac",
+            &report("2026-11-05T13:00:00Z", None, &keys, "2026-11-01T00:00:00Z"),
+        );
+        let mac = &latest(&data_dir, &config).unwrap()[0];
+        assert!(mac.fixed.is_empty());
+        assert_eq!(mac.open.len(), 4);
     }
 
     #[test]
