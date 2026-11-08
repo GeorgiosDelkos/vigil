@@ -19,7 +19,6 @@ use std::io;
 use std::io::Read as _;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
-use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -33,6 +32,7 @@ use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use crate::cancel;
 use crate::inventory::InventoryError;
 
 /// How much of a failing command's stderr goes into the error, in characters. Arbitrary.
@@ -157,27 +157,30 @@ fn run_raw(
     timeout: Duration,
 ) -> Result<Option<RawOutput>, InventoryError> {
     let command = command_line(program, args);
+    // The watchdog shell always starts, so a program that is nowhere on PATH is found out
+    // here: it is "not installed". A path to a file that cannot run is installed, and broken.
+    if which(program).is_none() {
+        if program.contains('/') && Path::new(program).exists() {
+            let source = io::Error::from(io::ErrorKind::PermissionDenied);
+            return Err(InventoryError::Spawn { command, source });
+        }
+        return Ok(None);
+    }
     let mut command_builder = Command::new(program);
     // On Unix the child's `PATH` is also where `program` is searched, so this finds it too.
     if let Some(path) = search_path() {
         command_builder.env("PATH", path);
     }
-    let child = command_builder
-        .args(args)
-        .current_dir("/")
-        // Its own process group, so a timeout can stop the helpers it starts as well.
-        .process_group(0)
+    command_builder.args(args).current_dir("/");
+    // Under the watchdog, which leads its own process group, so a timeout stops the helpers
+    // the tool starts as well, and the tool stops when the app or CLI ends.
+    let child = cancel::supervised(&command_builder)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
     let mut child = match child {
         Ok(child) => child,
-        // A script whose interpreter is gone also fails with NotFound; only a program that is
-        // nowhere on PATH is "not installed".
-        Err(e) if e.kind() == io::ErrorKind::NotFound && which(program).is_none() => {
-            return Ok(None);
-        }
         Err(source) => return Err(InventoryError::Spawn { command, source }),
     };
     // Written on its own thread, so a program that answers before reading all of its input
@@ -191,6 +194,17 @@ fn run_raw(
         thread::spawn(move || drop(stdin.write_all(&input)));
     }
     let (status, stdout, stderr) = wait(child, &command, timeout)?;
+    // The watchdog's shell reports a program it could not run (a removed interpreter) with
+    // 126 or 127 and its own name first, where a spawn would have failed.
+    if matches!(status.code(), Some(126 | 127)) && stderr.starts_with(b"vigil-watchdog: ") {
+        let reason = String::from_utf8_lossy(&stderr)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_owned();
+        let source = io::Error::other(reason);
+        return Err(InventoryError::Spawn { command, source });
+    }
 
     let stderr: String = String::from_utf8_lossy(&stderr)
         .chars()

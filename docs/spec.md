@@ -423,15 +423,19 @@ Built in step 9a (2026-11-06):
   sweeps lock still covers a CLI sweep, which then shows as a failed sweep.
 - Cancel and quit (decided 2026-11-08): the popover's Cancel stops a sweep between targets,
   between NVD requests, or while its agent runs; the targets already swept keep their reports
-  and the folder of the one it stopped in is removed. A fix cannot be cancelled, since one
-  stopped halfway could leave a change half made. Quitting the app cancels whatever runs
-  (a fix included, recorded as `unknown`) and exits once it has cleaned up, or after 10 s. In
-  the CLI, Ctrl-C cancels the same way; a second Ctrl-C exits at once.
-- Agents run as the leader of their own process group, so stopping one stops what it started
-  (`SIGTERM`, then `SIGKILL` after 3 s), and whatever is left in the group when it exits is
-  killed. While an agent runs, a `.pid` file beside its log records its group and start time;
-  an app that was force-quit or crashed stops a recorded agent that still runs, and removes
-  half-written sweep folders, at its next start and at the start of every sweep.
+  and the folder of the one it stopped in is removed. A fix cannot be cancelled from the
+  popover, since one stopped halfway could leave a change half made. Quitting the app cancels
+  whatever runs (a fix included, recorded as `unknown`: it may have made part of the change)
+  and exits once it has ended, or after 10 s; a second quit changes nothing. In the CLI,
+  Ctrl-C cancels the same way (exit code 130); a second Ctrl-C exits at once.
+- Every program a sweep or fix starts (the agent, `brew`, `gh`, `ssh`) runs under a small `sh`
+  watchdog that leads its own process group and checks once a second that the app or CLI
+  still runs. However that ends (quit, logout, `kill`, a crash, a closed terminal), the
+  watchdog stops the group: `SIGTERM`, then `SIGKILL` after 3 s. A cancel also stops every
+  descendant of the agent, including one that left its group (`setsid`); after a crash such a
+  descendant is the one thing that can outlive the app. A sweep folder holds a `.running`
+  marker while its sweep runs; at the next start, and before every sweep, the unfinished
+  target folders of a sweep that never ended are removed.
 - The schedule is checked every minute (`Schedule::due` against the newest sweep folder's
   start, failed ones included, so a failing sweep is not retried at once); a Mac that wakes
   after a missed sweep runs it within a minute.

@@ -354,15 +354,15 @@ pub fn sweep(
     let sweeps = data_dir.sweeps_dir();
     let _lock = Lock::acquire(&sweeps)?;
     let mut notes = Vec::new();
-    let cleaned = cancel::clean_up_holding_lock(data_dir)?;
-    match cleaned.agents {
-        0 => {}
-        1 => notes.push("stopped an agent an interrupted sweep or fix left running".to_owned()),
-        n => notes.push(format!(
-            "stopped {n} agents interrupted sweeps or fixes left running"
-        )),
+    // Best effort: a folder an interrupted sweep left is untidy, not a reason to stop.
+    if let Err(e) = cancel::clean_up_holding_lock(data_dir) {
+        notes.push(format!(
+            "cleaning up after an interrupted sweep: {}",
+            error_chain(&e)
+        ));
     }
     let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
+    let _running = cancel::mark_running(&dir)?;
 
     let feeds = Feeds::new(data_dir, nvd_access(&mut notes));
     let kev = match feeds.kev() {
@@ -398,6 +398,7 @@ pub fn sweep(
 
     let mut each_target = || {
         let mut reports = Vec::new();
+        cancel.check()?;
         if wanted("mac") {
             progress(Progress::Target { target: "mac" });
             progress(Progress::Inventory);
@@ -763,7 +764,7 @@ impl Shared<'_> {
             let log = dir.join(format!("agent-{attempt}.log"));
             let status = agent
                 .run(
-                    agent.sweep_command(self.located, &bundle, &prompt),
+                    &agent.sweep_command(self.located, &bundle, &prompt),
                     &log,
                     self.sources.cancel,
                 )
@@ -1718,6 +1719,19 @@ mod tests {
         );
         assert!(seen[0].contains("packages: 2, products: 2"), "{seen:?}");
         assert!(seen[1].contains("done: 1, total: 2"), "{seen:?}");
+
+        // A cancel stops before the next NVD product, each a paced request.
+        let stopped = Cancel::new();
+        stopped.cancel();
+        let mut seen = Vec::new();
+        let sources = Sources {
+            cancel: &stopped,
+            ..sources
+        };
+        fetch(sources, &inventory.components, &mut Vec::new(), &mut |p| {
+            seen.push(format!("{p:?}"));
+        });
+        assert!(!seen.iter().any(|s| s.starts_with("Product")), "{seen:?}");
     }
 
     #[test]

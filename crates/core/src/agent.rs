@@ -250,11 +250,11 @@ impl AgentKind {
     }
 
     /// Runs `command`, from [`Self::sweep_command`] or [`Self::fix_command`], with its stdout
-    /// and stderr in `log`, and waits for it. It runs in its own process group, recorded in a
-    /// `.pid` file beside the log while it runs, and `cancel` stops it and everything it
-    /// started (see `cancel`). Returns its exit status: what a failure means depends on
-    /// whether it wrote its result file, which is the caller's to check. There is no time
-    /// limit: an agent can take many minutes, and the user chose to let it run.
+    /// and stderr in `log`, and waits for it. It runs under the `cancel` module's watchdog, so
+    /// it stops when this process ends, and `cancel` stops it and everything it started.
+    /// Returns its exit status: what a failure means depends on whether it wrote its result
+    /// file, which is the caller's to check. There is no time limit: an agent can take many
+    /// minutes, and the user chose to let it run.
     ///
     /// # Errors
     ///
@@ -262,17 +262,25 @@ impl AgentKind {
     /// cancelled.
     pub(crate) fn run(
         self,
-        mut command: Command,
+        command: &Command,
         log: &Path,
         cancel: &Cancel,
     ) -> Result<ExitStatus, AgentError> {
+        // The watchdog shell always starts, so a binary that has gone is caught here; the
+        // binary is the login shell's absolute path.
+        if !Path::new(command.get_program()).is_file() {
+            return Err(AgentError::Start {
+                agent: self,
+                source: io::Error::from(io::ErrorKind::NotFound),
+            });
+        }
         let log_err = |source| AgentError::Log {
             path: log.to_owned(),
             source,
         };
         let out = fs::File::create(log).map_err(log_err)?;
         let err = out.try_clone().map_err(log_err)?;
-        let child = cancel::own_group(&mut command)
+        let child = cancel::supervised(command)
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err)
@@ -281,7 +289,21 @@ impl AgentKind {
                 agent: self,
                 source,
             })?;
-        match cancel::watch(child, &log.with_extension("pid"), cancel) {
+        match cancel::watch(child, cancel) {
+            // The watchdog's shell reports an agent it could not run (a removed interpreter)
+            // with 126 or 127 and its own name first in the log, where a spawn would have
+            // failed.
+            Ok(Ended::Exited(status))
+                if matches!(status.code(), Some(126 | 127))
+                    && fs::read_to_string(log).is_ok_and(|t| t.starts_with("vigil-watchdog: ")) =>
+            {
+                let reason = fs::read_to_string(log).unwrap_or_default();
+                let reason = reason.lines().next().unwrap_or_default().to_owned();
+                Err(AgentError::Start {
+                    agent: self,
+                    source: io::Error::other(reason),
+                })
+            }
             Ok(Ended::Exited(status)) => Ok(status),
             Ok(Ended::Cancelled) => Err(AgentError::Cancelled { agent: self }),
             Err(source) => Err(AgentError::Watch {
@@ -691,7 +713,7 @@ mod tests {
         let log = tmp.path().join("agent.log");
         AgentKind::Gemini
             .run(
-                AgentKind::Gemini.sweep_command(&located(&ok), tmp.path(), "P"),
+                &AgentKind::Gemini.sweep_command(&located(&ok), tmp.path(), "P"),
                 &log,
                 &Cancel::new(),
             )
@@ -706,7 +728,7 @@ mod tests {
         let fail = script(tmp.path(), "fail", "exit 3");
         let status = AgentKind::Gemini
             .run(
-                AgentKind::Gemini.sweep_command(&located(&fail), tmp.path(), "P"),
+                &AgentKind::Gemini.sweep_command(&located(&fail), tmp.path(), "P"),
                 &log,
                 &Cancel::new(),
             )
@@ -716,7 +738,7 @@ mod tests {
         let missing = tmp.path().join("missing");
         let err = AgentKind::Gemini
             .run(
-                AgentKind::Gemini.sweep_command(&located(&missing), tmp.path(), "P"),
+                &AgentKind::Gemini.sweep_command(&located(&missing), tmp.path(), "P"),
                 &log,
                 &Cancel::new(),
             )

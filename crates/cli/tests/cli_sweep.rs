@@ -41,7 +41,8 @@ case "$FAKE_AGENT_MODE:$n" in
     echo '{"outcome": "fixed", "summary": "pinned the action",
       "pull_request": "https://github.com/o/r/pull/7"}' > result.json ;;
   crash:*) exit 3 ;;
-  hang:*) sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
+  hang:*|second-hangs:2) sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
+  second-hangs:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   late-crash:*) echo '{"findings": [], "issues": []}' > findings.json; exit 3 ;;
 esac
 "#;
@@ -890,13 +891,13 @@ fn gone(pid: &str) -> bool {
     false
 }
 
-#[test]
-fn ctrl_c_stops_the_agent_and_what_it_started_and_cleans_up() {
-    let sandbox = Sandbox::new("agent = \"claude\"\n");
+/// Starts a sweep with the fake agent in `mode`, presses Ctrl-C once the agent has started a
+/// child, and returns the CLI's output and that child's pid.
+fn sweep_and_interrupt(sandbox: &Sandbox, mode: &str) -> (Output, String) {
     let cli = sandbox
-        .command("hang")
+        .command(mode)
         .arg("sweep")
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("the CLI starts");
@@ -915,23 +916,61 @@ fn ctrl_c_stops_the_agent_and_what_it_started_and_cleans_up() {
         .status()
         .expect("kill runs");
     assert!(interrupted.success());
-
     let out = cli.wait_with_output().expect("the CLI finishes");
+    let child = fs::read_to_string(&child_pid)
+        .expect("the agent wrote its child")
+        .trim()
+        .to_owned();
+    (out, child)
+}
+
+/// The folders under `data/sweeps`, each with its target folders.
+fn sweep_folders(sandbox: &Sandbox) -> Vec<(String, Vec<String>)> {
+    let names = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .expect("the sweeps folder exists")
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    let sweeps = sandbox.path().join("data/sweeps");
+    names(&sweeps)
+        .into_iter()
+        .map(|sweep| {
+            let targets = names(&sweeps.join(&sweep));
+            (sweep, targets)
+        })
+        .collect()
+}
+
+#[test]
+fn ctrl_c_stops_the_agent_and_what_it_started_and_cleans_up() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let (out, child) = sweep_and_interrupt(&sandbox, "hang");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "{stderr}");
+    assert_eq!(out.status.code(), Some(130), "{stderr}");
     assert!(stderr.contains("stopping"), "{stderr}");
     assert!(stderr.contains("the sweep was cancelled"), "{stderr}");
-    let child = fs::read_to_string(&child_pid).unwrap();
-    assert!(gone(child.trim()), "the agent's own child is stopped too");
-    let sweeps = sandbox.path().join("data/sweeps");
-    let left: Vec<_> = fs::read_dir(&sweeps)
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.path())
-        .collect();
-    assert!(
-        left.is_empty(),
-        "the cancelled sweep's folder is removed: {left:?}"
+    assert!(gone(&child), "the agent's own child is stopped too");
+    assert_eq!(
+        sweep_folders(&sandbox),
+        [],
+        "the cancelled sweep's folder is removed"
     );
+}
+
+#[test]
+fn a_sweep_cancelled_in_its_second_target_keeps_the_first() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n[github]\nrepos = [\"o/r\"]\n");
+    let (out, child) = sweep_and_interrupt(&sandbox, "second-hangs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(130), "{stderr}");
+    assert!(gone(&child));
+    let folders = sweep_folders(&sandbox);
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    assert_eq!(folders[0].1, ["mac"], "the repository's folder is removed");
+    assert!(sandbox.newest_report_path("mac").exists());
 }

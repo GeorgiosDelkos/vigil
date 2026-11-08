@@ -24,6 +24,7 @@ use vigil_core::Package;
 use vigil_core::Product;
 use vigil_core::Progress;
 use vigil_core::SshConn;
+use vigil_core::SweepError;
 use vigil_core::Targets;
 use vigil_core::dismiss;
 use vigil_core::latest;
@@ -180,8 +181,9 @@ fn main() -> anyhow::Result<()> {
 
 /// A cancel request that Ctrl-C makes. The agent runs in its own process group, so the
 /// terminal's Ctrl-C reaches only this process, which then stops the agent and everything it
-/// started and cleans up: a few seconds at most. A second Ctrl-C exits at once; the next sweep
-/// stops an agent that leaves behind.
+/// started and cleans up: a few seconds at most. A second Ctrl-C exits at once, and so does a
+/// closed terminal or `kill`; the core's watchdog then stops the agent within a few seconds,
+/// and the next sweep removes the unfinished folder.
 fn cancel_on_ctrl_c() -> anyhow::Result<Cancel> {
     let cancel = Cancel::new();
     let handler = cancel.clone();
@@ -200,13 +202,21 @@ fn cancel_on_ctrl_c() -> anyhow::Result<Cancel> {
 /// Sweeps `targets` and prints each report; fails when any target swept has no valid verdict.
 fn run_sweep(data_dir: &DataDir, config: &Config, targets: Targets<'_>) -> anyhow::Result<()> {
     let cancel = cancel_on_ctrl_c()?;
-    let reports = sweep(
+    let reports = match sweep(
         data_dir,
         config,
         targets,
         &mut |p| show_progress(&p),
         &cancel,
-    )?;
+    ) {
+        // The sweep has stopped its agent and removed its unfinished folder; 130 is the code
+        // a shell gives a command stopped by Ctrl-C, as a second Ctrl-C exits.
+        Err(SweepError::Cancelled) => {
+            status("the sweep was cancelled");
+            std::process::exit(130);
+        }
+        swept => swept?,
+    };
     let mut failures = Vec::new();
     for report in &reports {
         print(&report_markdown(report));

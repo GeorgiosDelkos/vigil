@@ -272,7 +272,7 @@ pub enum Confirmed {
 ///
 /// Blocks until the agent finishes; there is no time limit. An agent that cannot start is
 /// recorded as `unknown` with the reason, like one that writes no result, and so is one that
-/// `cancel` stops (the app quitting): it may have done part of the fix.
+/// `cancel` stops (the app quitting, or Ctrl-C in the CLI): it may have done part of the fix.
 ///
 /// # Errors
 ///
@@ -311,13 +311,20 @@ pub fn run_fix(
     }
 
     let ran = plan.agent.run(
-        plan.agent.fix_command(&plan.located, &dir, PROMPT_LINE),
+        &plan.agent.fix_command(&plan.located, &dir, PROMPT_LINE),
         &dir.join("agent.log"),
         cancel,
     );
     let repo = plan.target.strip_prefix("github:");
     let (exit_code, result) = match ran {
         Ok(status) => (status.code(), read_result(&dir.join("result.json"), repo)),
+        Err(e @ (AgentError::Cancelled { .. } | AgentError::Watch { .. })) => (
+            None,
+            Err(format!(
+                "the agent was stopped partway and may have made part of the fix: {}",
+                sweep::error_chain(&e)
+            )),
+        ),
         Err(e) => (
             None,
             Err(format!("the agent did not run: {}", sweep::error_chain(&e))),

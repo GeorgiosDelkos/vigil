@@ -70,7 +70,6 @@ fn main() {
         .setup(|app| {
             // A menu-bar app: no Dock icon and no app menu (LSUIElement).
             app.set_activation_policy(ActivationPolicy::Accessory);
-            runner::clean_up_at_start(app.handle());
             tray::create(app.handle())?;
             runner::schedule(app.handle().clone());
             settings::detect_at_start(app.handle().clone());
@@ -85,8 +84,9 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("the app's context and plugins are valid")
         .run(|app, event| {
-            // However the app is asked to quit, a running sweep or fix stops its agent and
-            // cleans up first; `runner::quit` exits again once it has.
+            // An exit request while a sweep or fix runs goes through `runner::quit`, which
+            // cancels it and exits once it has ended. A quit that skips this event (logout,
+            // `kill`, a crash) is covered by the core's watchdog, which stops the programs.
             if let RunEvent::ExitRequested { api, .. } = event
                 && runner::must_wait_to_quit(app)
             {
