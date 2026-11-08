@@ -124,7 +124,11 @@ describe("the popover", () => {
         pending: ["web"],
         position: 2,
         total: 3,
+        percent: 41,
+        target_end: 66,
+        open_ended: true,
         started: new Date().toISOString(),
+        step_started: new Date(Date.now() - 3 * 60_000).toISOString(),
       },
     });
     answer();
@@ -132,6 +136,17 @@ describe("the popover", () => {
     expect(await screen.findByText("Sweeping me/app")).toBeTruthy();
     expect(screen.getByText(/target 2 of 3/)).toBeTruthy();
     expect(screen.getByText("reading Homebrew")).toBeTruthy();
+    expect(screen.getByText("41%")).toBeTruthy();
+    expect(screen.getByText("3 min")).toBeTruthy();
+
+    const bar = screen.getByRole("progressbar", { name: "Sweep progress" });
+    expect(bar.getAttribute("aria-valuenow")).toBe("41");
+    expect(bar.getAttribute("aria-valuetext")).toBe("41%, reading Homebrew");
+    const fill = bar.querySelector<HTMLElement>(".bar-fill");
+    const work = bar.querySelector<HTMLElement>(".bar-work");
+    expect(fill?.style.width).toBe("41%");
+    expect([work?.style.left, work?.style.width]).toEqual(["41%", "25%"]);
+    expect(bar.querySelectorAll(".bar-tick")).toHaveLength(2);
   });
 
   it("shows all clear once a sweep found nothing", async () => {

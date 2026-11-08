@@ -116,7 +116,14 @@ enum StatusView {
         position: usize,
         /// How many targets the sweep has.
         total: usize,
+        /// How far the whole sweep is, from 0 to 100: each target an equal share.
+        percent: usize,
+        /// Where the current target's share of the bar ends, from 0 to 100.
+        target_end: usize,
+        /// Whether the current step has no known length, so the bar moves instead of filling.
+        open_ended: bool,
         started: Timestamp,
+        step_started: Timestamp,
     },
     Fixing {
         title: String,
@@ -138,13 +145,26 @@ impl StatusView {
                 current,
                 done,
                 pending,
+                thousandths,
+                open_ended,
                 started,
+                step_started,
             } => {
                 let position = done.len() + usize::from(current.is_some());
+                let total = position + pending.len();
+                let finished = position.saturating_sub(1) * 1000 + thousandths;
                 Self::Sweeping {
                     step,
-                    total: position + pending.len(),
+                    total,
                     position,
+                    percent: if position == 0 {
+                        0
+                    } else {
+                        finished * 100 / (total * 1000)
+                    },
+                    target_end: position * 100 / total.max(1),
+                    open_ended,
+                    step_started,
                     current: current.map(|t| target_label(&t).to_owned()),
                     done: labels(done),
                     pending: labels(pending),
@@ -312,7 +332,10 @@ mod tests {
             current: current.map(str::to_owned),
             done: done.iter().map(|&t| t.to_owned()).collect(),
             pending: pending.iter().map(|&t| t.to_owned()).collect(),
+            thousandths: 500,
+            open_ended: true,
             started,
+            step_started: started,
         };
         let StatusView::Sweeping {
             step,
@@ -321,7 +344,11 @@ mod tests {
             pending,
             position,
             total,
+            percent,
+            target_end,
+            open_ended,
             started: at,
+            ..
         } = StatusView::of(sweeping(Some("github:o/r"), &["mac"], &["server:web"]))
         else {
             panic!("still sweeping");
@@ -335,13 +362,25 @@ mod tests {
             (vec!["This Mac".to_owned()], vec!["web".to_owned()])
         );
         assert_eq!((position, total, at), (2, 3, started));
+        assert_eq!(
+            (percent, target_end, open_ended),
+            (50, 66, true),
+            "one target done and half of the second: 1.5 of 3, the second ending at 2 of 3"
+        );
         let StatusView::Sweeping {
-            position, total, ..
+            position,
+            total,
+            percent,
+            ..
         } = StatusView::of(sweeping(None, &[], &["mac", "server:web"]))
         else {
             panic!("still sweeping");
         };
-        assert_eq!((position, total), (0, 2), "before the first target");
+        assert_eq!(
+            (position, total, percent),
+            (0, 2, 0),
+            "before the first target"
+        );
         assert!(matches!(StatusView::of(Status::Idle), StatusView::Idle));
     }
 }

@@ -554,6 +554,72 @@ kbd {
 }
 
 /* Sweeping */
+.pct {
+  font: 600 20px/1 var(--ui);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--l1);
+}
+.bar {
+  position: relative;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 0 0 0.5px var(--hair);
+}
+.bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #4b74ea, var(--run));
+  box-shadow: 0 0 10px -2px rgba(110, 155, 255, 0.7);
+  transition: width 400ms ease;
+}
+/* The agent's step: no known length, so it moves instead of filling. */
+.bar-work {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(110, 155, 255, 0.35) 0 6px,
+    rgba(110, 155, 255, 0.12) 6px 12px
+  );
+  background-size: 17px 100%;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .bar-work {
+    animation: bar-work 0.8s linear infinite;
+  }
+}
+@keyframes bar-work {
+  to {
+    background-position: 17px 0;
+  }
+}
+.bar-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: rgba(0, 0, 0, 0.45);
+}
+.step-text {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+.step-detail {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--l2);
+  overflow-wrap: anywhere;
+}
+.step-detail::first-letter {
+  text-transform: uppercase;
+}
 .steps {
   display: grid;
 }

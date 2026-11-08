@@ -18,7 +18,14 @@ export type Status =
       readonly pending: readonly string[];
       readonly position: number;
       readonly total: number;
+      /** How far the whole sweep is, 0 to 100. */
+      readonly percent: number;
+      /** Where the current target's share of the bar ends, 0 to 100. */
+      readonly target_end: number;
+      /** The current step has no known length (the agent is running). */
+      readonly open_ended: boolean;
       readonly started: string;
+      readonly step_started: string;
     }
   | { readonly state: "fixing"; readonly title: string }
   | { readonly state: "failed"; readonly error: string };

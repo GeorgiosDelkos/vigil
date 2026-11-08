@@ -401,6 +401,10 @@ not an OSV ecosystem, so formulae go through NVD.
 - Window: finding details (agent explanation, evidence, fix plan + confirm), targets
   (Mac folders, repos, servers), agent picker, schedule, history window, report history.
 - Rust <-> UI: Tauri commands call core; sweep progress streams as Tauri events.
+- While sweeping, the popover shows a progress bar with one equal share per target. Rust
+  measures it (`Progress::thousandths`): listing up to 5% of a target, fetching advisories up
+  to 50%, the agent the rest. The agent's run has no known length, so that part of the bar
+  moves instead of filling, and the step shows how long it has run (decided 2026-11-08).
 - Plugins: notification, autostart, positioner (versions looked up at implementation time).
 - Scheduler: in-app interval timer; skip if a sweep is running; run once on wake if overdue.
 

@@ -80,8 +80,14 @@ pub(crate) enum Status {
         done: Vec<String>,
         /// The targets still to come, in order.
         pending: Vec<String>,
+        /// How far into the current target it is, in thousandths ([`Progress::thousandths`]).
+        thousandths: usize,
+        /// Whether the current step has no known length ([`Progress::open_ended`]).
+        open_ended: bool,
         /// When it started.
         started: Timestamp,
+        /// When the current step started.
+        step_started: Timestamp,
     },
     /// A confirmed fix is running.
     Fixing {
@@ -157,12 +163,16 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
     let pending = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
         .map(|config| target_names(&config))
         .unwrap_or_default();
+    let now = Timestamp::now();
     runner.claim(Status::Sweeping {
         step: "starting".to_owned(),
         current: None,
         done: Vec::new(),
         pending,
-        started: Timestamp::now(),
+        thousandths: 0,
+        open_ended: false,
+        started: now,
+        step_started: now,
     })?;
     changed(app);
     let app = app.clone();
@@ -214,6 +224,9 @@ fn advance(status: &mut Status, progress: &Progress<'_>) {
         current,
         done,
         pending,
+        thousandths,
+        open_ended,
+        step_started,
         ..
     } = status
     else {
@@ -225,6 +238,9 @@ fn advance(status: &mut Status, progress: &Progress<'_>) {
         *current = Some((*target).to_owned());
     }
     *step = progress.to_string();
+    *thousandths = progress.thousandths();
+    *open_ended = progress.open_ended();
+    *step_started = Timestamp::now();
 }
 
 /// How a fix ended, for the popover.
@@ -378,10 +394,43 @@ mod tests {
             current: None,
             done: Vec::new(),
             pending: vec!["mac".to_owned(), "server:web".to_owned()],
+            thousandths: 0,
+            open_ended: false,
             started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
         };
         advance(&mut status, &Progress::Target { target: "mac" });
         advance(&mut status, &Progress::Inventory);
+        let Status::Sweeping {
+            thousandths,
+            open_ended,
+            step_started,
+            ..
+        } = &status
+        else {
+            panic!("still sweeping");
+        };
+        assert_eq!((*thousandths, *open_ended), (20, false));
+        assert!(
+            *step_started > Timestamp::UNIX_EPOCH,
+            "each step restarts the clock"
+        );
+        advance(
+            &mut status,
+            &Progress::Agent {
+                agent: vigil_core::AgentKind::Grok,
+                attempt: 1,
+                advisories: 3,
+            },
+        );
+        assert!(matches!(
+            status,
+            Status::Sweeping {
+                thousandths: 500,
+                open_ended: true,
+                ..
+            }
+        ));
         advance(
             &mut status,
             &Progress::Target {
