@@ -42,6 +42,12 @@ const WINDOW_DAYS: i64 = 120;
 /// The same limit as a duration.
 const MAX_DELTA: SignedDuration = SignedDuration::from_hours(24 * WINDOW_DAYS);
 
+/// How long a product's cached CVEs are used without asking NVD for changes. Without an API
+/// key each request is paced to 6 s, so a sweep repeated within hours of the last (108
+/// products on one Mac, 2026-11-08) spent 11 minutes on requests that found nothing new.
+/// Two hours is arbitrary: CVEs change over days, and a sweep a day apart still asks.
+const FRESH: SignedDuration = SignedDuration::from_hours(2);
+
 /// CVEs per page. NVD allows up to 2000; 500 keeps each response a few MB. Arbitrary.
 const PAGE: usize = 500;
 
@@ -295,8 +301,18 @@ pub(super) fn fetch(
 ) -> Result<Vec<Advisory>, FeedError> {
     let name = product.cache_name();
     let key = cache_key(&name)?;
-    let cached: Option<ProductCache> = feeds.cache.read("nvd", key)?;
+    let mut cached: Option<ProductCache> = feeds.cache.read("nvd", key)?;
     let now = Timestamp::now();
+    if let Some(fresh) = cached.take_if(|c| is_fresh(c.fetched_at, now)) {
+        return Ok(advisories(fresh.cves, history));
+    }
+    // A product NVD's CPE dictionary does not know has no CVEs to ask for; 33 of 108 on one
+    // Mac (2026-11-08), each a paced request every sweep. The answer is asked again after
+    // `UNKNOWN_PRODUCT_RECHECK`, so a product NVD adds later is found then.
+    let check: Option<ProductCheck> = feeds.cache.read("nvd-cpe", key)?;
+    if check.is_some_and(|c| !c.known && c.trusted_at(now)) {
+        return Ok(Vec::new());
+    }
     let window = cached
         .as_ref()
         .and_then(|c| delta_window(c.fetched_at, now));
@@ -338,6 +354,13 @@ pub(super) fn fetch(
     let entry = ProductCache { fetched_at, cves };
     feeds.cache.write("nvd", key, &entry)?;
     Ok(advisories(entry.cves, history))
+}
+
+/// Whether a cache fetched at `fetched_at` is recent enough to use without a request (see
+/// [`FRESH`]). A cache dated after `now` is not: the clock moved back, and its age is unknown.
+fn is_fresh(fetched_at: Timestamp, now: Timestamp) -> bool {
+    let age = now.duration_since(fetched_at);
+    age >= SignedDuration::ZERO && age < FRESH
 }
 
 /// Returns the `lastModStartDate`..`lastModEndDate` range for a cache fetched at
@@ -701,12 +724,14 @@ mod tests {
         assert_eq!(requests[0].query("lastModStartDate"), None);
         assert_eq!(requests[0].header("apikey"), Some("k"));
 
-        // Stand in for "the cache was written moments ago"; the window starts at NVD's time.
+        // Stand in for "the cache was written a few hours ago", too old to be used as it is;
+        // the window starts at NVD's time.
         let cache_file = tmp.path().join("nvd/openssl.json");
         let text = std::fs::read_to_string(&cache_file).unwrap();
         let mut cache: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(cache["fetched_at"], "2026-11-01T10:00:00Z");
-        cache["fetched_at"] = Timestamp::now().to_string().into();
+        let hours_ago = Timestamp::now() - SignedDuration::from_hours(3);
+        cache["fetched_at"] = hours_ago.to_string().into();
         std::fs::write(&cache_file, cache.to_string()).unwrap();
         let fetched_at: Timestamp = cache["fetched_at"].as_str().unwrap().parse().unwrap();
 
@@ -795,6 +820,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_product_nvd_does_not_know_is_not_asked_for_cves() {
+        let server =
+            TestServer::start(|_: &Request| (200, page(0, "2026-11-01T10:00:00.000", &[])));
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(tmp.path().to_owned());
+        let checked = |known: bool, ago: SignedDuration| ProductCheck {
+            known,
+            checked_at: Timestamp::now() - ago,
+        };
+        let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+
+        let week = SignedDuration::from_hours(24 * 7);
+        cache
+            .write("nvd-cpe", "abseil", &checked(false, week))
+            .unwrap();
+        assert!(
+            feeds
+                .nvd(&product("abseil"), History::All)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            server.requests().len(),
+            0,
+            "known to be unknown, so not asked"
+        );
+
+        let months = SignedDuration::from_hours(24 * 40);
+        cache
+            .write("nvd-cpe", "abseil", &checked(false, months))
+            .unwrap();
+        feeds.nvd(&product("abseil"), History::All).unwrap();
+        assert_eq!(
+            server.requests().len(),
+            1,
+            "the answer is old, so the CVEs are asked for"
+        );
+
+        cache
+            .write("nvd-cpe", "curl", &checked(true, week))
+            .unwrap();
+        feeds.nvd(&product("curl"), History::All).unwrap();
+        assert_eq!(server.requests().len(), 2, "a known product is asked");
+    }
+
+    #[test]
+    fn a_cache_under_two_hours_old_is_used_without_a_request() {
+        let server =
+            TestServer::start(|_: &Request| (200, page(0, "2026-11-01T10:00:00.000", &[])));
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(tmp.path().to_owned());
+        let at = |ago: SignedDuration| ProductCache {
+            fetched_at: Timestamp::now() - ago,
+            cves: BTreeMap::from([(
+                "CVE-KEPT".to_owned(),
+                RawValue::from_string(r#"{"id":"CVE-KEPT"}"#.to_owned()).unwrap(),
+            )]),
+        };
+        cache
+            .write("nvd", "curl", &at(SignedDuration::from_mins(90)))
+            .unwrap();
+        let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+        let advisories = feeds.nvd(&product("curl"), History::All).unwrap();
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(server.requests().len(), 0, "fresh, so NVD is not asked");
+
+        cache
+            .write("nvd", "curl", &at(SignedDuration::from_mins(130)))
+            .unwrap();
+        feeds.nvd(&product("curl"), History::All).unwrap();
+        assert_eq!(server.requests().len(), 1, "over two hours old, so it is");
+
+        let ahead = Timestamp::now() + SignedDuration::from_mins(5);
+        assert!(
+            !is_fresh(ahead, Timestamp::now()),
+            "a clock that moved back"
+        );
+    }
+
     /// With NVD's clock ahead of ours, the delta only covered up to our `now`, so the next one
     /// must start there and not at NVD's later time, or the CVEs in between are never fetched.
     #[test]
@@ -804,7 +909,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cache = Cache::new(tmp.path().to_owned());
         let old = ProductCache {
-            fetched_at: Timestamp::now() - SignedDuration::from_hours(1),
+            fetched_at: Timestamp::now() - SignedDuration::from_hours(3),
             cves: BTreeMap::new(),
         };
         cache.write("nvd", "curl", &old).unwrap();

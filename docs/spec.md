@@ -391,6 +391,10 @@ not an OSV ecosystem, so formulae go through NVD.
   the KEV catalog cannot be read, no CVE is filtered.
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
+- A product's cached CVEs are used without a request for 2 hours after they were fetched, and
+  a product NVD's CPE dictionary does not know is not asked for CVEs until that answer is
+  rechecked (30 days). On one Mac a repeated sweep had spent 11 minutes on NVD requests that
+  found nothing (decided 2026-11-08).
 - `history.since` drops advisories both published and last modified before that date (NVD keeps
   a CVE's original published date when it later adds a product); records without either date
   are kept. NVD rarely leaves an old CVE untouched: all 10294 NVD records in one Mac's bundle
