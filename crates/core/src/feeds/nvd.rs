@@ -214,6 +214,12 @@ impl Product {
         format!("cpe:2.3:*:{vendor}:{}", self.name)
     }
 
+    /// Returns whether a CPE's `vendor` and `product` fields name this product: the same name,
+    /// and the same vendor when this one has one.
+    pub(super) fn is_named_by(&self, vendor: &str, product: &str) -> bool {
+        self.name == product && self.vendor.as_deref().is_none_or(|v| v == vendor)
+    }
+
     /// Returns the cache file name. Neither part may contain `..`, so `github..cli` cannot be
     /// confused with a vendorless product.
     fn cache_name(&self) -> String {

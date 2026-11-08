@@ -22,7 +22,7 @@ and the user can approve a fix the agent then performs.
 | Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
 | Feed flow | App fetches into a local cache; agent reads files |
 | History window | User-chosen (`since` date or `all`); then deltas |
-| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries |
+| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV) |
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
 | Agent permissions | Sweeps restricted: read anything, write only `findings.json`, read-only listing commands. Fixes get full access, only after the user confirms (decided 2026-11-05) |
 | Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
@@ -384,12 +384,18 @@ not an OSV ecosystem, so formulae go through NVD.
   history on the first fetch, then `lastModStartDate`/`lastModEndDate` windows (120-day
   maximum; an older cache is fetched in full again). Requests are paced to the published
   limit: 5 per 30 s without a key, 50 per 30 s with an API key read from the macOS Keychain
-  (service `io.github.georgiosdelkos.vigil`, account `nvd-api-key`).
+  (service `io.github.georgiosdelkos.vigil`, account `nvd-api-key`). A CVE reaches the bundle
+  only for the installed versions its CPE matches may cover (`feeds::cpe`, which lists the
+  rules); whatever it cannot tell is kept, a CVE that names the product only as not vulnerable
+  (the platform another product runs on) is dropped, and a CVE in KEV is always kept; when
+  the KEV catalog cannot be read, no CVE is filtered.
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
 - `history.since` drops advisories both published and last modified before that date (NVD keeps
   a CVE's original published date when it later adds a product); records without either date
-  are kept.
+  are kept. NVD rarely leaves an old CVE untouched: all 10294 NVD records in one Mac's bundle
+  (2026-11-08) were last modified in 2024 or later, so a `since` date before 2024 drops nothing
+  from NVD there.
 - Advisory ids and product names come from the network and become cache file names, so they
   are checked against a safe character set first.
 

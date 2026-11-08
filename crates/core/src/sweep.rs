@@ -42,6 +42,7 @@ use crate::feeds::NvdAccess;
 use crate::feeds::OsvAdvisory;
 use crate::feeds::OsvQuery;
 use crate::feeds::Product;
+use crate::feeds::cpe;
 use crate::findings;
 use crate::findings::Finding;
 use crate::findings::Fix;
@@ -912,7 +913,9 @@ fn fetch(
     });
 
     let mut fetched = fetch_osv(sources, &packages, problems);
-    fetched.extend(fetch_nvd(sources, &products, problems, progress));
+    fetched.extend(fetch_nvd(
+        sources, components, &products, problems, progress,
+    ));
     fetched
 }
 
@@ -970,8 +973,14 @@ fn fetch_osv(
 }
 
 /// NVD CVEs per product, merged by CVE id, and one note for every product NVD does not know.
+/// A CVE is linked only to the components whose installed version it may affect, and left out
+/// when it may affect none of them (see `feeds::cpe`). A CVE in the KEV catalog is linked to
+/// every component of its product: one exploited in the wild is worth the agent's look even
+/// when its CPE matches seem to rule the version out. When the catalog could not be read,
+/// any CVE may be in it, so none is filtered.
 fn fetch_nvd(
     sources: Sources<'_>,
+    components: &[Component],
     products: &BTreeMap<String, (Product, Vec<usize>)>,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
@@ -996,10 +1005,24 @@ fn fetch_nvd(
             },
             Ok(advisories) => {
                 for advisory in advisories {
+                    let may_be_exploited = sources
+                        .kev
+                        .is_none_or(|kev| advisory.is_known_exploited(kev));
+                    let matches = cpe::Matches::parse(&advisory.record);
+                    let affected: Vec<usize> = indexes
+                        .iter()
+                        .copied()
+                        .filter(|&i| {
+                            may_be_exploited || matches.may_affect(product, &components[i].version)
+                        })
+                        .collect();
+                    if affected.is_empty() {
+                        continue;
+                    }
                     let entry = found
                         .entry(advisory.id.clone())
                         .or_insert_with(|| (advisory, BTreeSet::new()));
-                    entry.1.extend(indexes);
+                    entry.1.extend(affected);
                 }
             }
             Err(e) => problems.push(format!("NVD product {name}: {}", error_chain(&e))),
@@ -1566,8 +1589,9 @@ mod tests {
     }
 
     /// OSV knows GHSA-1 for lodash and PYSEC-1 for django (whose record spells it `Django`);
-    /// NVD knows CVE-9 for curl and nothing for a made-up product that is also missing from the
-    /// CPE dictionary.
+    /// NVD knows four CVEs for curl, CVE-9 for every version, CVE-8 for versions before 7, and
+    /// CVE-7 and CVE-6 for versions before 6, and nothing for a made-up product that is also
+    /// missing from the CPE dictionary.
     fn feeds_server() -> TestServer {
         TestServer::start(|request: &Request| match request.path() {
             "/v1/querybatch" => {
@@ -1591,8 +1615,24 @@ mod tests {
             "/rest/json/cves/2.0" => {
                 let curl =
                     request.query("virtualMatchString").as_deref() == Some("cpe:2.3:*:*:curl");
+                let before = |id: &str, version: &str| {
+                    json!({"cve": {
+                        "id": id,
+                        "published": "2026-01-01T00:00:00.000",
+                        "configurations": [{"nodes": [{"cpeMatch": [{
+                            "vulnerable": true,
+                            "criteria": "cpe:2.3:a:haxx:curl:*:*:*:*:*:*:*:*",
+                            "versionEndExcluding": version,
+                        }]}]}],
+                    }})
+                };
                 let cves = if curl {
-                    json!([{"cve": {"id": "CVE-9", "published": "2026-01-01T00:00:00.000"}}])
+                    json!([
+                        {"cve": {"id": "CVE-9", "published": "2026-01-01T00:00:00.000"}},
+                        before("CVE-8", "7.0.0"),
+                        before("CVE-7", "6.0.0"),
+                        before("CVE-6", "6.0.0"),
+                    ])
                 } else {
                     json!([])
                 };
@@ -1639,16 +1679,18 @@ mod tests {
                 component("npm:lodash", "4.17.21"),
                 component("made-up-product", "1"),
                 component("pypi:django", "4.2"),
+                component("curl", "6.5.0"),
             ],
             ..Inventory::default()
         };
         let history = Config::default_for_tests().history;
+        let kev = Kev::from_ids(&["CVE-7"]);
         let mut problems = Vec::new();
         let mut seen = Vec::new();
         let sources = Sources {
             feeds: &feeds,
             history,
-            kev: None,
+            kev: Some(&kev),
         };
         let fetched = fetch(sources, &inventory.components, &mut problems, &mut |p| {
             seen.push(format!("{p:?}"));
@@ -1663,9 +1705,13 @@ mod tests {
             [
                 ("GHSA-1", vec![0, 2]),
                 ("PYSEC-1", vec![4]),
-                ("CVE-9", vec![1])
+                ("CVE-7", vec![1, 5]),
+                ("CVE-8", vec![5]),
+                ("CVE-9", vec![1, 5]),
             ],
-            "linked by query, so `Django` reaches django"
+            "linked by query, so `Django` reaches django; an NVD CVE only to the versions it \
+             may affect, so CVE-6, which affects neither curl, is left out, unless it is \
+             exploited in the wild like CVE-7"
         );
         assert_eq!(
             problems,
@@ -1673,6 +1719,18 @@ mod tests {
         );
         assert!(seen[0].contains("packages: 2, products: 2"), "{seen:?}");
         assert!(seen[1].contains("done: 1, total: 2"), "{seen:?}");
+
+        // Without the KEV catalog any CVE may be exploited, so none is left out.
+        let unknown = Sources {
+            kev: None,
+            ..sources
+        };
+        let fetched = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
+        let linked: Vec<(&str, Vec<usize>)> = fetched
+            .iter()
+            .map(|(a, c)| (a.id.as_str(), c.iter().copied().collect()))
+            .collect();
+        assert!(linked.contains(&("CVE-6", vec![1, 5])), "{linked:?}");
     }
 
     #[test]
