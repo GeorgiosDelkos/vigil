@@ -27,6 +27,9 @@ use std::process::Stdio;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::cancel;
+use crate::cancel::Cancel;
+use crate::cancel::Ended;
 use crate::config::ModelName;
 use crate::inventory::InventoryError;
 use crate::inventory::command;
@@ -149,7 +152,7 @@ impl AgentKind {
     }
 
     /// Builds the restricted sweep command for `prompt`, run in `bundle`.
-    fn sweep_command(self, located: &Located, bundle: &Path, prompt: &str) -> Command {
+    pub(crate) fn sweep_command(self, located: &Located, bundle: &Path, prompt: &str) -> Command {
         let mut command = Command::new(&located.binary);
         command.current_dir(bundle).env("PATH", &located.path);
         // Homebrew refuses `brew info <path to a .rb file>` (checked 2026-11-06), so an allowed
@@ -195,7 +198,7 @@ impl AgentKind {
     /// Builds the full-access fix command for `prompt`, run in `dir`: no permission prompts,
     /// no sandbox. Only for a fix the user confirmed (spec, "Fix flow"). The flags were checked
     /// on 2026-11-06 in each CLI's `--help` (codex, not installed here, in its CLI reference).
-    fn fix_command(self, located: &Located, dir: &Path, prompt: &str) -> Command {
+    pub(crate) fn fix_command(self, located: &Located, dir: &Path, prompt: &str) -> Command {
         let mut command = Command::new(&located.binary);
         command.current_dir(dir).env("PATH", &located.path);
         self.start_args(&mut command, located);
@@ -246,56 +249,46 @@ impl AgentKind {
         }
     }
 
-    /// Runs a restricted sweep in `bundle` with `prompt`, writing the agent's stdout and stderr
-    /// to `log`, and waits for it. Returns its exit status: what a failure means depends on
-    /// whether it wrote `findings.json`, which is the caller's to check. There is no time limit:
-    /// an agent sweep can take many minutes, and the user chose to let it run.
+    /// Runs `command`, from [`Self::sweep_command`] or [`Self::fix_command`], with its stdout
+    /// and stderr in `log`, and waits for it. It runs in its own process group, recorded in a
+    /// `.pid` file beside the log while it runs, and `cancel` stops it and everything it
+    /// started (see `cancel`). Returns its exit status: what a failure means depends on
+    /// whether it wrote its result file, which is the caller's to check. There is no time
+    /// limit: an agent can take many minutes, and the user chose to let it run.
     ///
     /// # Errors
     ///
-    /// Fails when the log cannot be created or the agent cannot start.
-    pub(crate) fn run_sweep(
+    /// Fails when the log cannot be created, the agent cannot start or be followed, or it was
+    /// cancelled.
+    pub(crate) fn run(
         self,
-        located: &Located,
-        bundle: &Path,
-        prompt: &str,
+        mut command: Command,
         log: &Path,
+        cancel: &Cancel,
     ) -> Result<ExitStatus, AgentError> {
-        self.run_logged(self.sweep_command(located, bundle, prompt), log)
-    }
-
-    /// Runs a confirmed fix with full access in `dir`, like [`Self::run_sweep`]: output to
-    /// `log`, no time limit.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the log cannot be created or the agent cannot start.
-    pub(crate) fn run_fix(
-        self,
-        located: &Located,
-        dir: &Path,
-        prompt: &str,
-        log: &Path,
-    ) -> Result<ExitStatus, AgentError> {
-        self.run_logged(self.fix_command(located, dir, prompt), log)
-    }
-
-    fn run_logged(self, mut command: Command, log: &Path) -> Result<ExitStatus, AgentError> {
         let log_err = |source| AgentError::Log {
             path: log.to_owned(),
             source,
         };
         let out = fs::File::create(log).map_err(log_err)?;
         let err = out.try_clone().map_err(log_err)?;
-        command
+        let child = cancel::own_group(&mut command)
             .stdin(Stdio::null())
             .stdout(out)
             .stderr(err)
-            .status()
+            .spawn()
             .map_err(|source| AgentError::Start {
                 agent: self,
                 source,
-            })
+            })?;
+        match cancel::watch(child, &log.with_extension("pid"), cancel) {
+            Ok(Ended::Exited(status)) => Ok(status),
+            Ok(Ended::Cancelled) => Err(AgentError::Cancelled { agent: self }),
+            Err(source) => Err(AgentError::Watch {
+                agent: self,
+                source,
+            }),
+        }
     }
 }
 
@@ -383,6 +376,21 @@ pub enum AgentError {
         /// The underlying error.
         #[source]
         source: io::Error,
+    },
+    /// The running agent could not be recorded or waited for; it was stopped.
+    #[error("cannot follow {agent} while it runs")]
+    Watch {
+        /// The agent.
+        agent: AgentKind,
+        /// The underlying error.
+        #[source]
+        source: io::Error,
+    },
+    /// The agent was stopped by a cancel request, the user's or the app's as it quit.
+    #[error("{agent} was stopped before it finished")]
+    Cancelled {
+        /// The agent.
+        agent: AgentKind,
     },
 }
 
@@ -682,7 +690,11 @@ mod tests {
         );
         let log = tmp.path().join("agent.log");
         AgentKind::Gemini
-            .run_sweep(&located(&ok), tmp.path(), "P", &log)
+            .run(
+                AgentKind::Gemini.sweep_command(&located(&ok), tmp.path(), "P"),
+                &log,
+                &Cancel::new(),
+            )
             .unwrap();
         let text = fs::read_to_string(&log).unwrap();
         let bundle = tmp.path().canonicalize().unwrap();
@@ -693,13 +705,21 @@ mod tests {
 
         let fail = script(tmp.path(), "fail", "exit 3");
         let status = AgentKind::Gemini
-            .run_sweep(&located(&fail), tmp.path(), "P", &log)
+            .run(
+                AgentKind::Gemini.sweep_command(&located(&fail), tmp.path(), "P"),
+                &log,
+                &Cancel::new(),
+            )
             .unwrap();
         assert_eq!(status.code(), Some(3));
 
         let missing = tmp.path().join("missing");
         let err = AgentKind::Gemini
-            .run_sweep(&located(&missing), tmp.path(), "P", &log)
+            .run(
+                AgentKind::Gemini.sweep_command(&located(&missing), tmp.path(), "P"),
+                &log,
+                &Cancel::new(),
+            )
             .unwrap_err();
         assert!(matches!(err, AgentError::Start { .. }), "{err:?}");
     }

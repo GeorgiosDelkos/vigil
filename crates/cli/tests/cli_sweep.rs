@@ -41,6 +41,7 @@ case "$FAKE_AGENT_MODE:$n" in
     echo '{"outcome": "fixed", "summary": "pinned the action",
       "pull_request": "https://github.com/o/r/pull/7"}' > result.json ;;
   crash:*) exit 3 ;;
+  hang:*) sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
   late-crash:*) echo '{"findings": [], "issues": []}' > findings.json; exit 3 ;;
 esac
 "#;
@@ -867,5 +868,70 @@ fn a_target_name_that_matches_nothing_runs_nothing() {
         (sweeps(), sandbox.runs()),
         (folders, runs),
         "nothing ran for unknown names"
+    );
+}
+
+/// Whether process `pid` still runs. Killed processes take a moment to go and nothing signals
+/// it, so this waits up to a deadline.
+fn gone(pid: &str) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        let alive = Command::new("/bin/kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .expect("kill runs")
+            .success();
+        if !alive {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[test]
+fn ctrl_c_stops_the_agent_and_what_it_started_and_cleans_up() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let cli = sandbox
+        .command("hang")
+        .arg("sweep")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the CLI starts");
+    // The agent writes its child's pid once both run: the signal to press Ctrl-C.
+    let child_pid = sandbox.path().join("counter.child");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !fs::read_to_string(&child_pid).is_ok_and(|t| t.ends_with('\n')) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake agent never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let interrupted = Command::new("/bin/kill")
+        .args(["-INT", &cli.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(interrupted.success());
+
+    let out = cli.wait_with_output().expect("the CLI finishes");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("stopping"), "{stderr}");
+    assert!(stderr.contains("the sweep was cancelled"), "{stderr}");
+    let child = fs::read_to_string(&child_pid).unwrap();
+    assert!(gone(child.trim()), "the agent's own child is stopped too");
+    let sweeps = sandbox.path().join("data/sweeps");
+    let left: Vec<_> = fs::read_dir(&sweeps)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.path())
+        .collect();
+    assert!(
+        left.is_empty(),
+        "the cancelled sweep's folder is removed: {left:?}"
     );
 }

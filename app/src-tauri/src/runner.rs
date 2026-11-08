@@ -5,6 +5,11 @@
 //! one step, so two clicks, or a click and the schedule, cannot start two sweeps. The core's
 //! own lock on the sweeps folder still guards against a sweep from the CLI; that one surfaces
 //! as a failed sweep.
+//!
+//! Each sweep or fix gets its own [`Cancel`]. The user can cancel a sweep from the popover
+//! ([`cancel_sweep`]); quitting ([`quit`]) cancels whatever runs and exits once it has stopped
+//! its agent and cleaned up, or after [`QUIT_WAIT`]. An app that is force-quit cannot do that,
+//! so the app cleans up after an interrupted run when it starts ([`clean_up_at_start`]).
 
 use std::panic;
 use std::panic::AssertUnwindSafe;
@@ -14,7 +19,9 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::PoisonError;
 use std::thread;
+use std::thread::JoinHandle;
 use std::time::Duration;
+use std::time::Instant;
 
 use jiff::Timestamp;
 use serde::Serialize;
@@ -22,6 +29,7 @@ use tauri::AppHandle;
 use tauri::Emitter as _;
 use tauri::Manager as _;
 use tauri_plugin_notification::NotificationExt as _;
+use vigil_core::Cancel;
 use vigil_core::Config;
 use vigil_core::Confirmed;
 use vigil_core::DataDir;
@@ -29,8 +37,10 @@ use vigil_core::FindingKey;
 use vigil_core::FixPlan;
 use vigil_core::Progress;
 use vigil_core::Report;
+use vigil_core::SweepError;
 use vigil_core::Targets;
 use vigil_core::alerts;
+use vigil_core::clean_up_interrupted;
 use vigil_core::last_sweep_started;
 use vigil_core::plan_fix;
 use vigil_core::run_fix;
@@ -42,6 +52,11 @@ use crate::tray;
 /// How often the schedule is checked. Arbitrary: a sweep is due every few hours, so a minute
 /// late is nothing, and a Mac that wakes after a missed sweep runs it within a minute.
 const SCHEDULE_CHECK: Duration = Duration::from_secs(60);
+
+/// How long quitting waits for a cancelled sweep or fix to stop. The agent gets
+/// `SIGKILL` after three seconds; this leaves room for the rest of the cleanup, and quits
+/// anyway when something hangs (a feed request), since the next start cleans up then.
+const QUIT_WAIT: Duration = Duration::from_secs(10);
 
 /// How many alert lines a notification lists before "and N more". Arbitrary: what fits in a
 /// macOS notification without being cut.
@@ -62,6 +77,12 @@ struct Shared {
     /// agent configured, another sweep running) leaves no trace on disk, so the schedule
     /// counts this too, and does not retry such a sweep every minute.
     started: Option<Timestamp>,
+    /// The cancel request of the sweep or fix that runs, or ran last.
+    cancel: Cancel,
+    /// The thread that runs it, which quitting waits for.
+    worker: Option<JoinHandle<()>>,
+    /// Set once the app is quitting: nothing new starts.
+    quitting: bool,
 }
 
 /// What the sweep is doing, as the popover and the tray icon show it.
@@ -84,6 +105,8 @@ pub(crate) enum Status {
         thousandths: usize,
         /// Whether the current step has no known length ([`Progress::open_ended`]).
         open_ended: bool,
+        /// Whether the user cancelled it, and it is stopping.
+        stopping: bool,
         /// When it started.
         started: Timestamp,
         /// When the current step started.
@@ -110,6 +133,9 @@ impl Runner {
             shared: Mutex::new(Shared {
                 status: Status::Idle,
                 started: None,
+                cancel: Cancel::new(),
+                worker: None,
+                quitting: false,
             }),
         }
     }
@@ -126,10 +152,13 @@ impl Runner {
         self.lock().status.clone()
     }
 
-    /// Claims the runner for a sweep or a fix, unless one is already running: one check and
-    /// one write under one lock.
-    fn claim(&self, status: Status) -> Result<(), &'static str> {
+    /// Claims the runner for a sweep or a fix, unless one is already running or the app is
+    /// quitting: one check and one write under one lock. Returns the run's cancel request.
+    fn claim(&self, status: Status) -> Result<Cancel, &'static str> {
         let mut shared = self.lock();
+        if shared.quitting {
+            return Err("the app is quitting");
+        }
         match shared.status {
             Status::Sweeping { .. } => return Err("a sweep is running"),
             Status::Fixing { .. } => return Err("a fix is running"),
@@ -139,7 +168,13 @@ impl Runner {
             shared.started = Some(Timestamp::now());
         }
         shared.status = status;
-        Ok(())
+        shared.cancel = Cancel::new();
+        Ok(shared.cancel.clone())
+    }
+
+    /// Keeps the thread of the run just claimed, for quitting to wait for.
+    fn keep_worker(&self, worker: JoinHandle<()>) {
+        self.lock().worker = Some(worker);
     }
 
     fn set(&self, status: Status) {
@@ -166,45 +201,123 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
         .map_err(|e| e.to_string());
     let pending = config.as_ref().map(target_names).unwrap_or_default();
     let now = Timestamp::now();
-    runner.claim(Status::Sweeping {
+    let cancel = runner.claim(Status::Sweeping {
         step: "starting".to_owned(),
         current: None,
         done: Vec::new(),
         pending,
         thousandths: 0,
         open_ended: false,
+        stopping: false,
         started: now,
         step_started: now,
     })?;
     changed(app);
-    let app = app.clone();
-    thread::spawn(move || {
-        // A panic in the sweep would otherwise leave the status at sweeping for good, and
-        // every later start would be refused.
-        let status =
-            panic::catch_unwind(AssertUnwindSafe(|| run(&app, config))).unwrap_or_else(|_| {
-                Status::Failed {
+    let worker = {
+        let app = app.clone();
+        thread::spawn(move || {
+            // A panic in the sweep would otherwise leave the status at sweeping for good, and
+            // every later start would be refused.
+            let status = panic::catch_unwind(AssertUnwindSafe(|| run(&app, config, &cancel)))
+                .unwrap_or_else(|_| Status::Failed {
                     error: "the sweep stopped unexpectedly".to_owned(),
-                }
-            });
-        app.state::<Runner>().set(status);
-        changed(&app);
-    });
+                });
+            app.state::<Runner>().set(status);
+            changed(&app);
+        })
+    };
+    runner.keep_worker(worker);
     Ok(())
 }
 
-/// Runs one sweep with the config `start` read, and returns the status it leaves.
-fn run(app: &AppHandle, config: Result<Config, String>) -> Status {
+/// Asks the running sweep to stop. It stops its agent and everything that started, keeps the
+/// targets already swept, and removes the folder of the one it stopped in; the popover shows
+/// it stopping until then.
+///
+/// # Errors
+///
+/// Fails when no sweep is running. A fix cannot be cancelled: stopped halfway, it could leave
+/// a change half made.
+pub(crate) fn cancel_sweep(app: &AppHandle) -> Result<(), &'static str> {
+    let runner = app.state::<Runner>();
+    let mut shared = runner.lock();
+    let Status::Sweeping { stopping, .. } = &mut shared.status else {
+        return Err("no sweep is running");
+    };
+    *stopping = true;
+    shared.cancel.cancel();
+    drop(shared);
+    changed(app);
+    Ok(())
+}
+
+/// Quits the app: cancels the sweep or fix that runs, and exits once it has stopped and
+/// cleaned up, or after [`QUIT_WAIT`]. The wait runs on its own thread, so the app keeps
+/// handling events (the tray, the popover) meanwhile.
+pub(crate) fn quit(app: &AppHandle) {
+    let runner = app.state::<Runner>();
+    let worker = {
+        let mut shared = runner.lock();
+        shared.quitting = true;
+        shared.cancel.cancel();
+        shared.worker.take()
+    };
+    let Some(worker) = worker else {
+        app.exit(0);
+        return;
+    };
+    let app = app.clone();
+    thread::spawn(move || {
+        let deadline = Instant::now() + QUIT_WAIT;
+        while !worker.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        app.exit(0);
+    });
+}
+
+/// Whether a sweep or fix is still running, so an exit must wait for [`quit`].
+pub(crate) fn must_wait_to_quit(app: &AppHandle) -> bool {
+    let runner = app.state::<Runner>();
+    let shared = runner.lock();
+    shared.worker.as_ref().is_some_and(|w| !w.is_finished())
+}
+
+/// Stops an agent left running by a sweep or fix the app did not finish (it was force-quit or
+/// crashed), and removes the half-written sweep folders. Runs before anything can start a
+/// sweep; stopping an agent takes up to a few seconds, which only happens after such a quit.
+pub(crate) fn clean_up_at_start(app: &AppHandle) {
+    let runner = app.state::<Runner>();
+    if let Err(e) = clean_up_interrupted(runner.data_dir()) {
+        runner.set(Status::Failed {
+            error: format!("cleaning up after the last run: {e}"),
+        });
+    }
+}
+
+/// Runs one sweep with the config `start` read, and returns the status it leaves: idle when it
+/// was cancelled.
+fn run(app: &AppHandle, config: Result<Config, String>, cancel: &Cancel) -> Status {
     let runner = app.state::<Runner>();
     let swept = config.and_then(|config| {
         let mut progress = |p: Progress<'_>| {
             advance(&mut runner.lock().status, &p);
             changed(app);
         };
-        sweep(runner.data_dir(), &config, Targets::All, &mut progress).map_err(|e| e.to_string())
+        match sweep(
+            runner.data_dir(),
+            &config,
+            Targets::All,
+            &mut progress,
+            cancel,
+        ) {
+            Err(SweepError::Cancelled) => Ok(None),
+            swept => swept.map(Some).map_err(|e| e.to_string()),
+        }
     });
     match swept {
-        Ok(reports) => {
+        Ok(None) => Status::Idle,
+        Ok(Some(reports)) => {
             if let Some((title, body)) = notification(&alerts(&reports)) {
                 // Best effort: a notification the user turned off is not an error to show.
                 drop(app.notification().builder().title(title).body(body).show());
@@ -269,34 +382,40 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
         return Err("a newer sweep ran; open the finding again to see its fix".to_owned());
     }
     let title = plan.fix().summary.clone();
-    app.state::<Runner>().claim(Status::Fixing { title })?;
+    let cancel = app.state::<Runner>().claim(Status::Fixing { title })?;
     changed(app);
-    let app = app.clone();
-    thread::spawn(move || {
-        let done = panic::catch_unwind(AssertUnwindSafe(|| {
-            let runner = app.state::<Runner>();
-            run_fix(runner.data_dir(), &plan, Confirmed::Asked).map_err(|e| e.to_string())
-        }))
-        .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
-        let event = match done {
-            Ok(record) => FixDone {
-                key: key.to_string(),
-                outcome: record.outcome.to_string(),
-                summary: record.summary,
-                pull_request: record.pull_request,
-            },
-            Err(error) => FixDone {
-                key: key.to_string(),
-                outcome: "failed".to_owned(),
-                summary: error,
-                pull_request: None,
-            },
-        };
-        app.state::<Runner>().set(Status::Idle);
-        drop(app.emit("fix-done", event));
-        changed(&app);
-    });
+    let worker = {
+        let app = app.clone();
+        thread::spawn(move || fix_thread(&app, key, &plan, &cancel))
+    };
+    app.state::<Runner>().keep_worker(worker);
     Ok(())
+}
+
+/// Runs a claimed fix, then tells the popover how it ended.
+fn fix_thread(app: &AppHandle, key: FindingKey, plan: &FixPlan, cancel: &Cancel) {
+    let done = panic::catch_unwind(AssertUnwindSafe(|| {
+        let runner = app.state::<Runner>();
+        run_fix(runner.data_dir(), plan, Confirmed::Asked, cancel).map_err(|e| e.to_string())
+    }))
+    .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
+    let event = match done {
+        Ok(record) => FixDone {
+            key: key.to_string(),
+            outcome: record.outcome.to_string(),
+            summary: record.summary,
+            pull_request: record.pull_request,
+        },
+        Err(error) => FixDone {
+            key: key.to_string(),
+            outcome: "failed".to_owned(),
+            summary: error,
+            pull_request: None,
+        },
+    };
+    app.state::<Runner>().set(Status::Idle);
+    drop(app.emit("fix-done", event));
+    changed(app);
 }
 
 fn plan(app: &AppHandle, key: FindingKey) -> Result<FixPlan, String> {
@@ -395,6 +514,7 @@ mod tests {
             pending: vec!["mac".to_owned(), "server:web".to_owned()],
             thousandths: 0,
             open_ended: false,
+            stopping: false,
             started: Timestamp::UNIX_EPOCH,
             step_started: Timestamp::UNIX_EPOCH,
         };

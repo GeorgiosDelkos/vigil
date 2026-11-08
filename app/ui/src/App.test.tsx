@@ -80,6 +80,29 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** A sweep on its only target with the agent running, stopping or not. */
+function sweeping(stopping: boolean): Overview {
+  return overview({
+    busy: true,
+    status: {
+      state: "sweeping",
+      step: "grok is judging 3 advisories",
+      current: "This Mac",
+      done: [],
+      pending: [],
+      position: 1,
+      total: 1,
+      percent: 50,
+      target_end: 100,
+      ticks: [],
+      open_ended: true,
+      stopping,
+      started: new Date().toISOString(),
+      step_started: new Date().toISOString(),
+    },
+  });
+}
+
 describe("the popover", () => {
   it("asks for an agent first, and opens the agent settings", async () => {
     shown = overview({ agent: null });
@@ -128,6 +151,7 @@ describe("the popover", () => {
         target_end: 66,
         ticks: [33.3, 66.6],
         open_ended: true,
+        stopping: false,
         started: new Date().toISOString(),
         step_started: new Date(Date.now() - 3 * 60_000).toISOString(),
       },
@@ -166,6 +190,7 @@ describe("the popover", () => {
         target_end: 100,
         ticks: [],
         open_ended: false,
+        stopping: false,
         started: new Date().toISOString(),
         step_started: new Date().toISOString(),
       },
@@ -176,6 +201,20 @@ describe("the popover", () => {
     expect(bar.querySelector<HTMLElement>(".sweep-bar-fill")?.style.width).toBe("27%");
     expect(bar.querySelector(".sweep-bar-work")).toBeNull();
     expect(bar.querySelectorAll(".sweep-bar-tick")).toHaveLength(0);
+  });
+
+  it("cancels a running sweep, and shows it stopping", async () => {
+    shown = sweeping(false);
+    answer({ cancel_sweep: () => null });
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(invoke).toHaveBeenCalledWith("cancel_sweep");
+
+    shown = sweeping(true);
+    handlers.get("changed")?.({ payload: null });
+    const stopping = await screen.findByRole("button", { name: "Stopping…" });
+    expect((stopping as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Stopping the agent and cleaning up…")).toBeTruthy();
   });
 
   it("shows all clear once a sweep found nothing", async () => {

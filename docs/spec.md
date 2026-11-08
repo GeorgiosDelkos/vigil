@@ -421,6 +421,17 @@ Built in step 9a (2026-11-06):
   asks the app for an overview whenever it is shown and on every `changed` event.
 - One sweep at a time: the app checks and claims "sweeping" under one lock, and the core's
   sweeps lock still covers a CLI sweep, which then shows as a failed sweep.
+- Cancel and quit (decided 2026-11-08): the popover's Cancel stops a sweep between targets,
+  between NVD requests, or while its agent runs; the targets already swept keep their reports
+  and the folder of the one it stopped in is removed. A fix cannot be cancelled, since one
+  stopped halfway could leave a change half made. Quitting the app cancels whatever runs
+  (a fix included, recorded as `unknown`) and exits once it has cleaned up, or after 10 s. In
+  the CLI, Ctrl-C cancels the same way; a second Ctrl-C exits at once.
+- Agents run as the leader of their own process group, so stopping one stops what it started
+  (`SIGTERM`, then `SIGKILL` after 3 s), and whatever is left in the group when it exits is
+  killed. While an agent runs, a `.pid` file beside its log records its group and start time;
+  an app that was force-quit or crashed stops a recorded agent that still runs, and removes
+  half-written sweep folders, at its next start and at the start of every sweep.
 - The schedule is checked every minute (`Schedule::due` against the newest sweep folder's
   start, failed ones included, so a failing sweep is not retried at once); a Mac that wakes
   after a missed sweep runs it within a minute.

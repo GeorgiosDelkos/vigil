@@ -31,6 +31,8 @@ use crate::agent::Located;
 use crate::agent::PROMPT_LINE;
 use crate::bundle;
 use crate::bundle::BundleError;
+use crate::cancel;
+use crate::cancel::Cancel;
 use crate::config::Config;
 use crate::config::History;
 use crate::config::RepoSlug;
@@ -318,18 +320,24 @@ pub struct ReportIssue {
 /// paced, so the first sweep of a Mac with a hundred Homebrew formulae takes over ten minutes
 /// without an API key), and the agent, which has no time limit. Calls `progress` as it goes.
 ///
+/// Stops when `cancel` is set: between targets, between NVD requests, and while the agent runs
+/// (stopping it and everything it started). The targets already swept keep their reports; the
+/// folder of the one it stopped in is removed.
+///
 /// # Errors
 ///
 /// Fails before anything runs when `targets` names no configured target, and before any agent
 /// runs when no agent is configured or found, another sweep is running, or the sweep folder
 /// cannot be written; and stops when a prompt or bundle cannot be
-/// read or written. Failures of one target (a repository that cannot be read, the agent, its
-/// findings, the report files) are recorded in that target's report instead.
+/// read or written; [`SweepError::Cancelled`] when cancelled. Failures of one target (a
+/// repository that cannot be read, the agent, its findings, the report files) are recorded in
+/// that target's report instead.
 pub fn sweep(
     data_dir: &DataDir,
     config: &Config,
     targets: Targets<'_>,
     progress: &mut dyn FnMut(Progress<'_>),
+    cancel: &Cancel,
 ) -> Result<Vec<Report>, SweepError> {
     if let Targets::Only(only) = targets
         && !configured_targets(config).iter().any(|(t, _)| t == only)
@@ -345,9 +353,17 @@ pub fn sweep(
     let (agent, located) = locate_configured(config)?;
     let sweeps = data_dir.sweeps_dir();
     let _lock = Lock::acquire(&sweeps)?;
+    let mut notes = Vec::new();
+    let cleaned = cancel::clean_up_holding_lock(data_dir)?;
+    match cleaned.agents {
+        0 => {}
+        1 => notes.push("stopped an agent an interrupted sweep or fix left running".to_owned()),
+        n => notes.push(format!(
+            "stopped {n} agents interrupted sweeps or fixes left running"
+        )),
+    }
     let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
 
-    let mut notes = Vec::new();
     let feeds = Feeds::new(data_dir, nvd_access(&mut notes));
     let kev = match feeds.kev() {
         Ok(kev) => Some(kev),
@@ -373,26 +389,36 @@ pub fn sweep(
             feeds: &feeds,
             history: config.history,
             kev: kev.as_ref(),
+            cancel,
         },
         agent,
         located: &located,
         notes: &notes,
     };
 
-    let mut reports = Vec::new();
-    if wanted("mac") {
-        progress(Progress::Target { target: "mac" });
-        progress(Progress::Inventory);
-        let mac = collect_mac(&config.project_dirs);
-        reports.push(shared.sweep_target(&dir, mac, progress)?);
+    let mut each_target = || {
+        let mut reports = Vec::new();
+        if wanted("mac") {
+            progress(Progress::Target { target: "mac" });
+            progress(Progress::Inventory);
+            let mac = collect_mac(&config.project_dirs);
+            reports.push(shared.sweep_target(&dir, mac, progress)?);
+        }
+        for repo in config.repos.iter().filter(|r| wanted(&repo_target(r))) {
+            cancel.check()?;
+            reports.push(shared.sweep_repo(&dir, repo, progress)?);
+        }
+        for server in config.servers.iter().filter(|s| wanted(&server_target(s))) {
+            cancel.check()?;
+            reports.push(shared.sweep_server(&dir, server, progress)?);
+        }
+        Ok(reports)
+    };
+    let reports = each_target();
+    if matches!(reports, Err(SweepError::Cancelled)) {
+        cancel::remove_unfinished(&dir)?;
     }
-    for repo in config.repos.iter().filter(|r| wanted(&repo_target(r))) {
-        reports.push(shared.sweep_repo(&dir, repo, progress)?);
-    }
-    for server in config.servers.iter().filter(|s| wanted(&server_target(s))) {
-        reports.push(shared.sweep_server(&dir, server, progress)?);
-    }
-    Ok(reports)
+    reports
 }
 
 /// What a sweep should raise a notification for: each finding and issue that is critical or
@@ -489,6 +515,8 @@ struct Sources<'a> {
     history: History,
     /// The KEV catalog, or `None` when it could not be read.
     kev: Option<&'a Kev>,
+    /// Whether to stop.
+    cancel: &'a Cancel,
 }
 
 /// One target, collected and ready for its bundle.
@@ -629,6 +657,7 @@ impl Shared<'_> {
         let mut problems = self.notes.to_vec();
         problems.extend(collected.problems);
         let fetched = fetch(self.sources, &collected.components, &mut problems, progress);
+        self.sources.cancel.check()?;
         let entries: Vec<_> = fetched
             .iter()
             .map(|(advisory, components)| bundle::Entry {
@@ -646,7 +675,10 @@ impl Shared<'_> {
         };
         let known = bundle::write(&dir.join("bundle"), &contents, self.sources.kev)?;
 
-        let (verdict, failure) = match judge(self.agent, self.located, &dir, &known, progress) {
+        let judged = self.judge(&dir, &known, progress);
+        // A cancelled agent fails its run; that is no verdict to record.
+        self.sources.cancel.check()?;
+        let (verdict, failure) = match judged {
             Ok(verdict) => (verdict, None),
             Err(failure) => (Verdict::default(), Some(plain(&failure))),
         };
@@ -702,6 +734,78 @@ impl Shared<'_> {
         report.failure = failure;
         save_report(&dir, &mut report);
         Ok(report)
+    }
+
+    /// Runs the agent and validates its findings, once more with the problems if they are
+    /// rejected. Returns why there is no verdict otherwise.
+    ///
+    /// A `findings.json` that passes counts even when the agent then exits non-zero: the verdict is
+    /// in the file. An agent that cannot start, or exits non-zero without a file, is not retried,
+    /// since the same command would fail the same way.
+    fn judge(
+        &self,
+        dir: &Path,
+        known: &Known,
+        progress: &mut dyn FnMut(Progress<'_>),
+    ) -> Result<Verdict, String> {
+        let agent = self.agent;
+        let bundle = dir.join("bundle");
+        let findings_path = bundle.join("findings.json");
+        let rejected_path = bundle.join("findings.rejected.json");
+        let mut prompt = PROMPT_LINE.to_owned();
+        let mut last = Vec::new();
+        for attempt in 1..=2 {
+            progress(Progress::Agent {
+                agent,
+                attempt,
+                advisories: known.advisories.len(),
+            });
+            let log = dir.join(format!("agent-{attempt}.log"));
+            let status = agent
+                .run(
+                    agent.sweep_command(self.located, &bundle, &prompt),
+                    &log,
+                    self.sources.cancel,
+                )
+                .map_err(|e| error_chain(&e))?;
+            let (problems, previous) = match fs::read_to_string(&findings_path) {
+                Ok(text) => match findings::validate(&text, known) {
+                    Ok(valid) => return Ok(valid),
+                    Err(problems) => (problems, "was rejected and moved to findings.rejected.json"),
+                },
+                Err(_) if !status.success() => {
+                    return Err(format!(
+                        "{agent} exited with {status} without writing findings.json; see {} (is it \
+                         logged in?)",
+                        log.display()
+                    ));
+                }
+                Err(e) => (
+                    vec![format!("findings.json could not be read: {e}")],
+                    "is missing",
+                ),
+            };
+            // Kept for the agent to correct, and so that it cannot pass for the next answer.
+            if let Err(e) = fs::rename(&findings_path, &rejected_path)
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                return Err(format!("cannot set aside the rejected findings.json: {e}"));
+            }
+            prompt = format!(
+                "{PROMPT_LINE} Your findings.json {previous}; fix these problems and write \
+                 findings.json again:\n- {}",
+                problems
+                    .iter()
+                    .map(|p| plain(p))
+                    .collect::<Vec<_>>()
+                    .join("\n- ")
+            );
+            last = problems;
+        }
+        Err(format!(
+            "{agent}'s findings were rejected twice: {}",
+            last.join("; ")
+        ))
     }
 
     /// Keys the verdict's findings and issues, marks the dismissed ones, and sorts each list
@@ -979,6 +1083,10 @@ fn fetch_nvd(
     let mut found: BTreeMap<String, (Advisory, BTreeSet<usize>)> = BTreeMap::new();
     let mut unknown = Vec::new();
     for (done, (name, (product, indexes))) in products.iter().enumerate() {
+        // The caller sees the request and stops; what was fetched is not used.
+        if sources.cancel.is_cancelled() {
+            break;
+        }
         progress(Progress::Product {
             done: done + 1,
             total: products.len(),
@@ -1028,74 +1136,6 @@ pub(crate) fn locate_configured(config: &Config) -> Result<(AgentKind, Located),
         .locate(config.models.get(&agent))?
         .ok_or(SweepError::AgentNotFound { agent })?;
     Ok((agent, located))
-}
-
-/// Runs the agent and validates its findings, once more with the problems if they are
-/// rejected. Returns why there is no verdict otherwise.
-///
-/// A `findings.json` that passes counts even when the agent then exits non-zero: the verdict is
-/// in the file. An agent that cannot start, or exits non-zero without a file, is not retried,
-/// since the same command would fail the same way.
-fn judge(
-    agent: AgentKind,
-    located: &Located,
-    dir: &Path,
-    known: &Known,
-    progress: &mut dyn FnMut(Progress<'_>),
-) -> Result<Verdict, String> {
-    let bundle = dir.join("bundle");
-    let findings_path = bundle.join("findings.json");
-    let rejected_path = bundle.join("findings.rejected.json");
-    let mut prompt = PROMPT_LINE.to_owned();
-    let mut last = Vec::new();
-    for attempt in 1..=2 {
-        progress(Progress::Agent {
-            agent,
-            attempt,
-            advisories: known.advisories.len(),
-        });
-        let log = dir.join(format!("agent-{attempt}.log"));
-        let status = agent
-            .run_sweep(located, &bundle, &prompt, &log)
-            .map_err(|e| error_chain(&e))?;
-        let (problems, previous) = match fs::read_to_string(&findings_path) {
-            Ok(text) => match findings::validate(&text, known) {
-                Ok(valid) => return Ok(valid),
-                Err(problems) => (problems, "was rejected and moved to findings.rejected.json"),
-            },
-            Err(_) if !status.success() => {
-                return Err(format!(
-                    "{agent} exited with {status} without writing findings.json; see {} (is it \
-                     logged in?)",
-                    log.display()
-                ));
-            }
-            Err(e) => (
-                vec![format!("findings.json could not be read: {e}")],
-                "is missing",
-            ),
-        };
-        // Kept for the agent to correct, and so that it cannot pass for the next answer.
-        if let Err(e) = fs::rename(&findings_path, &rejected_path)
-            && e.kind() != io::ErrorKind::NotFound
-        {
-            return Err(format!("cannot set aside the rejected findings.json: {e}"));
-        }
-        prompt = format!(
-            "{PROMPT_LINE} Your findings.json {previous}; fix these problems and write \
-             findings.json again:\n- {}",
-            problems
-                .iter()
-                .map(|p| plain(p))
-                .collect::<Vec<_>>()
-                .join("\n- ")
-        );
-        last = problems;
-    }
-    Err(format!(
-        "{agent}'s findings were rejected twice: {}",
-        last.join("; ")
-    ))
 }
 
 /// `text` as one line: `\n`, `\r` and `\t` become spaces, and every other control or
@@ -1489,6 +1529,9 @@ pub enum SweepError {
     /// Looking the agent up failed.
     #[error(transparent)]
     Agent(#[from] AgentError),
+    /// The sweep was cancelled, by the user or the app as it quit.
+    #[error("the sweep was cancelled")]
+    Cancelled,
     /// Another sweep holds the lock.
     #[error("another sweep is running (it holds {}); wait for it to finish", lock.display())]
     Busy {
@@ -1645,10 +1688,12 @@ mod tests {
         let history = Config::default_for_tests().history;
         let mut problems = Vec::new();
         let mut seen = Vec::new();
+        let cancel = Cancel::new();
         let sources = Sources {
             feeds: &feeds,
             history,
             kev: None,
+            cancel: &cancel,
         };
         let fetched = fetch(sources, &inventory.components, &mut problems, &mut |p| {
             seen.push(format!("{p:?}"));

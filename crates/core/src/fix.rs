@@ -33,6 +33,7 @@ use crate::agent::AgentError;
 use crate::agent::AgentKind;
 use crate::agent::Located;
 use crate::agent::PROMPT_LINE;
+use crate::cancel::Cancel;
 use crate::config::Config;
 use crate::findings;
 use crate::findings::Fix;
@@ -270,7 +271,8 @@ pub enum Confirmed {
 /// Call it only after the user confirmed what the plan shows.
 ///
 /// Blocks until the agent finishes; there is no time limit. An agent that cannot start is
-/// recorded as `unknown` with the reason, like one that writes no result.
+/// recorded as `unknown` with the reason, like one that writes no result, and so is one that
+/// `cancel` stops (the app quitting): it may have done part of the fix.
 ///
 /// # Errors
 ///
@@ -282,6 +284,7 @@ pub fn run_fix(
     data_dir: &DataDir,
     plan: &FixPlan,
     confirmed: Confirmed,
+    cancel: &Cancel,
 ) -> Result<FixRecord, FixError> {
     let _lock = Lock::acquire(&data_dir.sweeps_dir())?;
     if current_report(data_dir, plan.key)? != plan.report {
@@ -307,9 +310,11 @@ pub fn run_fix(
         fs::write(&path, text).map_err(|source| FixError::Write { path, source })?;
     }
 
-    let ran = plan
-        .agent
-        .run_fix(&plan.located, &dir, PROMPT_LINE, &dir.join("agent.log"));
+    let ran = plan.agent.run(
+        plan.agent.fix_command(&plan.located, &dir, PROMPT_LINE),
+        &dir.join("agent.log"),
+        cancel,
+    );
     let repo = plan.target.strip_prefix("github:");
     let (exit_code, result) = match ran {
         Ok(status) => (status.code(), read_result(&dir.join("result.json"), repo)),
@@ -688,12 +693,12 @@ mod tests {
         let unrun = || !data_dir.state_dir().join("fixes.jsonl").exists();
 
         lifecycle::dismiss(&data_dir, key, "accepted").unwrap();
-        let err = run_fix(&data_dir, &plan, Confirmed::Asked).unwrap_err();
+        let err = run_fix(&data_dir, &plan, Confirmed::Asked, &Cancel::new()).unwrap_err();
         assert!(matches!(err, FixError::Dismissed { .. }), "{err:?}");
         lifecycle::undismiss(&data_dir, key).unwrap();
 
         save_report(&data_dir, "20261106T000000Z", "2026-11-06T00:00:00Z", key);
-        let err = run_fix(&data_dir, &plan, Confirmed::Asked).unwrap_err();
+        let err = run_fix(&data_dir, &plan, Confirmed::Asked, &Cancel::new()).unwrap_err();
         assert!(matches!(err, FixError::Changed { .. }), "{err:?}");
         assert!(unrun(), "nothing ran and nothing was recorded");
 
@@ -702,7 +707,7 @@ mod tests {
         let empty = json!({"started": "2026-11-07T00:00:00Z", "target": "mac",
             "failure": null, "findings": [], "issues": []});
         fs::write(gone.join("report.json"), empty.to_string()).unwrap();
-        let err = run_fix(&data_dir, &plan, Confirmed::Asked).unwrap_err();
+        let err = run_fix(&data_dir, &plan, Confirmed::Asked, &Cancel::new()).unwrap_err();
         assert!(matches!(err, FixError::Stale { .. }), "{err:?}");
         assert!(unrun());
     }
