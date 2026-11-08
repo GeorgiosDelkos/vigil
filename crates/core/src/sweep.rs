@@ -958,7 +958,7 @@ fn fetch_nvd(
             },
             Ok(advisories) => {
                 for advisory in advisories {
-                    let exploited = sources
+                    let may_be_exploited = sources
                         .kev
                         .is_none_or(|kev| advisory.is_known_exploited(kev));
                     let matches = cpe::Matches::parse(&advisory.record);
@@ -966,7 +966,7 @@ fn fetch_nvd(
                         .iter()
                         .copied()
                         .filter(|&i| {
-                            exploited || matches.may_affect(product, &components[i].version)
+                            may_be_exploited || matches.may_affect(product, &components[i].version)
                         })
                         .collect();
                     if affected.is_empty() {
@@ -1675,8 +1675,11 @@ mod tests {
             ..sources
         };
         let fetched = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
-        let ids: Vec<&str> = fetched.iter().map(|(a, _)| a.id.as_str()).collect();
-        assert!(ids.contains(&"CVE-6"), "{ids:?}");
+        let linked: Vec<(&str, Vec<usize>)> = fetched
+            .iter()
+            .map(|(a, c)| (a.id.as_str(), c.iter().copied().collect()))
+            .collect();
+        assert!(linked.contains(&("CVE-6", vec![1, 5])), "{linked:?}");
     }
 
     #[test]

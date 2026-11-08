@@ -142,16 +142,18 @@ impl CpeMatch {
         }
         // Whether each bound given puts `installed` outside, or `None` where it does not
         // compare. One bound that excludes it is enough, whatever the others say.
-        let bound = |bound: &Option<String>, outside: fn(Ordering) -> bool| {
-            bound.as_deref().map(|b| compare(installed, b).map(outside))
+        let check = |bound: &Option<String>, is_outside: fn(Ordering) -> bool| {
+            bound
+                .as_deref()
+                .map(|b| compare(installed, b).map(is_outside))
         };
-        let outside = [
-            bound(&self.version_start_including, Ordering::is_lt),
-            bound(&self.version_start_excluding, Ordering::is_le),
-            bound(&self.version_end_including, Ordering::is_gt),
-            bound(&self.version_end_excluding, Ordering::is_ge),
+        let verdicts = [
+            check(&self.version_start_including, Ordering::is_lt),
+            check(&self.version_start_excluding, Ordering::is_le),
+            check(&self.version_end_including, Ordering::is_gt),
+            check(&self.version_end_excluding, Ordering::is_ge),
         ];
-        let mut given = outside.iter().flatten();
+        let mut given = verdicts.iter().flatten();
         if given.clone().any(|o| *o == Some(true)) {
             return Some(false);
         }
@@ -180,9 +182,10 @@ fn covers_named(named: &str, any_update: bool, installed: &str) -> Option<bool> 
 }
 
 /// Whether two versions are the same one, read as runs (`1.2` is `1.2.0`, `007` is `7`), or
-/// `None` when either cannot be read, or `installed` has no digits (a cask's `latest`). Unlike
-/// [`compare`], a run one side lacks is only equal when it is a zero: `1.1.1w` is another
-/// release than `1.1.1`, whatever their order.
+/// `None` when either cannot be read, `installed` has no digits (a cask's `latest`), or digits
+/// meet letters at the same place before any difference (`1.8.0update401` against
+/// `1.8.0_401`). Unlike [`compare`], a run one side lacks is only equal when it is a zero:
+/// `1.1.1w` is another release than `1.1.1`, whatever their order.
 fn same_version(named: &str, installed: &str) -> Option<bool> {
     let (named, installed) = (runs(named)?, runs(installed)?);
     if !installed.iter().any(|r| r.digits) {
@@ -454,19 +457,19 @@ mod tests {
         assert!(!affects("1.0"));
         assert!(!affects("1.1.1"));
 
-        let mixed = record(&[json!({
+        let letters = record(&[json!({
             "vulnerable": true,
             "criteria": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*",
-            "versionStartIncluding": "1.0.2k",
-            "versionEndExcluding": "3.0.0",
+            "versionStartIncluding": "1.0.2",
+            "versionEndExcluding": "1.0.2zh",
         })]);
         assert!(
-            !mixed.may_affect(&product("openssl"), "3.6.4"),
-            "one bound rules it out, though the other does not compare"
+            !letters.may_affect(&product("openssl"), "1.0.2zi"),
+            "past the end, though `1.0.2zi` does not compare with the start `1.0.2`"
         );
         assert!(
-            mixed.may_affect(&product("openssl"), "1.0.2"),
-            "unclear either way"
+            letters.may_affect(&product("openssl"), "1.0.2zg"),
+            "unclear, so kept"
         );
 
         let every_beta = record(&[vulnerable("cpe:2.3:a:openssl:openssl:*:beta:*:*:*:*:*:*")]);
