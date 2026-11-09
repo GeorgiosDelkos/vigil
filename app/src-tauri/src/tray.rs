@@ -1,6 +1,7 @@
-//! The menu-bar icon, Vigil's mark: a spiral arm of dots. Its colour shows the worst open
-//! finding or a running sweep, an unfinished spiral shows a failure, a left click shows or
-//! hides the popover under it, and a right click opens a menu with Quit.
+//! The menu-bar icon, Vigil's mark: the main view's vortex in brief, three streaks on each of
+//! three arms. The colour of its outer streaks shows the worst open finding or a running
+//! sweep, a missing arm shows a failure, a left click shows or hides the popover under it, and
+//! a right click opens a menu with Quit.
 
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -147,9 +148,9 @@ impl Look {
     }
 
     /// Whether macOS draws the icon in the menu bar's own colour, as it does the system's.
-    /// Only the looks without a colour are: nothing open, and a failure, which its unfinished
-    /// spiral tells apart. The others keep their colour, which reads on a light and a dark bar
-    /// alike.
+    /// Only the looks without a colour are: nothing open, and a failure, which its missing arm
+    /// tells apart. The others keep their colours (a neutral grey inside, the state's colour
+    /// outside), which read on a light and a dark bar alike.
     fn template(self) -> bool {
         match self {
             Self::Clean | Self::Failed => true,

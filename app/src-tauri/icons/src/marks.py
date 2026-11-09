@@ -1,17 +1,22 @@
-"""Draw Vigil's mark: one spiral arm of dots that grow and brighten outward.
+"""Draw Vigil's tray marks: the main view's vortex in brief, three streaks on each of three arms.
+
+The owner chose the vortex as the logo on 2026-11-09: the app icon is the Findings view's vortex
+itself (vortex.html), and the tray keeps only what reads at 22 points (this file).
 
 Writes, next to this file:
-  icon.svg         the app icon, 1024 px, the mark on a dark rounded square
-  mark.svg         the tray mark, 24 px, in currentColor
-  mark-failed.svg  the tray mark left unfinished (its first 8 of 13 dots), for a failed sweep
+  mark.svg          the tray mark, 24 px, in currentColor
+  mark-failed.svg   the tray mark with one arm missing, for a failed sweep
+  tray-<state>.svg  the coloured tray marks for low, medium, high and sweeping: the inner
+                    streaks a neutral grey that reads on a light and a dark menu bar, the
+                    outer streaks in the state's colour, as findings burn at the vortex's edge
 
 Run: uv run --no-project python3 marks.py
 
-The PNGs one level up are rendered from these SVGs with headless Chrome
-(--screenshot --default-background-color=00000000), then `sips -z` to size: icon.png at
-512 px, tray-*.png at 44 px (22 pt at 2x). tray-clean and tray-failed stay black, as macOS
-template images; the others fill mark.svg with sweeping #6e9bff, low #6f7f99,
-medium #e8a923 and high #ff5a52.
+The PNGs one level up are rendered with headless Chrome (--screenshot
+--default-background-color=00000000), then `sips -z` to size: tray-*.png at 44 px (22 pt at
+2x) from these SVGs, tray-clean.png and tray-failed.png from mark.svg and mark-failed.svg filled
+black (macOS template images), and icon.png at 512 px from vortex.html, which draws the app
+icon on a canvas at 1024 px.
 """
 
 import math
@@ -19,81 +24,68 @@ import pathlib
 
 HERE = pathlib.Path(__file__).parent
 
-# The dark rounded square behind the app mark, drawn to macOS's icon grid (824 px of 1024).
-BACKGROUND = (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><defs>'
-    '<linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">'
-    '<stop offset="0" stop-color="#262a33"/><stop offset="1" stop-color="#0e1014"/>'
-    "</linearGradient>"
-    '<linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">'
-    '<stop offset="0" stop-color="#fff" stop-opacity=".22"/>'
-    '<stop offset=".5" stop-color="#fff" stop-opacity=".04"/>'
-    '<stop offset="1" stop-color="#fff" stop-opacity=".08"/>'
-    "</linearGradient></defs>"
-    '<rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>'
-    '<rect x="101.5" y="101.5" width="821" height="821" rx="183.5" fill="none" '
-    'stroke="url(#rim)" stroke-width="3"/>'
-)
+ARMS = 3
 
-# The tray mark's dots; the failed mark keeps this many of them.
-FAILED_DOTS = 8
+# How tightly the arms wind: the angle grows by this much per unit of ln(radius). The same
+# value as the main view's vortex (app/ui/src/orbit.ts), so the mark curls the same way.
+WIND = 1.7
+
+# Where the arms start, in radians: the outer ends point down and left like the main view's.
+START = 0.6 * math.pi
+
+# The streaks on each arm, inner to outer: radius, angular length and stroke width, in the
+# 24-unit box. Widths are the thinnest that still read at 22 points on a retina display.
+LANES = ((4.4, 1.0, 1.6), (7.4, 0.85, 2.0), (10.2, 0.7, 2.4))
+
+# The inner streaks of a coloured mark: readable on a light and on a dark menu bar.
+NEUTRAL = "#9aa1b4"
+
+# The outer streaks' colour per tray state; sweeping is all one colour.
+STATES = {
+    "low": "#8fa2ff",
+    "medium": "#ffd23a",
+    "high": "#ff2e88",
+    "sweeping": "#3ef0ff",
+}
 
 
-def arm(n, turns, radius, rmin, rmax, start):
-    """Return n dots (x, y, r, t) along one spiral arm, t running from start to 1."""
-    dots = []
-    for i in range(n):
-        t = start + (1 - start) * i / (n - 1)
-        angle = turns * 2 * math.pi * t - math.pi / 2
-        dots.append(
-            (
-                12 + radius * t * math.cos(angle),
-                12 + radius * t * math.sin(angle),
-                rmin + (rmax - rmin) * t,
-                t,
-            )
+def streak(arm: int, radius: float, length: float) -> str:
+    """Return an SVG path along arm `arm` from `radius`, curling inward over `length` radians."""
+    # 1.2 is the radius where an arm's angle is START: arbitrary, chosen with START so the
+    # outer streaks point down and left.
+    base = arm / ARMS * 2 * math.pi + math.log(radius / 1.2) * WIND + START
+    points = []
+    for k in range(11):
+        turn = length * k / 10
+        r = radius * math.exp(-turn / WIND)
+        points.append(
+            f"{12 + math.cos(base + turn) * r:.2f},{12 + math.sin(base + turn) * r:.2f}"
         )
-    return dots
+    return "M" + " L".join(points)
 
 
-def centred(dots, size=24):
-    """Shift the dots so their bounding box sits in the middle of a size-by-size box."""
-    xs = [x - r for x, _, r, _ in dots] + [x + r for x, _, r, _ in dots]
-    ys = [y - r for _, y, r, _ in dots] + [y + r for _, y, r, _ in dots]
-    dx = size / 2 - (min(xs) + max(xs)) / 2
-    dy = size / 2 - (min(ys) + max(ys)) / 2
-    return [(x + dx, y + dy, r, t) for x, y, r, t in dots]
-
-
-def lerp(c1, c2, t):
-    """Mix two #rrggbb colours, t=0 giving c1."""
-    a = [int(c1[i : i + 2], 16) for i in (1, 3, 5)]
-    b = [int(c2[i : i + 2], 16) for i in (1, 3, 5)]
-    return "#" + "".join(f"{round(a[i] + (b[i] - a[i]) * t):02x}" for i in range(3))
-
-
-def circles(dots, fill):
-    return "".join(
-        f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{r:.2f}" fill="{fill(t)}"/>' for x, y, r, t in dots
+def mark(inner: str, outer: str, *, arms: int = ARMS) -> str:
+    """Return the tray mark as SVG with `arms` arms, inner streaks `inner` and outer `outer`."""
+    paths = "".join(
+        f'<path d="{streak(arm, r, length)}" stroke="{outer if lane == 2 else inner}" '
+        f'stroke-width="{width}"/>'
+        for arm in range(arms)
+        for lane, (r, length, width) in enumerate(LANES)
+    )
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+        f'stroke-linecap="round">{paths}</svg>\n'
     )
 
 
-def tray(dots):
-    return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' + dots + "</svg>\n"
-
-
-def main():
-    # The app mark has more, smaller dots than the tray mark, which must read at 22 pt.
-    app = centred(arm(26, 1.8, 9.8, 0.22, 1.55, start=0.06))
-    mark = centred(arm(13, 1.55, 9.9, 0.55, 1.95, start=0.1))
-
-    dots = circles(app, lambda t: lerp("#5b84f0", "#f2f5fb", t**0.8))
-    scaled = '<g transform="translate(512 512) scale(27) translate(-12 -12)">'
-    (HERE / "icon.svg").write_text(BACKGROUND + scaled + dots + "</g></svg>\n")
-
-    (HERE / "mark.svg").write_text(tray(circles(mark, lambda _: "currentColor")))
-    failed = circles(mark[:FAILED_DOTS], lambda _: "currentColor")
-    (HERE / "mark-failed.svg").write_text(tray(failed))
+def main() -> None:
+    (HERE / "mark.svg").write_text(mark("currentColor", "currentColor"))
+    (HERE / "mark-failed.svg").write_text(
+        mark("currentColor", "currentColor", arms=ARMS - 1)
+    )
+    for state, colour in STATES.items():
+        inner = colour if state == "sweeping" else NEUTRAL
+        (HERE / f"tray-{state}.svg").write_text(mark(inner, colour))
 
 
 if __name__ == "__main__":
