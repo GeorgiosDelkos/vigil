@@ -38,6 +38,7 @@ use vigil_core::latest;
 use vigil_core::plan_fix;
 use vigil_core::popover_view;
 use vigil_core::target_label;
+use vigil_core::write_html_report;
 
 use crate::runner::Runner;
 use crate::runner::Status;
@@ -61,6 +62,7 @@ fn main() {
             sweep_now,
             cancel_sweep,
             open_config,
+            open_report,
             quit,
             fix_preview,
             fix,
@@ -352,6 +354,29 @@ fn open_config(runner: State<'_, Runner>) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("open -t {} failed", path.display()))
+    }
+}
+
+/// Writes the HTML report of every target (`report.html` in the data directory) and opens it
+/// in the default browser. Async, so reading every report and waiting for `open` never stalls
+/// the UI.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn open_report(runner: State<'_, Runner>) -> Result<(), String> {
+    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+        .map_err(|e| e.to_string())?;
+    let path = write_html_report(runner.data_dir(), &config).map_err(|e| e.to_string())?;
+    let status = Command::new("/usr/bin/open")
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("cannot run open: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("open {} failed", path.display()))
     }
 }
 

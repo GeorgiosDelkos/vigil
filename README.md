@@ -245,6 +245,7 @@ The data folder also holds:
 | `fixes/<time>-<key>/` | Each fix's prompt, the agent's log and its result |
 | `state/dismissals.json` | Dismissed findings and issues, with reasons |
 | `state/fixes.jsonl` | Every fix run, one line each |
+| `report.html` | The HTML report from `vigil report` or the app, replaced each time |
 
 ## Command line
 
@@ -258,6 +259,7 @@ The `vigil` CLI uses the same core and the same files as the app.
 | `vigil advisories --package npm:lodash --product openssl` | Fetch advisories for packages and NVD products |
 | `vigil sweep [--target mac \| github:<owner>/<name> \| server:<name>]` | Sweep every target, or one |
 | `vigil findings [--json]` | Each target's open findings, with their keys |
+| `vigil report [--open]` | Write `report.html`, a dark page with every finding in full, print its path, and open it in the browser |
 | `vigil dismiss <key> --reason <text>` | Hide a finding or issue, for a reason; a finding returns if its advisory changes |
 | `vigil undismiss <key>` | Show a dismissed finding or issue again |
 | `vigil fix <key> [--yes]` | Show a finding's fix, ask to confirm, and have the agent apply it |

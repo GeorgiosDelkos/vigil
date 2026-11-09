@@ -71,7 +71,72 @@ const two = () =>
     first_sweep_hint: null,
   });
 
+/** How often the spiral's canvas was painted, and the browser events that repaint it. */
+const canvas = vi.hoisted(() => ({
+  paints: 0,
+  /** Reports a new size for the spiral's canvas, as the browser's ResizeObserver would. */
+  resize: undefined as ((width: number, height: number) => void) | undefined,
+  /** Reports that the display's pixel ratio changed, as a resolution media query would. */
+  moved: undefined as (() => void) | undefined,
+}));
+
+/** A 2D context that counts whole paints (one `clearRect` each): jsdom has none. */
+const gradient = () => ({ addColorStop: () => undefined });
+const context = {
+  setTransform: () => undefined,
+  clearRect: () => {
+    canvas.paints += 1;
+  },
+  createRadialGradient: gradient,
+  createLinearGradient: gradient,
+  fillRect: () => undefined,
+  beginPath: () => undefined,
+  lineTo: () => undefined,
+  stroke: () => undefined,
+};
+
+/** The colours of the dots on the target chip named `name`. */
+function colours(name: RegExp): string[] {
+  const chip = screen.getByRole("button", { name });
+  return [...chip.querySelectorAll<HTMLElement>("i span")].map((dot) =>
+    dot.style.getPropertyValue("--c"),
+  );
+}
+
+/** Renders the popover and opens the list behind the main view. */
+async function openList() {
+  render(() => <App />);
+  fireEvent.click(await screen.findByTitle("Show details"));
+}
+
 beforeEach(() => {
+  canvas.paints = 0;
+  canvas.moved = undefined;
+  Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+    configurable: true,
+    value: () => context,
+  });
+  canvas.resize = undefined;
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        canvas.resize = (width, height) =>
+          callback([{ contentRect: { width, height } } as ResizeObserverEntry], this);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    media: query,
+    matches: false,
+    addEventListener: (_: string, listener: () => void) => {
+      canvas.moved = listener;
+    },
+    removeEventListener: () => undefined,
+  }));
   invoke.mockReset();
   handlers.clear();
   login.on = false;
@@ -135,7 +200,7 @@ describe("the popover", () => {
   it("lists the findings in the order Rust ranked them, with its headline", async () => {
     shown = two();
     answer();
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText("2 findings need you")).toBeTruthy();
     expect(screen.getByText("1 exploited in the wild")).toBeTruthy();
     expect(names()).toEqual(["openssl", "lodash"]);
@@ -146,7 +211,7 @@ describe("the popover", () => {
 
   it("asks Rust again when it says something changed", async () => {
     answer();
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText("Sweep")).toBeTruthy();
     shown = two();
     handlers.get("changed")?.({ payload: null });
@@ -174,7 +239,7 @@ describe("the popover", () => {
       },
     });
     answer();
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText("Sweeping me/app")).toBeTruthy();
     expect(screen.getByText(/target 2 of 3/)).toBeTruthy();
     expect(screen.getByText("reading Homebrew")).toBeTruthy();
@@ -213,7 +278,7 @@ describe("the popover", () => {
       },
     });
     answer();
-    render(() => <App />);
+    await openList();
     const bar = await screen.findByRole("progressbar", { name: "Sweep progress" });
     expect(bar.querySelector<HTMLElement>(".sweep-bar-fill")?.style.width).toBe("27%");
     expect(bar.querySelector(".sweep-bar-work")).toBeNull();
@@ -240,7 +305,7 @@ describe("the popover", () => {
       first_sweep_hint: null,
     });
     answer();
-    render(() => <App />);
+    await openList();
     await screen.findByText("curl");
     expect(within(row("curl")).getByText("Fix reported")).toBeTruthy();
     expect(within(row("lodash")).getByText("Pull request open")).toBeTruthy();
@@ -258,7 +323,7 @@ describe("the popover", () => {
     };
     shown = { ...two(), fixed: [confirmed] };
     answer();
-    render(() => <App />);
+    await openList();
     const tab = await screen.findByRole("tab", { name: /Fixed/ });
     expect(within(tab).getByText("1")).toBeTruthy();
     fireEvent.click(tab);
@@ -276,7 +341,7 @@ describe("the popover", () => {
       fixed: [confirmed],
     });
     answer();
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText("All clear")).toBeTruthy();
     expect(screen.getByText("Fixed in the last 30 days")).toBeTruthy();
     expect(screen.getByRole("list", { name: "Fixed" })).toBeTruthy();
@@ -285,7 +350,7 @@ describe("the popover", () => {
   it("cancels a running sweep, and shows it stopping", async () => {
     shown = sweeping(false);
     answer({ cancel_sweep: () => null });
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
     expect(invoke).toHaveBeenCalledWith("cancel_sweep");
 
@@ -304,7 +369,7 @@ describe("the popover", () => {
       all_clear: true,
     });
     answer();
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText("All clear")).toBeTruthy();
     expect(screen.getByText(/2 dismissed/)).toBeTruthy();
   });
@@ -324,7 +389,7 @@ describe("a finding", () => {
       }),
       fix: () => null,
     });
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("openssl"));
     fireEvent.click(screen.getByText("Fix…"));
     const confirm = await screen.findByText(/with full access\?/);
@@ -348,7 +413,7 @@ describe("a finding", () => {
   it("is dismissed with the reason given", async () => {
     shown = two();
     answer({ dismiss: () => null });
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("lodash"));
     fireEvent.click(screen.getByText("Dismiss…"));
     const reason = screen.getByLabelText("Why does this not apply?");
@@ -400,7 +465,7 @@ describe("the summary", () => {
   it("says when nothing was swept yet, and sweeps on demand", async () => {
     shown = overview({ headline: "Not swept yet", first_sweep_hint: "Rust's first-sweep line" });
     answer({ sweep_now: () => null });
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText("Rust's first-sweep line")).toBeTruthy();
     // The headline says it once; the line under it shows Rust's hint, not a repeat.
     expect(screen.getAllByText(/not swept yet/i)).toHaveLength(1);
@@ -418,7 +483,7 @@ describe("the summary", () => {
     invoke.mockImplementation((command: string) =>
       command === "overview" ? Promise.resolve(shown) : Promise.reject("a sweep is running"),
     );
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText(/Last sweep: no agent chosen/)).toBeTruthy();
     expect(screen.getByText(/swept .* ago/)).toBeTruthy();
     fireEvent.click(screen.getByText("Sweep"));
@@ -428,7 +493,7 @@ describe("the summary", () => {
   it("draws one bar part per severity found, and labels every severity", async () => {
     shown = two();
     answer();
-    render(() => <App />);
+    await openList();
     await screen.findByText("2 findings need you");
     const bar = document.querySelector(".bar") as HTMLElement;
     expect(bar.getAttribute("aria-label")).toBe("0 critical, 1 high, 1 medium, 1 low");
@@ -445,7 +510,7 @@ describe("the summary", () => {
   it("has no bar without findings", async () => {
     shown = overview({ headline: "All clear" });
     answer();
-    render(() => <App />);
+    await openList();
     await screen.findByText("Sweep");
     expect(document.querySelector(".bar")).toBeNull();
   });
@@ -459,7 +524,7 @@ describe("the tabs", () => {
       headline: "1 open, none urgent",
     });
     answer();
-    render(() => <App />);
+    await openList();
     const needs = await screen.findByRole("tab", { name: /Needs you/ });
     expect(needs.textContent).toBe("Needs you 0");
     expect(needs.getAttribute("aria-selected")).toBe("true");
@@ -505,7 +570,7 @@ describe("the tabs", () => {
       ],
     };
     answer();
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
     expect(
       within(row("This Mac")).getByText(/42 components checked · swept .* ago · 1 dismissed/),
@@ -538,7 +603,7 @@ describe("the rows", () => {
       headline: "2 findings need you",
     });
     answer();
-    render(() => <App />);
+    await openList();
     const a = (await screen.findByText("pkg-a")).closest("button") as HTMLElement;
     expect(within(a).getByText("1.0.0")).toBeTruthy();
     expect(within(a).getByText("GHSA-a")).toBeTruthy();
@@ -560,7 +625,7 @@ describe("the detail", () => {
   it("shows everything about the finding, and goes back with Back or Escape", async () => {
     shown = two();
     answer();
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("openssl"));
     expect(screen.getByText("Reachable from the app.")).toBeTruthy();
     expect(screen.getByText("npm install pkg@1.0.1")).toBeTruthy();
@@ -591,7 +656,7 @@ describe("the detail", () => {
       needs_you: 1,
     });
     answer();
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("pkg-x"));
     expect(document.querySelector(".detail .ver, .detail .id, .cmd, .why")).toBeNull();
     expect(screen.queryByText("Found")).toBeNull();
@@ -615,7 +680,7 @@ describe("the detail", () => {
       }
       return Promise.reject(`${command} refused`);
     });
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("openssl"));
     fireEvent.click(screen.getByText("Fix…"));
     fireEvent.click(await screen.findByText("Run fix"));
@@ -640,7 +705,7 @@ describe("the detail", () => {
         ? Promise.resolve(shown)
         : Promise.reject(`no fix for ${args?.key ?? "?"}`),
     );
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("openssl"));
     fireEvent.click(screen.getByText("Fix…"));
     expect(await screen.findByText("no fix for a")).toBeTruthy();
@@ -649,7 +714,7 @@ describe("the detail", () => {
   it("disables fixing while the app is busy", async () => {
     shown = two();
     answer();
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("openssl"));
     const fix = screen.getByText("Fix…") as HTMLButtonElement;
     expect(fix.disabled).toBe(false);
@@ -667,7 +732,7 @@ describe("a finished fix", () => {
   ])("reads %s, and closes", async (outcome, label, className, pr) => {
     shown = two();
     answer();
-    render(() => <App />);
+    await openList();
     await screen.findByText("2 findings need you");
     handlers.get("fix-done")?.({
       payload: { key: "a", outcome, summary: "Updated openssl", pull_request: pr },
@@ -700,7 +765,7 @@ describe("a problem", () => {
   it("does not hide the targets Rust could still read", async () => {
     shown = { ...two(), problem: "a report cannot be read" };
     answer();
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText("2 findings need you")).toBeTruthy();
   });
 });
@@ -708,7 +773,7 @@ describe("a problem", () => {
 describe("the footer", () => {
   it("names the agent and schedule, or says there is no agent", async () => {
     answer();
-    render(() => <App />);
+    await openList();
     expect(await screen.findByText("Claude Code · manual")).toBeTruthy();
     cleanup();
     shown = overview({ agent: null });
@@ -718,7 +783,7 @@ describe("the footer", () => {
 
   it("opens a menu with settings, launch at login and quit", async () => {
     answer({ settings_data: () => settingsView(), quit: () => null });
-    render(() => <App />);
+    await openList();
     const gear = await screen.findByLabelText("Settings");
     expect(screen.queryByRole("menu")).toBeNull();
     fireEvent.click(gear);
@@ -738,7 +803,7 @@ describe("launch at login", () => {
   it("shows the real setting, and turns it on and off", async () => {
     login.on = true;
     answer();
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByLabelText("Settings"));
     const box = screen.getByLabelText("Launch at login") as HTMLInputElement;
     await vi.waitFor(() => expect(box.checked).toBe(true));
@@ -755,7 +820,7 @@ describe("launch at login", () => {
   it("shows why it could not be turned on, and stays off", async () => {
     login.fail = true;
     answer();
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByLabelText("Settings"));
     const box = screen.getByLabelText("Launch at login") as HTMLInputElement;
     fireEvent.change(box, { target: { checked: true } });
@@ -775,7 +840,7 @@ describe("state across commands", () => {
       calls += 1;
       return calls === 1 ? Promise.reject("busy") : new Promise(() => undefined);
     });
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("Sweep"));
     expect(await screen.findByText("busy")).toBeTruthy();
     fireEvent.click(screen.getByText("Sweep"));
@@ -785,7 +850,7 @@ describe("state across commands", () => {
   it("closes the detail when its fix finishes", async () => {
     shown = two();
     answer();
-    render(() => <App />);
+    await openList();
     fireEvent.click(await screen.findByText("openssl"));
     expect(screen.getByText("Fix…")).toBeTruthy();
     handlers.get("fix-done")?.({
@@ -802,9 +867,248 @@ describe("state across commands", () => {
       all_clear: true,
     });
     answer();
-    render(() => <App />);
+    await openList();
     const text = (await screen.findByText(/target swept/)).textContent ?? "";
     expect(text).not.toContain("dismissed");
     expect(text).toMatch(/1 target swept .* ago\. Nothing open\./);
+  });
+});
+
+describe("the main view", () => {
+  it("shows what needs you, the most urgent finding and the targets", async () => {
+    shown = two();
+    answer();
+    render(() => <App />);
+    const count = await screen.findByTitle("Show details");
+    expect(within(count).getByText("2")).toBeTruthy();
+    expect(within(count).getByText("need you")).toBeTruthy();
+    expect(within(count).getByText("1 exploited")).toBeTruthy();
+    const urgent = screen.getByText("openssl 1.0.0").closest("button") as HTMLElement;
+    expect(within(urgent).getByText("exploited in the wild · This Mac")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /^This Mac/ })).toBeTruthy();
+    expect(screen.getByText(/^swept .* ago$/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sweep now" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open report" })).toBeTruthy();
+    // The settings menu moves to the top; the footer would not fit under the spiral.
+    expect(document.querySelector(".foot")).toBeNull();
+    expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
+  });
+
+  it("counts what is open when nothing needs you", async () => {
+    shown = overview({
+      findings: [finding("c", { name: "zlib", severity: "low", needs_you: false })],
+      counts: { critical: 0, high: 0, medium: 0, low: 1 },
+      headline: "1 open, none urgent",
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+    });
+    answer();
+    render(() => <App />);
+    const count = await screen.findByTitle("Show details");
+    expect(count.textContent).toBe("1openShow details");
+    expect(screen.getByText("low · This Mac")).toBeTruthy();
+  });
+
+  it("says when nothing was swept yet", async () => {
+    shown = overview({ headline: "Not swept yet" });
+    answer();
+    render(() => <App />);
+    expect(await screen.findByText("Not swept yet")).toBeTruthy();
+    expect(
+      screen.getByText("Sweep checks your targets against the newest advisories."),
+    ).toBeTruthy();
+  });
+
+  it("shows a running sweep's progress, and cancels it", async () => {
+    shown = sweeping(false);
+    answer({ cancel_sweep: () => null });
+    render(() => <App />);
+    const count = await screen.findByTitle("Show details");
+    expect(count.textContent).toBe("50%grok is judging 3 advisoriesShow details");
+    expect(screen.getByText("sweeping This Mac")).toBeTruthy();
+    const bar = screen.getByRole("progressbar", { name: "Sweep progress" });
+    expect(bar.querySelector("i")?.style.width).toBe("50%");
+    expect(screen.getByText(/^target 1 of 1 · started/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Sweep now" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Open last report" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(invoke).toHaveBeenCalledWith("cancel_sweep");
+
+    shown = sweeping(true);
+    handlers.get("changed")?.({ payload: null });
+    const stopping = await screen.findByRole("button", { name: "Stopping…" });
+    expect((stopping as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("shows all clear in green, with the fixes confirmed", async () => {
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      all_clear: true,
+      target_count: "3 targets",
+      schedule: "every 6 hours",
+      targets: overview().targets.map((t) => ({ ...t, swept: "2026-11-06T11:00:00Z" })),
+      fixed: [
+        {
+          key: "f",
+          title: "curl",
+          target: "This Mac",
+          fixed_at: "2026-11-06T11:00:00Z",
+          summary: "upgraded",
+          pull_request: null,
+        },
+      ],
+    });
+    answer();
+    render(() => <App />);
+    const count = await screen.findByTitle("Show details");
+    expect(count.textContent).toBe("Clearnothing openShow details");
+    expect(document.querySelector(".orbit.green")).not.toBeNull();
+    expect(screen.getByText("1 fixed in the last 30 days")).toBeTruthy();
+    expect(screen.getByText("3 targets · every 6 hours")).toBeTruthy();
+    const chip = screen.getByRole("button", { name: /^This Mac/ });
+    expect(chip.querySelector<HTMLElement>("i span")?.style.getPropertyValue("--c")).toBe(
+      "var(--n-green)",
+    );
+  });
+
+  it("opens the list from the count, and goes back with Back or Escape", async () => {
+    shown = two();
+    answer();
+    render(() => <App />);
+    fireEvent.click(await screen.findByTitle("Show details"));
+    expect(screen.getByText("2 findings need you")).toBeTruthy();
+    expect(screen.getByRole("tab", { name: /Needs you/ }).getAttribute("aria-selected")).toBe(
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(await screen.findByTitle("Show details")).toBeTruthy();
+    fireEvent.click(screen.getByTitle("Show details"));
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByTitle("Show details")).toBeTruthy();
+  });
+
+  it("opens the most urgent finding, and goes back to the main view", async () => {
+    shown = two();
+    answer();
+    render(() => <App />);
+    fireEvent.click((await screen.findByText("openssl 1.0.0")).closest("button") as HTMLElement);
+    expect(await screen.findByText("Reachable from the app.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(await screen.findByTitle("Show details")).toBeTruthy();
+  });
+
+  it("shows each target's findings as dots by severity, worst first", async () => {
+    const swept = "2026-11-06T11:00:00Z";
+    const line = overview().targets[0];
+    if (line === undefined) {
+      throw new Error("the fixture has a target");
+    }
+    shown = {
+      ...two(),
+      targets: [
+        {
+          ...line,
+          label: "web",
+          kind: "server",
+          swept,
+          counts: { critical: 1, high: 5, medium: 2, low: 0 },
+          open: 8,
+        },
+        { ...line, label: "me/app", kind: "repo", swept },
+        { ...line, label: "This Mac", swept: null },
+      ],
+    };
+    answer();
+    render(() => <App />);
+    await screen.findByTitle("Show details");
+    expect(colours(/^web/)).toEqual([
+      "#ff3b3b",
+      "#ff8a1f",
+      "#ff8a1f",
+      "#ff8a1f",
+      "#ff8a1f",
+      "#ff8a1f",
+    ]);
+    expect(screen.getByRole("button", { name: "web, 8 open" })).toBeTruthy();
+    expect(colours(/^me\/app/)).toEqual(["var(--n-green)"]);
+    expect(screen.getByRole("button", { name: "me/app, clear" })).toBeTruthy();
+    expect(colours(/^This Mac/)).toEqual(["var(--n-dim)"]);
+    expect(screen.getByRole("button", { name: "This Mac, not swept yet" })).toBeTruthy();
+
+    shown = sweeping(false);
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByText("sweeping This Mac");
+    expect(colours(/^This Mac/)).toEqual(["var(--n-dim)"]);
+  });
+
+  it("shows why the last sweep failed", async () => {
+    shown = { ...two(), status: { state: "failed", error: "grok exited with 1" } };
+    answer();
+    render(() => <App />);
+    expect(await screen.findByText("Last sweep: grok exited with 1")).toBeTruthy();
+  });
+
+  it("shows a running sweep's steps behind the main view, and goes back", async () => {
+    shown = sweeping(false);
+    answer();
+    render(() => <App />);
+    fireEvent.click(await screen.findByTitle("Show details"));
+    expect(await screen.findByText("Sweeping This Mac")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByText("sweeping This Mac")).toBeTruthy();
+  });
+
+  it("opens the list at the targets from a target", async () => {
+    shown = two();
+    answer();
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: /^This Mac/ }));
+    expect(screen.getByRole("tab", { name: /Targets/ }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("sweeps and opens the report, and shows why the report did not open", async () => {
+    shown = two();
+    answer({
+      sweep_now: () => null,
+      open_report: () => Promise.reject(new Error("no sweep has a report yet")),
+    });
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Sweep now" }));
+    expect(invoke).toHaveBeenCalledWith("sweep_now");
+    fireEvent.click(screen.getByRole("button", { name: "Open report" }));
+    expect(invoke).toHaveBeenCalledWith("open_report");
+    expect(await screen.findByText("Error: no sweep has a report yet")).toBeTruthy();
+  });
+
+  it("paints a still picture, again only when the state, size or display changes", async () => {
+    const frames = vi.spyOn(window, "requestAnimationFrame");
+    shown = sweeping(false);
+    answer();
+    render(() => <App />);
+    await screen.findByTitle("Show details");
+    // Nothing is painted before layout gives the canvas a size.
+    expect(canvas.paints).toBe(0);
+    canvas.resize?.(360, 372);
+    const first = canvas.paints;
+    expect(first).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(canvas.paints).toBe(first);
+    expect(frames).not.toHaveBeenCalled();
+    frames.mockRestore();
+
+    shown = two();
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByText("need you");
+    expect(canvas.paints).toBe(first + 1);
+
+    // A banner taking room resizes the canvas.
+    canvas.resize?.(360, 300);
+    expect(canvas.paints).toBe(first + 2);
+
+    // The popover moved to a display with another density.
+    vi.stubGlobal("devicePixelRatio", 3);
+    canvas.moved?.();
+    expect(canvas.paints).toBe(first + 3);
   });
 });

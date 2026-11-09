@@ -125,7 +125,7 @@ impl fmt::Display for Severity {
 }
 
 /// How sure the agent is.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Confidence {
     /// The installed version is in the affected range, or the agent verified the issue.
