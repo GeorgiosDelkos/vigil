@@ -435,7 +435,9 @@ Built in step 9a (2026-11-06):
 - The tray icon is the mark: in the menu bar's own colour (nothing open); grey inner streaks
   with blue, yellow or pink outer ones (worst open severity: low, medium, or critical and
   high); all cyan (sweeping); and with one arm missing, in the bar's colour (the last sweep
-  failed or a target got no verdict).
+  failed or a target got no verdict). The coloured icons come in two palettes switched with the
+  menu bar's appearance (decided 2026-11-09): neon on a dark bar, the same hues deepened to 3:1
+  contrast on a light one.
 - A left click on the icon shows or hides the popover; a right click opens a menu with only
   Quit Vigil (asked for 2026-11-09), which quits as the popover's Quit does.
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
