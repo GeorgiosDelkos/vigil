@@ -17,9 +17,13 @@ exclude_globs = ["app/**"]
 # CI that stopped the runner itself ("The runner has received a shutdown signal", PR #21), and
 # on a Mac it would end the user's session. It cannot be run safely, so it is excluded;
 # `the_tree_holds_the_root_s_descendants_and_nothing_else` checks what it would break.
+#
+# `FixPlan::target` is a plain accessor whose only caller is the menu-bar app (the place in the
+# fix's headline), and the app's tests are not run against mutants (see `test_package`).
 exclude_re = [
     "NvdAccess::has_keychain_key",
     "NvdAccess::save_to_keychain",
     "replace < with <= in stop$",
     "replace == with != in tree$",
+    "FixPlan::target",
 ]

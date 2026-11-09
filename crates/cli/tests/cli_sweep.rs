@@ -598,8 +598,16 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
 
     let out = sandbox.fix(&[&key], "y\n");
     let stdout = text(&out.stdout);
-    assert!(out.status.success(), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
     assert!(stdout.contains("fixed: pinned the action"), "{stdout}");
+    let steps = [
+        "preparing the fix",
+        "claude is applying the fix",
+        "recording the result",
+    ];
+    let at: Vec<Option<usize>> = steps.iter().map(|s| stderr.find(s)).collect();
+    assert!(at.iter().all(Option::is_some) && at.is_sorted(), "{stderr}");
     assert!(
         stdout.contains("pull request: https://github.com/o/r/pull/7"),
         "{stdout}"

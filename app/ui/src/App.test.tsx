@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
 import { finding, overview, settingsView } from "./fixtures.ts";
-import type { Overview } from "./overview.ts";
+import type { Overview, Status } from "./overview.ts";
 
 const invoke = vi.hoisted(() => vi.fn());
 const handlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -101,6 +101,23 @@ function sweeping(stopping: boolean): Overview {
       step_started: new Date().toISOString(),
     },
   });
+}
+
+/** A fix whose agent is running, as Rust reports it. */
+function fixing(): Status {
+  return {
+    state: "fixing",
+    title: "other",
+    place: "This Mac",
+    activity: "upgrading openssl to 3.6.5",
+    steps: [
+      { label: "preparing the fix", state: "done" },
+      { label: "grok is applying the fix", state: "now" },
+      { label: "recording the result", state: "next" },
+    ],
+    started: new Date().toISOString(),
+    step_started: new Date(Date.now() - 2 * 60_000).toISOString(),
+  };
 }
 
 describe("the popover", () => {
@@ -257,6 +274,13 @@ describe("a finding", () => {
     expect(invoke).not.toHaveBeenCalledWith("fix", expect.anything());
     fireEvent.click(screen.getByText("Run fix"));
     expect(invoke).toHaveBeenCalledWith("fix", { key: "a", found: "2026-11-06T11:00:00Z" });
+
+    // The finding stays selected, but once the fix runs its steps replace the confirmation.
+    shown = { ...two(), busy: true, status: fixing() };
+    handlers.get("changed")?.({ payload: null });
+    expect(await screen.findByRole("list", { name: "Fix progress" })).toBeTruthy();
+    expect(screen.queryByText("Run fix")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 
   it("is dismissed with the reason given", async () => {
@@ -274,8 +298,36 @@ describe("a finding", () => {
     expect(await screen.findByText("2 findings need you")).toBeTruthy();
   });
 
+  it("shows a running fix's steps as Rust places them", async () => {
+    shown = {
+      ...two(),
+      busy: true,
+      status: fixing(),
+    };
+    answer();
+    render(() => <App />);
+    const steps = await screen.findByRole("list", { name: "Fix progress" });
+    const rows = within(steps).getAllByRole("listitem");
+    expect(rows.map((r) => r.className)).toEqual(["step done", "step now", "step next"]);
+    expect(rows[1]?.getAttribute("aria-current")).toBe("step");
+    expect(within(rows[1] as HTMLElement).getByText("grok is applying the fix")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("2 min")).toBeTruthy();
+    expect(screen.getByText("other")).toBeTruthy();
+    expect(screen.getByText("This Mac · started just now")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("upgrading openssl to 3.6.5")).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).queryByText("upgrading openssl to 3.6.5")).toBeNull();
+    expect(rows[0]?.getAttribute("aria-current")).toBeNull();
+    const live = document.querySelector("[aria-live=polite]");
+    expect(live?.textContent?.trim()).toBe("grok is applying the fix");
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
   it("cannot be fixed while a sweep runs", async () => {
-    shown = { ...two(), busy: true, status: { state: "fixing", title: "other" } };
+    shown = {
+      ...two(),
+      busy: true,
+      status: fixing(),
+    };
     answer();
     render(() => <App />);
     expect(await screen.findByText("Fixing")).toBeTruthy();
@@ -529,7 +581,8 @@ describe("the detail", () => {
     fireEvent.click(await screen.findByText("openssl"));
     const fix = screen.getByText("Fix…") as HTMLButtonElement;
     expect(fix.disabled).toBe(false);
-    shown = { ...two(), busy: true, status: { state: "fixing", title: "other" } };
+    // A sweep, not a fix: a running fix shows its steps instead of the finding.
+    shown = { ...two(), busy: true, status: sweeping(false).status };
     handlers.get("changed")?.({ payload: null });
     await vi.waitFor(() => expect(fix.disabled).toBe(true));
   });

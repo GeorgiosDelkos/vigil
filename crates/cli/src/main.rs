@@ -13,6 +13,7 @@ use vigil_core::Confirmed;
 use vigil_core::DataDir;
 use vigil_core::Feeds;
 use vigil_core::FindingKey;
+use vigil_core::FixProgress;
 use vigil_core::History;
 use vigil_core::Inventory;
 use vigil_core::Latest;
@@ -300,7 +301,13 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
     } else {
         Confirmed::Asked
     };
-    let record = run_fix(data_dir, &plan, confirmed, &cancel_on_ctrl_c()?)?;
+    let record = run_fix(
+        data_dir,
+        &plan,
+        confirmed,
+        &mut |p| status(&FixProgress::labels(plan.agent())[p.step()]),
+        &cancel_on_ctrl_c()?,
+    )?;
     let pull_request = record
         .pull_request
         .as_ref()

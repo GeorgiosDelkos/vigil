@@ -12,6 +12,7 @@ mod runner;
 mod settings;
 mod tray;
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -28,8 +29,10 @@ use vigil_core::AgentKind;
 use vigil_core::Config;
 use vigil_core::DataDir;
 use vigil_core::FindingKey;
+use vigil_core::FixProgress;
 use vigil_core::ParseFindingKeyError;
 use vigil_core::PopoverView;
+use vigil_core::last_activity;
 use vigil_core::latest;
 use vigil_core::plan_fix;
 use vigil_core::popover_view;
@@ -144,6 +147,13 @@ enum StatusView {
     },
     Fixing {
         title: String,
+        place: String,
+        /// Every step of the fix in order, each done, now or next.
+        steps: Vec<StepView>,
+        /// The agent's last line of output while it runs, one plain line.
+        activity: Option<String>,
+        started: Timestamp,
+        step_started: Timestamp,
     },
     Failed {
         error: String,
@@ -189,10 +199,60 @@ impl StatusView {
                     started,
                 }
             }
-            Status::Fixing { title } => Self::Fixing { title },
+            Status::Fixing {
+                title,
+                place,
+                labels,
+                step,
+                started,
+                step_started,
+            } => Self::Fixing {
+                title,
+                place,
+                activity: match &step {
+                    FixProgress::Agent { log } => last_activity(log),
+                    FixProgress::Preparing | FixProgress::Recording => None,
+                },
+                steps: fix_steps(labels, step.step()),
+                started,
+                step_started,
+            },
             Status::Failed { error } => Self::Failed { error },
         }
     }
+}
+
+/// One step of a running fix, as the popover lists it.
+#[derive(Debug, Serialize)]
+struct StepView {
+    label: String,
+    state: StepState,
+}
+
+/// Where a step is, relative to the one that runs.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StepState {
+    Done,
+    Now,
+    Next,
+}
+
+/// The steps of a fix, `labels` in order, with the one at `at` running, those before it done
+/// and those after it next.
+fn fix_steps(labels: [String; 3], at: usize) -> Vec<StepView> {
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(i, label)| StepView {
+            label,
+            state: match i.cmp(&at) {
+                Ordering::Less => StepState::Done,
+                Ordering::Equal => StepState::Now,
+                Ordering::Greater => StepState::Next,
+            },
+        })
+        .collect()
 }
 
 /// The boundaries between `total` targets, as percentages of the bar, or none past
@@ -442,6 +502,60 @@ mod tests {
         );
         assert_eq!(ticks, Vec::<f64>::new());
         assert!(matches!(StatusView::of(Status::Idle), StatusView::Idle));
+    }
+
+    #[test]
+    fn a_fix_lists_its_steps_done_now_and_next() {
+        use StepState::{Done, Next, Now};
+        let states = |at| -> Vec<StepState> {
+            fix_steps(FixProgress::labels(AgentKind::Grok), at)
+                .into_iter()
+                .map(|s| s.state)
+                .collect()
+        };
+        assert_eq!(states(0), [Now, Next, Next], "claimed means preparing");
+        assert_eq!(states(1), [Done, Now, Next]);
+        assert_eq!(states(2), [Done, Done, Now]);
+        let labels: Vec<String> = fix_steps(FixProgress::labels(AgentKind::Grok), 1)
+            .into_iter()
+            .map(|s| s.label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "preparing the fix",
+                "grok is applying the fix",
+                "recording the result"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fix_s_view_shows_the_agent_s_last_line_only_while_it_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("agent.log");
+        std::fs::write(&log, "upgrading curl\n").unwrap();
+        let at = |step: FixProgress| Status::Fixing {
+            title: "t".to_owned(),
+            place: "This Mac".to_owned(),
+            labels: FixProgress::labels(AgentKind::Grok),
+            step,
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        };
+        let activity = |status| match StatusView::of(status) {
+            StatusView::Fixing { activity, .. } => activity,
+            _ => panic!("still fixing"),
+        };
+        assert_eq!(
+            activity(at(FixProgress::Agent { log: log.clone() })).as_deref(),
+            Some("upgrading curl")
+        );
+        assert_eq!(
+            activity(at(FixProgress::Recording)),
+            None,
+            "not once the agent is done"
+        );
     }
 
     #[test]
