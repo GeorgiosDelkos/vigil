@@ -1,11 +1,11 @@
-// The main view: Vigil's spiral drawn live, the count of what needs you in its centre, the most
+// The main view: Vigil's spiral as a still vortex of light, the count of what needs you in its centre, the most
 // urgent finding, the targets and two actions. The full list is a screen behind it.
 
 import { For, Match, Show, Switch, createEffect, createSignal, onCleanup } from "solid-js";
 
 import { Icon } from "./icons.tsx";
 import { Menu } from "./Menu.tsx";
-import { dots, neon, type Dot, type Scene } from "./orbit.ts";
+import { neon, vortex, type Box, type Scene, type Streak, type Vortex } from "./orbit.ts";
 import type { Listed, Overview, Status, TargetLine } from "./overview.ts";
 import { since } from "./time.ts";
 
@@ -44,15 +44,10 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
       progress: 0,
     };
   };
-  // The page is hidden while the popover is closed; then nothing moves.
-  const [visible, setVisible] = createSignal(document.visibilityState === "visible");
-  const seen = () => setVisible(document.visibilityState === "visible");
-  document.addEventListener("visibilitychange", seen);
-  onCleanup(() => document.removeEventListener("visibilitychange", seen));
   const failed = () => (props.overview.status.state === "failed" ? props.overview.status : null);
 
   return (
-    <section class={`orbit ${clear() ? "green" : ""} ${visible() ? "" : "paused"}`}>
+    <section class={`orbit ${clear() ? "green" : ""}`}>
       <div class="sky" aria-hidden="true">
         <div class="aurora">
           <i class="a1" />
@@ -71,12 +66,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
       </div>
       <Show when={failed()}>{(f) => <p class="banner bad">Last sweep: {f().error}</p>}</Show>
       <div class="stage">
-        <Spiral
-          scene={scene()}
-          turning={sweeping() !== null}
-          pulsing={first()?.known_exploited === true}
-          visible={visible()}
-        />
+        <Spiral scene={scene()} />
         <button
           type="button"
           class="centre"
@@ -198,7 +188,7 @@ function Urgent(props: { finding: Listed; onOpen: () => void }) {
   const f = () => props.finding;
   return (
     <button type="button" class="urgent glass" onClick={() => props.onOpen()}>
-      <span class={`glow ${f().known_exploited ? "beat" : ""}`} style={{ "--c": neon(f()) }} />
+      <span class="glow" style={{ "--c": neon(f()) }} />
       <span>
         <b>
           {f().name}
@@ -244,15 +234,9 @@ function chipDots(target: TargetLine, overview: Overview, sweeping: boolean): st
   return lit.length > 0 ? lit : ["var(--n-green)"];
 }
 
-/** Whether the user asked macOS to reduce motion. */
-function reducedMotion(): boolean {
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
-/** The spiral on a canvas. It animates only while it turns (a sweep) or its outer dot pulses
- * (an exploited finding), never under reduced motion, and never while the popover is hidden:
- * then it draws one still frame. */
-function Spiral(props: { scene: Scene; turning: boolean; pulsing: boolean; visible: boolean }) {
+/** The spiral on a canvas, drawn once per state, and again when its size or the display's pixel
+ * ratio changes. It never animates: the owner asked for a still picture (2026-11-09). */
+function Spiral(props: { scene: Scene }) {
   const [canvas, setCanvas] = createSignal<HTMLCanvasElement>();
   // Its size in CSS pixels, which changes when a banner above it takes room.
   const [box, setBox] = createSignal<Box>({ width: 0, height: 0 });
@@ -262,45 +246,28 @@ function Spiral(props: { scene: Scene; turning: boolean; pulsing: boolean; visib
     }
   });
   onCleanup(() => watch.disconnect());
-  const calm = reducedMotion();
 
-  let frame = 0;
-  onCleanup(() => cancelAnimationFrame(frame));
+  // The ratio changes when the popover moves to a display with another density.
+  const [ratio, setRatio] = createSignal(window.devicePixelRatio || 1);
+  const moved = () => setRatio(window.devicePixelRatio || 1);
   createEffect(() => {
-    cancelAnimationFrame(frame);
+    const query = window.matchMedia(`(resolution: ${ratio()}dppx)`);
+    query.addEventListener("change", moved);
+    onCleanup(() => query.removeEventListener("change", moved));
+  });
+
+  createEffect(() => {
     const target = canvas();
-    if (target === undefined) {
-      return;
-    }
-    watch.observe(target);
-    const g = fit(target, box());
-    const scene = props.scene;
-    const turning = props.turning;
-    const moving = !calm && props.visible && (turning || props.pulsing);
-    // In milliseconds per radian of turn, and of the pulse's sine; the mockup's values.
-    const draw = (time: number) =>
-      paint(g, box(), scene, {
-        spin: moving && turning ? time / 9000 : 0,
-        beat: moving ? 0.75 + 0.25 * Math.sin(time / 300) : 1,
-      });
-    const loop = (time: number) => {
-      draw(time);
-      frame = requestAnimationFrame(loop);
-    };
-    if (moving) {
-      frame = requestAnimationFrame(loop);
-    } else {
-      draw(0);
+    if (target !== undefined) {
+      watch.observe(target);
+      paint(fit(target, box(), ratio()), vortex(props.scene, box()), box());
     }
   });
   return <canvas ref={setCanvas} aria-hidden="true" />;
 }
 
-type Box = { readonly width: number; readonly height: number };
-
 /** Sizes the canvas's pixels to its box on this display, and returns its context. */
-function fit(canvas: HTMLCanvasElement, box: Box): CanvasRenderingContext2D {
-  const ratio = window.devicePixelRatio || 1;
+function fit(canvas: HTMLCanvasElement, box: Box, ratio: number): CanvasRenderingContext2D {
   canvas.width = Math.round(box.width * ratio);
   canvas.height = Math.round(box.height * ratio);
   const g = canvas.getContext("2d");
@@ -311,38 +278,52 @@ function fit(canvas: HTMLCanvasElement, box: Box): CanvasRenderingContext2D {
   return g;
 }
 
-function paint(
-  g: CanvasRenderingContext2D,
-  box: Box,
-  scene: Scene,
-  motion: { spin: number; beat: number },
-) {
+function paint(g: CanvasRenderingContext2D, picture: Vortex, box: Box) {
   g.clearRect(0, 0, box.width, box.height);
-  for (const dot of dots(scene, { ...box, ...motion })) {
-    paintDot(g, dot);
+  // Overlapping light adds up, as it does in the mockup.
+  g.globalCompositeOperation = "lighter";
+  g.lineCap = "round";
+  for (const streak of [...picture.light, ...picture.findings]) {
+    stroke(g, streak);
   }
   g.globalAlpha = 1;
-  g.shadowBlur = 0;
+  g.globalCompositeOperation = "source-over";
+
+  // A dark well in the centre so the count reads (78px, the mockup's).
+  const { x, y } = picture.centre;
+  const well = g.createRadialGradient(x, y, 0, x, y, 78);
+  well.addColorStop(0, "rgba(6, 5, 13, 0.92)");
+  well.addColorStop(0.6, "rgba(6, 5, 13, 0.75)");
+  well.addColorStop(1, "rgba(6, 5, 13, 0)");
+  g.fillStyle = well;
+  g.fillRect(0, 0, box.width, box.height);
+
+  // Fade the edges into the panel: out toward the reach, and at the top and bottom.
+  g.globalCompositeOperation = "destination-in";
+  const edge = g.createRadialGradient(x, y, picture.reach * 0.45, x, y, picture.reach * 0.98);
+  edge.addColorStop(0, "rgba(0, 0, 0, 1)");
+  edge.addColorStop(1, "rgba(0, 0, 0, 0)");
+  g.fillStyle = edge;
+  g.fillRect(0, 0, box.width, box.height);
+  const band = g.createLinearGradient(0, 0, 0, box.height);
+  band.addColorStop(0, "rgba(0, 0, 0, 0)");
+  band.addColorStop(0.16, "rgba(0, 0, 0, 1)");
+  band.addColorStop(0.84, "rgba(0, 0, 0, 1)");
+  band.addColorStop(1, "rgba(0, 0, 0, 0)");
+  g.fillStyle = band;
+  g.fillRect(0, 0, box.width, box.height);
+  g.globalCompositeOperation = "source-over";
 }
 
-function paintDot(g: CanvasRenderingContext2D, dot: Dot) {
-  // A soft halo under each bright dot, so the glow shows where canvas shadows are faint.
-  if (dot.glow > 8) {
-    const reach = dot.size * 4.5;
-    const halo = g.createRadialGradient(dot.x, dot.y, 0, dot.x, dot.y, reach);
-    halo.addColorStop(0, dot.colour);
-    halo.addColorStop(1, "rgba(0, 0, 0, 0)");
-    g.globalAlpha = dot.alpha * 0.22;
-    g.fillStyle = halo;
+function stroke(g: CanvasRenderingContext2D, streak: Streak) {
+  g.strokeStyle = streak.colour;
+  for (const layer of streak.layers) {
+    g.globalAlpha = streak.alpha * layer.alpha;
+    g.lineWidth = layer.width;
     g.beginPath();
-    g.arc(dot.x, dot.y, reach, 0, Math.PI * 2);
-    g.fill();
+    for (const p of streak.points) {
+      g.lineTo(p.x, p.y);
+    }
+    g.stroke();
   }
-  g.globalAlpha = dot.alpha;
-  g.shadowColor = dot.colour;
-  g.shadowBlur = dot.glow;
-  g.fillStyle = dot.colour;
-  g.beginPath();
-  g.arc(dot.x, dot.y, dot.size, 0, Math.PI * 2);
-  g.fill();
 }

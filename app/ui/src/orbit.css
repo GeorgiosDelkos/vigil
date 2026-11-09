@@ -1,7 +1,8 @@
 /* Orbit, in neon: the main view. Coloured light drifts slowly behind the panel, frosted glass
    chips blur it, and the spiral glows on a canvas (Orbit.tsx). The owner chose this design on
    2026-11-09, then asked for a softer, less blurred light: blur 80px at 0.42 opacity behind,
-   8px in the glass. */
+   8px in the glass. Nothing moves, by the owner's request: the light, the spiral and the
+   urgent dot are still. */
 
 /* Instrument Serif, from google/fonts at 5bb28733cec313b63fbd415b574b5ae35c8aa8b8
    (https://github.com/google/fonts/tree/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/instrumentserif),
@@ -75,7 +76,6 @@
   left: -40px;
   top: 40px;
   background: radial-gradient(circle, rgba(155, 92, 255, 0.85), transparent 70%);
-  animation: drift1 18s ease-in-out infinite alternate;
 }
 .orbit .aurora .a2 {
   width: 240px;
@@ -83,7 +83,6 @@
   right: -50px;
   top: 160px;
   background: radial-gradient(circle, rgba(62, 240, 255, 0.6), transparent 70%);
-  animation: drift2 22s ease-in-out infinite alternate;
 }
 .orbit .aurora .a3 {
   width: 220px;
@@ -91,24 +90,9 @@
   left: 60px;
   bottom: -60px;
   background: radial-gradient(circle, rgba(255, 46, 136, 0.55), transparent 70%);
-  animation: drift1 26s ease-in-out infinite alternate-reverse;
 }
 .orbit.green .aurora .a3 {
   background: radial-gradient(circle, rgba(61, 255, 168, 0.45), transparent 70%);
-}
-@keyframes drift1 {
-  to {
-    transform: translate(40px, 30px) scale(1.15);
-  }
-}
-@keyframes drift2 {
-  to {
-    transform: translate(-30px, -40px) scale(1.1);
-  }
-}
-/* The page is hidden while the popover is closed; nothing keeps moving behind it. */
-.orbit.paused * {
-  animation-play-state: paused;
 }
 
 .glass {
@@ -245,15 +229,6 @@
     0 0 6px var(--c),
     0 0 16px var(--c);
 }
-.urgent .glow.beat {
-  animation: beat 1.8s ease-in-out infinite;
-}
-@keyframes beat {
-  50% {
-    transform: scale(1.35);
-    opacity: 0.75;
-  }
-}
 .urgent b {
   display: block;
   font-weight: 600;
@@ -383,7 +358,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .orbit * {
-    animation: none !important;
     transition: none !important;
   }
 }

@@ -1,52 +1,30 @@
 import { describe, expect, it } from "vitest";
 
 import { finding } from "./fixtures.ts";
-import { ARM, NEON, dots, neon, type Scene } from "./orbit.ts";
+import { ARMS, NEON, SHOWN, STREAKS, neon, streaks, vortex, type Scene } from "./orbit.ts";
 
-const still = { width: 360, height: 372, spin: 0, beat: 1 };
+const box = { width: 360, height: 372 };
 
-function first<T>(items: readonly T[]): T {
-  const item = items[0];
-  if (item === undefined) {
-    throw new Error("expected at least one item");
-  }
-  return item;
+/** The hue of an `hsl(...)` colour. */
+function hueOf(colour: string): number {
+  return Number(/^hsl\(([\d.]+),/.exec(colour)?.[1]);
 }
 
-/** How far a dot is from the centre of a 200 by 160 canvas. */
-function radius(d: { x: number; y: number }): number {
-  return Math.hypot(d.x - 100, d.y - 80);
-}
-
-function last<T>(items: readonly T[]): T {
-  return first(items.slice(-1));
-}
-
-describe("the arm", () => {
-  it("makes exactly two turns, so it ends at the angle it starts", () => {
-    expect(first(ARM).angle).toBeCloseTo(0.6 * Math.PI, 10);
-    expect(last(ARM).angle - first(ARM).angle).toBeCloseTo(4 * Math.PI, 10);
-    expect(Math.cos(last(ARM).angle)).toBeCloseTo(Math.cos(first(ARM).angle), 10);
-    expect(Math.sin(last(ARM).angle)).toBeCloseTo(Math.sin(first(ARM).angle), 10);
+describe("the streaks", () => {
+  it("lie on three arms, in turn", () => {
+    expect(ARMS).toBe(3);
+    expect(new Set(STREAKS.map((s) => s.arm))).toEqual(new Set([0, 1, 2]));
+    expect(STREAKS.slice(0, 6).map((s) => s.arm)).toEqual([0, 1, 2, 0, 1, 2]);
   });
 
-  it("grows outward, and its dots never touch", () => {
-    for (const [index, p] of ARM.entries()) {
-      const next = ARM[index + 1];
-      if (next !== undefined) {
-        expect(next.t).toBeGreaterThan(p.t);
-        expect(next.size).toBeGreaterThan(p.size);
-        expect(Math.hypot(next.x - p.x, next.y - p.y)).toBeGreaterThan(next.size + p.size);
-      }
+  it("are the same for the same seed, and differ for another", () => {
+    expect(streaks(7, 150)).toEqual(STREAKS);
+    expect(streaks(8, 150)).not.toEqual(STREAKS);
+    for (const s of STREAKS) {
+      expect(s.u).toBeGreaterThan(0);
+      expect(s.u).toBeLessThanOrEqual(1);
+      expect(s.pick).toBeLessThan(1);
     }
-    expect([first(ARM).t, last(ARM).t]).toEqual([0, 1]);
-  });
-
-  it("is centred by its outline, not by where the arm starts", () => {
-    const xs = ARM.map((p) => p.x);
-    const ys = ARM.map((p) => p.y);
-    expect(Math.min(...xs) + Math.max(...xs)).toBeCloseTo(0, 10);
-    expect(Math.min(...ys) + Math.max(...ys)).toBeCloseTo(0, 10);
   });
 });
 
@@ -60,73 +38,84 @@ describe("a finding's colour", () => {
   });
 });
 
-describe("the dots", () => {
-  it("light the findings at the outer end, in the order Rust ranked them", () => {
+describe("the vortex", () => {
+  it("draws a streak per finding in Rust's order, two per arm", () => {
     const findings = [
       finding("a", { known_exploited: true }),
       finding("b"),
-      finding("c"),
-      finding("d"),
-      finding("e", { severity: "medium" }),
-      finding("f", { severity: "low" }),
+      finding("c", { severity: "medium" }),
+      finding("d", { severity: "low" }),
     ];
     const scene: Scene = { mood: "findings", lit: findings.map(neon), progress: 0 };
-    const drawn = dots(scene, still);
-    expect(drawn).toHaveLength(ARM.length);
-    const outerFirst = drawn.slice(-7).toReversed();
-    expect(outerFirst.slice(0, 6).map((d) => d.colour)).toEqual([
+    const picture = vortex(scene, box);
+    expect(picture.findings.map((s) => s.colour)).toEqual([
       NEON.exploited,
-      NEON.high,
-      NEON.high,
       NEON.high,
       NEON.medium,
       NEON.low,
     ]);
-    expect(outerFirst.slice(0, 6).every((d) => d.alpha === 1)).toBe(true);
-    expect(last(outerFirst).colour).toMatch(/^hsl\(/);
+    const radius = (s: (typeof picture.findings)[number]) =>
+      Math.hypot((s.points[0]?.x ?? 0) - 180, (s.points[0]?.y ?? 0) - 186);
+    const [first, second, third, fourth] = picture.findings.map(radius);
+    expect(first).toBeCloseTo(second ?? 0, 8);
+    expect(second).toBeCloseTo(third ?? 0, 8);
+    expect(fourth).toBeGreaterThan(third ?? 0);
   });
 
-  it("make the outer dot glow with the beat, and the others steady", () => {
-    const scene: Scene = { mood: "findings", lit: [NEON.exploited, NEON.high], progress: 0 };
-    const strong = dots(scene, { ...still, beat: 1 });
-    const faint = dots(scene, { ...still, beat: 0.5 });
-    expect(last(faint).glow).toBe(last(strong).glow / 2);
-    expect(faint.at(-2)?.glow).toBe(strong.at(-2)?.glow);
+  it("shows at most two findings per arm", () => {
+    const scene: Scene = { mood: "findings", lit: Array(10).fill(NEON.high), progress: 0 };
+    expect(vortex(scene, box).findings).toHaveLength(SHOWN);
+    expect(SHOWN).toBe(6);
   });
 
-  it("light all of the arm when there are more findings than dots", () => {
-    const scene: Scene = { mood: "findings", lit: ARM.map(() => NEON.low), progress: 0 };
-    expect(dots(scene, still).every((d) => d.colour === NEON.low)).toBe(true);
-  });
-
-  it("stay dark past a sweep's progress", () => {
-    const scene: Scene = { mood: "progress", lit: [], progress: 0.42 };
-    const drawn = dots(scene, still);
-    for (const [index, d] of drawn.entries()) {
-      const dark = (ARM[index]?.t ?? 0) > 0.42;
-      expect(d.alpha === 0.12).toBe(dark);
+  it("keeps the light behind findings cool, so warm colours mean a finding", () => {
+    const picture = vortex({ mood: "findings", lit: [NEON.high], progress: 0 }, box);
+    expect(picture.light).toHaveLength(STREAKS.length);
+    for (const s of picture.light) {
+      expect(hueOf(s.colour)).toBeGreaterThanOrEqual(188);
+      expect(hueOf(s.colour)).toBeLessThanOrEqual(262);
     }
   });
 
-  it("are all green when all is clear", () => {
-    const drawn = dots({ mood: "clear", lit: [NEON.high], progress: 1 }, still);
-    for (const d of drawn) {
-      const hue = Number(/^hsl\(([\d.]+),/.exec(d.colour)?.[1]);
-      expect(hue).toBeGreaterThanOrEqual(150);
-      expect(hue).toBeLessThanOrEqual(190);
+  it("lights only the streaks within a sweep's progress", () => {
+    const picture = vortex({ mood: "progress", lit: [], progress: 0.42 }, box);
+    expect(picture.findings).toHaveLength(0);
+    for (const [index, s] of picture.light.entries()) {
+      const seed = STREAKS[index];
+      const lit = (seed?.u ?? 0) <= 0.42;
+      expect(s.alpha).toBeCloseTo((seed?.alpha ?? 0) * (lit ? 1 : 0.18), 10);
+    }
+    const lit = STREAKS.filter((s) => s.u <= 0.42).length;
+    expect(lit).toBeGreaterThan(0);
+    expect(lit).toBeLessThan(STREAKS.length);
+  });
+
+  it("is green and draws no findings when all is clear", () => {
+    const picture = vortex({ mood: "clear", lit: [NEON.high], progress: 1 }, box);
+    expect(picture.findings).toHaveLength(0);
+    for (const s of picture.light) {
+      expect(hueOf(s.colour)).toBeGreaterThanOrEqual(150);
+      expect(hueOf(s.colour)).toBeLessThanOrEqual(195);
+      expect(s.alpha).toBe(STREAKS[picture.light.indexOf(s)]?.alpha);
     }
   });
 
-  it("turn about the centre, and shrink to fit a small canvas", () => {
-    const scene: Scene = { mood: "clear", lit: [], progress: 1 };
-    const small = { width: 200, height: 160, spin: 0, beat: 1 };
-    const turned = { ...small, spin: 1.3 };
-    const a = dots(scene, small);
-    const b = dots(scene, turned);
-    for (const [index, d] of b.entries()) {
-      expect(radius(d)).toBeCloseTo(radius(a[index] ?? d), 8);
-      expect(radius(d) + d.size).toBeLessThanOrEqual(80);
+  it("is centred on the canvas and reaches its corners", () => {
+    const picture = vortex({ mood: "clear", lit: [], progress: 1 }, { width: 200, height: 150 });
+    expect(picture.centre).toEqual({ x: 100, y: 75 });
+    expect(picture.reach).toBe(125);
+    for (const s of picture.light) {
+      for (const p of s.points) {
+        expect(Math.hypot(p.x - 100, p.y - 75)).toBeLessThanOrEqual(125);
+      }
     }
-    expect(b[0]?.x).not.toBeCloseTo(a[0]?.x ?? 0, 2);
+  });
+
+  it("curls each streak inward along its arm", () => {
+    const picture = vortex({ mood: "clear", lit: [], progress: 1 }, box);
+    for (const s of picture.light) {
+      const radii = s.points.map((p) => Math.hypot(p.x - 180, p.y - 186));
+      expect(radii.toSorted((a, b) => b - a)).toEqual(radii);
+    }
   });
 });

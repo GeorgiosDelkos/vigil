@@ -71,24 +71,28 @@ const two = () =>
     first_sweep_hint: null,
   });
 
-/** What the spiral's canvas drew, and whether the test asks for reduced motion. */
+/** How often the spiral's canvas was painted, and the browser events that repaint it. */
 const canvas = vi.hoisted(() => ({
-  dots: 0,
-  reduce: false,
+  paints: 0,
   /** Reports a new size for the spiral's canvas, as the browser's ResizeObserver would. */
   resize: undefined as ((width: number, height: number) => void) | undefined,
+  /** Reports that the display's pixel ratio changed, as a resolution media query would. */
+  moved: undefined as (() => void) | undefined,
 }));
 
-/** A 2D context that counts the dots drawn: jsdom has none. */
+/** A 2D context that counts whole paints (one `clearRect` each): jsdom has none. */
+const gradient = () => ({ addColorStop: () => undefined });
 const context = {
   setTransform: () => undefined,
-  clearRect: () => undefined,
-  createRadialGradient: () => ({ addColorStop: () => undefined }),
-  beginPath: () => undefined,
-  arc: () => {
-    canvas.dots += 1;
+  clearRect: () => {
+    canvas.paints += 1;
   },
-  fill: () => undefined,
+  createRadialGradient: gradient,
+  createLinearGradient: gradient,
+  fillRect: () => undefined,
+  beginPath: () => undefined,
+  lineTo: () => undefined,
+  stroke: () => undefined,
 };
 
 /** Renders the popover and opens the list behind the main view. */
@@ -98,8 +102,8 @@ async function openList() {
 }
 
 beforeEach(() => {
-  canvas.dots = 0;
-  canvas.reduce = false;
+  canvas.paints = 0;
+  canvas.moved = undefined;
   Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
     configurable: true,
     value: () => context,
@@ -119,7 +123,11 @@ beforeEach(() => {
   );
   vi.stubGlobal("matchMedia", (query: string) => ({
     media: query,
-    matches: canvas.reduce && query === "(prefers-reduced-motion: reduce)",
+    matches: false,
+    addEventListener: (_: string, listener: () => void) => {
+      canvas.moved = listener;
+    },
+    removeEventListener: () => undefined,
   }));
   invoke.mockReset();
   handlers.clear();
@@ -869,7 +877,6 @@ describe("the main view", () => {
     expect(within(count).getByText("1 exploited")).toBeTruthy();
     const urgent = screen.getByText("openssl 1.0.0").closest("button") as HTMLElement;
     expect(within(urgent).getByText("exploited in the wild · This Mac")).toBeTruthy();
-    expect(urgent.querySelector(".glow.beat")).not.toBeNull();
     expect(screen.getByRole("button", { name: /^This Mac/ })).toBeTruthy();
     expect(screen.getByText(/^swept .* ago$/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sweep now" })).toBeTruthy();
@@ -1003,45 +1010,31 @@ describe("the main view", () => {
     expect(await screen.findByText("Error: no sweep has a report yet")).toBeTruthy();
   });
 
-  it("draws one still frame under reduced motion", async () => {
-    canvas.reduce = true;
+  it("paints a still picture, again only when the state, size or display changes", async () => {
     const frames = vi.spyOn(window, "requestAnimationFrame");
     shown = sweeping(false);
     answer();
     render(() => <App />);
     await screen.findByTitle("Open the list");
-    const drawn = canvas.dots;
-    expect(drawn).toBeGreaterThan(0);
+    const first = canvas.paints;
+    expect(first).toBeGreaterThan(0);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(canvas.dots).toBe(drawn);
+    expect(canvas.paints).toBe(first);
     expect(frames).not.toHaveBeenCalled();
     frames.mockRestore();
 
-    // A banner taking room resizes the canvas; the still frame is drawn again to fit.
+    shown = two();
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByText("need you");
+    expect(canvas.paints).toBe(first + 1);
+
+    // A banner taking room resizes the canvas.
     canvas.resize?.(360, 300);
-    expect(canvas.dots).toBe(drawn * 2);
-  });
+    expect(canvas.paints).toBe(first + 2);
 
-  it("turns while a sweep runs, and stops while the popover is hidden", async () => {
-    const frames = vi.spyOn(window, "requestAnimationFrame");
-    const stop = vi.spyOn(window, "cancelAnimationFrame");
-    shown = sweeping(false);
-    answer();
-    render(() => <App />);
-    await screen.findByTitle("Open the list");
-    expect(frames).toHaveBeenCalled();
-
-    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
-    document.dispatchEvent(new Event("visibilitychange"));
-    expect(stop).toHaveBeenCalled();
-    frames.mockClear();
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(frames).not.toHaveBeenCalled();
-    expect(document.querySelector(".orbit.paused")).not.toBeNull();
-
-    // Restores jsdom's own getter.
-    Reflect.deleteProperty(document, "visibilityState");
-    frames.mockRestore();
-    stop.mockRestore();
+    // The popover moved to a display with another density.
+    vi.stubGlobal("devicePixelRatio", 3);
+    canvas.moved?.();
+    expect(canvas.paints).toBe(first + 3);
   });
 });

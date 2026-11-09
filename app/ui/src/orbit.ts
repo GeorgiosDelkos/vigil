@@ -1,5 +1,9 @@
-// The Orbit main view's spiral: where its dots sit and how each is lit, for one frame. Pure, so
-// it is tested without a canvas; Orbit.tsx paints what `dots` returns.
+// The Orbit main view's spiral, a vortex of light streaks on three logarithmic arms: what to
+// draw for one state. Pure, so it is tested without a canvas; Orbit.tsx paints what `vortex`
+// returns.
+//
+// The owner chose this style over a spiral of dots, and a still picture: nothing turns or
+// pulses (2026-11-09). A sweep shows its progress by which streaks are lit, not by motion.
 
 import type { Listed } from "./overview.ts";
 
@@ -12,132 +16,192 @@ export const NEON = {
   low: "#8fa2ff",
 } as const;
 
-/** A dot past a sweep's progress, not lit yet. */
-const DARK = "#8fa2ff";
-
-/** The colour a finding lights its dot with: exploited first, then its severity. */
+/** The colour a finding's streak takes: exploited first, then its severity. */
 export function neon(finding: Pick<Listed, "severity" | "known_exploited">): string {
   return finding.known_exploited ? NEON.exploited : NEON[finding.severity];
 }
 
-/** What the spiral shows: findings at its outer end, a sweep filling it, or all clear. */
+/** What the vortex shows: findings on its arms, a sweep lighting it, or all clear. */
 export type Mood = "findings" | "progress" | "clear";
 
 export type Scene = {
   readonly mood: Mood;
-  /** The colours of the findings' dots, from the arm's outer end inward ("findings"). */
+  /** The colours of the findings' streaks, most urgent first ("findings"). */
   readonly lit: readonly string[];
-  /** How far along the arm the dots are lit, 0 to 1 ("progress"). */
+  /** How far out from the centre the streaks are lit, 0 to 1 ("progress"). */
   readonly progress: number;
 };
 
-/** A point of the arm, around the drawn shape's centre, before it turns or fits a canvas. */
-export type ArmPoint = {
-  /** How far along the arm, 0 at the inner end to 1 at the outer end. */
-  readonly t: number;
-  /** Its angle in radians, from the canvas's x axis, clockwise as the canvas draws. */
-  readonly angle: number;
-  readonly x: number;
-  readonly y: number;
-  readonly size: number;
-};
+export type Box = { readonly width: number; readonly height: number };
 
-export type Dot = {
-  readonly x: number;
-  readonly y: number;
-  readonly size: number;
+export type Point = { readonly x: number; readonly y: number };
+
+/** One stroke of a streak: its line width in CSS pixels and its opacity, 0 to 1. */
+export type Layer = { readonly width: number; readonly alpha: number };
+
+/** A streak, drawn as the same polyline once per layer, widest first. */
+export type Streak = {
+  readonly points: readonly Point[];
   readonly colour: string;
-  /** The glow's blur radius in canvas pixels; 0 for none. */
-  readonly glow: number;
+  /** Multiplies every layer's opacity. */
   readonly alpha: number;
+  readonly layers: readonly Layer[];
 };
 
-// Exactly two turns of an Archimedean arm, so it starts and ends at the same angle. START
-// matches the tray mark (icons/src/marks.py: 1.55 turns from -90 degrees), whose outer end
-// points down and left at 108 degrees. The radii and sizes are the mockup's, in CSS pixels.
-const TURNS = 2;
-const START = 0.6 * Math.PI;
-const INNER = 100;
-const OUTER = 150;
-/** The gap between neighbouring dots along the arm, in CSS pixels. */
-const GAP = 7;
+export type Vortex = {
+  readonly centre: Point;
+  /** The radius of the outermost streaks; the painter fades the picture out toward it. */
+  readonly reach: number;
+  /** The background streaks, one per entry of `STREAKS`, in its order. */
+  readonly light: readonly Streak[];
+  /** The findings' streaks, most urgent first. */
+  readonly findings: readonly Streak[];
+};
 
-const size = (t: number) => 1.8 + t * 3.6;
+/** The background streaks' shape, before a state colours them; see `streaks`. */
+export type Seed = {
+  readonly arm: number;
+  /** How far out, 0 at the centre to 1 at the edge. */
+  readonly u: number;
+  /** Its angle off the arm, in radians. */
+  readonly jitter: number;
+  /** The angle it sweeps, in radians. */
+  readonly length: number;
+  readonly width: number;
+  readonly alpha: number;
+  /** Picks its hue from the state's palette, 0 to 1. */
+  readonly pick: number;
+};
 
-/** The arm's dots, at even steps along it rather than at even angles, which crowded the inner
- * turn: each step is a dot's width plus the gap, so dots grow apart as they grow. The steps are
- * then stretched slightly so the last dot lands exactly two turns from the first. */
-function buildArm(): readonly ArmPoint[] {
-  const span = TURNS * 2 * Math.PI;
-  const thetas: number[] = [];
-  for (let theta = 0; theta <= span;) {
-    thetas.push(theta);
-    const t = theta / span;
-    theta += (size(t) * 2 + GAP) / (INNER + (OUTER - INNER) * t);
-  }
-  const stretch = span / (thetas.at(-1) ?? span);
-  const raw = thetas.map((theta) => {
-    const t = (theta * stretch) / span;
-    const r = INNER + (OUTER - INNER) * t;
-    const angle = START + theta * stretch;
-    return { t, angle, x: Math.cos(angle) * r, y: Math.sin(angle) * r, size: size(t) };
-  });
+/** The owner asked for three arms and few streaks, kept close to each arm (2026-11-09). */
+export const ARMS = 3;
+const COUNT = 150;
+/** Two findings per arm, so they read as part of the swirl; Rust ranks the rest behind them. */
+export const SHOWN = 2 * ARMS;
+/** The radius the arms start from, in CSS pixels. */
+const INNER = 30;
+/** How tightly the arms wind: the angle grows by this much per unit of ln(r). */
+const WIND = 1.7;
 
-  // Centre the drawn shape, not the arm's origin: an outward spiral is otherwise lopsided.
-  const xs = raw.map((p) => p.x);
-  const ys = raw.map((p) => p.y);
-  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
-  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-  return raw.map((p) => ({ ...p, x: p.x - cx, y: p.y - cy }));
-}
-
-/** The spiral's arm, inner end first. */
-export const ARM: readonly ArmPoint[] = buildArm();
-
-type Light = Pick<Dot, "colour" | "glow" | "alpha">;
-
-/** The farthest any dot reaches from the centre, with room for its glow (arbitrary 10px). */
-const REACH = Math.max(...ARM.map((p) => Math.hypot(p.x, p.y) + p.size)) + 10;
-
-/** How a dot `t` along the arm and `fromEnd` dots from its outer end is lit, as the mockup
- * lights it. */
-function light(scene: Scene, t: number, fromEnd: number, beat: number): Light {
-  const lit = scene.lit[fromEnd];
-  if (scene.mood === "findings" && lit !== undefined) {
-    return { colour: lit, glow: fromEnd === 0 ? 26 * beat : 14, alpha: 1 };
-  }
-  if (scene.mood === "clear") {
-    return {
-      colour: `hsl(${150 + t * 40}, 100%, ${62 + t * 10}%)`,
-      glow: 6 + t * 10,
-      alpha: 0.35 + t * 0.6,
-    };
-  }
-  if (scene.mood === "progress" && t > scene.progress) {
-    return { colour: DARK, glow: 0, alpha: 0.12 };
-  }
-  // Cyan near the centre turning violet outward, like the mark.
-  return {
-    colour: `hsl(${188 + t * 82}, 100%, ${64 - t * 4}%)`,
-    glow: 4 + t * 10,
-    alpha: scene.mood === "findings" ? 0.25 + t * 0.45 : 0.45 + t * 0.55,
+/** A Park-Miller generator (multiplier 16807, modulus 2^31 - 1), so a seed always yields the
+ * same streaks and the same state always draws the same picture. */
+function seeded(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state * 16_807) % 2_147_483_647;
+    return state / 2_147_483_647;
   };
 }
 
-/** Every dot of one frame, in CSS pixels of a `width` by `height` canvas. `spin` turns the
- * spiral about its centre, in radians; `beat` (about 0.5 to 1) scales the outer dot's glow. The
- * spiral shrinks to fit a canvas smaller than it, and never grows. */
-export function dots(
-  scene: Scene,
-  frame: { width: number; height: number; spin: number; beat: number },
-): Dot[] {
-  const scale = Math.min(1, Math.min(frame.width, frame.height) / 2 / REACH);
-  const cos = Math.cos(frame.spin);
-  const sin = Math.sin(frame.spin);
-  return ARM.map((p, index) => ({
-    x: frame.width / 2 + (p.x * cos - p.y * sin) * scale,
-    y: frame.height / 2 + (p.x * sin + p.y * cos) * scale,
-    size: p.size * scale,
-    ...light(scene, p.t, ARM.length - 1 - index, frame.beat),
-  }));
+/** `count` background streaks from `seed`, as the mockup places them. Their `u` leans outward
+ * (a power of 0.75), and the outer ones are longer and wider. */
+export function streaks(seed: number, count: number): Seed[] {
+  const next = seeded(seed);
+  return Array.from({ length: count }, (_, index) => {
+    const u = Math.pow(next(), 0.75);
+    return {
+      arm: index % ARMS,
+      u,
+      jitter: (next() - 0.5) * 0.28,
+      length: 0.22 + next() * 0.5 * (0.4 + u),
+      width: 0.5 + u * 2.4 + next() * 0.8,
+      alpha: 0.25 + next() * 0.6,
+      pick: next(),
+    };
+  });
+}
+
+/** The streaks every state draws; the seed is the mockup's. */
+export const STREAKS: readonly Seed[] = streaks(7, COUNT);
+
+type Hsl = readonly [hue: number, saturation: number, lightness: number];
+
+/** Cool hues only behind findings, so pink, orange and yellow mean a finding and nothing else. */
+const HUES: Readonly<Record<Mood, readonly Hsl[]>> = {
+  findings: [
+    [188, 100, 62],
+    [205, 100, 64],
+    [228, 100, 68],
+    [262, 95, 70],
+  ],
+  progress: [
+    [190, 100, 62],
+    [222, 100, 64],
+    [250, 95, 68],
+  ],
+  clear: [
+    [150, 100, 58],
+    [175, 100, 58],
+    [195, 100, 62],
+  ],
+};
+
+/** The hue `pick` (0 to 1) chooses from `hues`. */
+function hue(hues: readonly Hsl[], pick: number): Hsl {
+  const chosen = hues[Math.floor(pick * hues.length)];
+  if (chosen === undefined) {
+    throw new Error(`a streak's pick must be at least 0 and below 1, not ${pick}`);
+  }
+  return chosen;
+}
+
+/** How much a streak past a sweep's progress keeps of its light. */
+const DIM = 0.18;
+
+/** A stretch of the log spiral from angle `start` at radius `r`, `steps` segments long: the
+ * radius shrinks as the angle grows, so the stretch curls in along its arm. */
+function arc(centre: Point, start: number, r: number, length: number, steps: number): Point[] {
+  return Array.from({ length: steps + 1 }, (_, k) => {
+    const turn = length * (k / steps);
+    const radius = r * Math.exp(-turn / WIND);
+    return {
+      x: centre.x + Math.cos(start + turn) * radius,
+      y: centre.y + Math.sin(start + turn) * radius,
+    };
+  });
+}
+
+/** The angle of arm `arm` at radius `r`. */
+function armAngle(arm: number, r: number): number {
+  return (arm / ARMS) * Math.PI * 2 + Math.log(r / INNER) * WIND;
+}
+
+/** Everything to draw for `scene` on a canvas of `box` CSS pixels. */
+export function vortex(scene: Scene, box: Box): Vortex {
+  const centre = { x: box.width / 2, y: box.height / 2 };
+  const reach = Math.hypot(box.width, box.height) / 2;
+  const hues = HUES[scene.mood];
+
+  const light = STREAKS.map((s) => {
+    const r = INNER + s.u * (reach - INNER);
+    const [h, sat, l] = hue(hues, s.pick);
+    const dark = scene.mood === "progress" && s.u > scene.progress;
+    return {
+      points: arc(centre, armAngle(s.arm, r) + s.jitter, r, s.length, 8),
+      colour: `hsl(${h}, ${sat}%, ${l}%)`,
+      alpha: s.alpha * (dark ? DIM : 1),
+      layers: [
+        { width: s.width * 3.2, alpha: 0.18 },
+        { width: s.width, alpha: 1 },
+      ],
+    };
+  });
+
+  // The brightest, thickest streaks, two per arm, the second pair further out.
+  const lit = scene.mood === "findings" ? scene.lit.slice(0, SHOWN) : [];
+  const findings = lit.map((colour, index) => {
+    const r = reach * (0.5 + 0.14 * Math.floor(index / ARMS));
+    return {
+      points: arc(centre, armAngle(index % ARMS, r) + 0.12, r, 0.7, 12),
+      colour,
+      alpha: 1,
+      layers: [
+        { width: 16, alpha: 0.16 },
+        { width: 7, alpha: 0.35 },
+        { width: 3, alpha: 1 },
+      ],
+    };
+  });
+
+  return { centre, reach, light, findings };
 }
