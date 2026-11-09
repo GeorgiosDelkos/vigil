@@ -105,7 +105,8 @@ pub struct TargetLine {
     /// When its newest sweep with a verdict started.
     pub swept: Option<Timestamp>,
     /// What that sweep checked, one phrase: "139 packages checked", or "no packages listed"
-    /// (a repository without a dependency graph); `None` before a sweep.
+    /// when it found none (a repository without a dependency graph, for one); `None` before
+    /// a sweep.
     pub checked: Option<String>,
     /// Its open findings by severity.
     pub counts: Counts,
