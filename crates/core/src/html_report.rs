@@ -807,6 +807,7 @@ mod tests {
         let issue = Open {
             title: evil.to_owned(),
             advisories: Vec::new(),
+            place: String::new(),
             ..open(2, Severity::Low, false)
         };
         let mut target = mac(vec![reported, issue]);
