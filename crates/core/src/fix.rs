@@ -316,8 +316,8 @@ const ACTIVITY_CHARS: usize = 160;
 /// The last line the agent wrote to `log` that holds any text, as one plain line (control
 /// characters replaced) of at most [`ACTIVITY_CHARS`] characters; `None` before it has written
 /// any, or when the log cannot be read. Only the last [`ACTIVITY_TAIL`] bytes are read, so
-/// text further back is not found, and a longer line shows its tail. The text is the agent's own and untrusted: it is only
-/// ever shown, never acted on.
+/// text further back is not found, and a longer line shows its tail. The text is the agent's
+/// own and untrusted: it is only ever shown, never acted on.
 pub fn last_activity(log: &Path) -> Option<String> {
     let mut file = fs::File::open(log).ok()?;
     let len = file.metadata().ok()?.len();
