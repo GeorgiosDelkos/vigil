@@ -161,11 +161,16 @@ fn exploited_callout(view: &PopoverView) -> String {
         .filter(|f| f.open.known_exploited)
         .map(|f| {
             let open = &f.open;
-            let first = open.commands.first().unwrap_or(&open.fix);
-            let first = if first.is_empty() {
-                String::new()
-            } else {
-                format!(" Fix it first: <span class=\"mono\">{}</span>", esc(first))
+            // A command reads as one, in mono; a manual fix's summary reads as prose.
+            let first = match (open.commands.first(), open.fix.is_empty()) {
+                (Some(command), _) => {
+                    format!(
+                        " Fix it first: <span class=\"mono\">{}</span>",
+                        esc(command)
+                    )
+                }
+                (None, false) => format!(" Fix it first: {}.", esc(&open.fix)),
+                (None, true) => String::new(),
             };
             format!(
                 "<p><b>{}{} on {}</b> is affected by {}, which attackers are using now.{first}</p>",
@@ -440,7 +445,11 @@ fn advisory_link(id: &str) -> String {
     } else {
         return esc(id);
     };
-    format!("<a href=\"{}\">{}</a>", esc(&url), esc(id))
+    format!(
+        "<a href=\"{}\" referrerpolicy=\"no-referrer\">{}</a>",
+        esc(&url),
+        esc(id)
+    )
 }
 
 /// `CVE-`, a four-digit year, `-`, and 4 to 20 digits. 20 is arbitrary: CVE numbers in use
@@ -713,12 +722,17 @@ mod tests {
     fn advisories_link_only_for_ids_of_a_safe_shape() {
         assert_eq!(
             advisory_link("CVE-2024-3094"),
-            "<a href=\"https://nvd.nist.gov/vuln/detail/CVE-2024-3094\">CVE-2024-3094</a>"
+            "<a href=\"https://nvd.nist.gov/vuln/detail/CVE-2024-3094\" \
+             referrerpolicy=\"no-referrer\">\
+             CVE-2024-3094</a>"
         );
         for id in ["GHSA-c2qf-rxjj-qqgw", "RUSTSEC-2024-0001", "RHSA-2024:1234"] {
             assert_eq!(
                 advisory_link(id),
-                format!("<a href=\"https://osv.dev/vulnerability/{id}\">{id}</a>")
+                format!(
+                    "<a href=\"https://osv.dev/vulnerability/{id}\" \
+                     referrerpolicy=\"no-referrer\">{id}</a>"
+                )
             );
         }
         for id in [
@@ -747,7 +761,8 @@ mod tests {
         o.advisories = vec!["CVE-2024-3094".to_owned(), "<x>-1".to_owned()];
         let html = page(vec![mac(vec![o])]);
         assert!(html.contains(
-            "<dt>Advisories</dt><dd><a href=\"https://nvd.nist.gov/vuln/detail/CVE-2024-3094\">\
+            "<dt>Advisories</dt><dd><a href=\"https://nvd.nist.gov/vuln/detail/CVE-2024-3094\" \
+             referrerpolicy=\"no-referrer\">\
              CVE-2024-3094</a>, &lt;x&gt;-1</dd>"
         ));
     }
@@ -776,7 +791,10 @@ mod tests {
                 } else {
                     "https://osv.dev/vulnerability/"
                 };
-                prop_assert_eq!(shown, format!("<a href=\"{base}{id}\">{id}</a>"));
+                prop_assert_eq!(
+                    shown,
+                    format!("<a href=\"{base}{id}\" referrerpolicy=\"no-referrer\">{id}</a>")
+                );
             } else {
                 prop_assert_eq!(shown, esc(&id));
             }
@@ -900,7 +918,8 @@ mod tests {
         assert_eq!(html.matches("class=\"rep-alert\"").count(), 1);
         assert!(html.contains(
             "<p><b>pkg2 1.0.0 on This Mac</b> is affected by \
-             <a href=\"https://nvd.nist.gov/vuln/detail/CVE-2024-3094\">CVE-2024-3094</a>, \
+             <a href=\"https://nvd.nist.gov/vuln/detail/CVE-2024-3094\" \
+             referrerpolicy=\"no-referrer\">CVE-2024-3094</a>, \
              which attackers are using now. Fix it first: \
              <span class=\"mono\">brew upgrade webp</span></p>"
         ));
@@ -915,6 +934,12 @@ mod tests {
             "no empty fix"
         );
         assert!(!html.contains("Fix it first"));
+
+        let mut manual = open(4, Severity::Low, true);
+        manual.commands = Vec::new();
+        manual.fix = "<Upgrade> the app".to_owned();
+        let html = page(vec![mac(vec![manual])]);
+        assert!(html.contains("using now. Fix it first: &lt;Upgrade&gt; the app.</p>"));
         assert!(html.contains("<div class=\"hot\"><b>1</b><span>exploited in the wild</span>"));
     }
 
