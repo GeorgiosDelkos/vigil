@@ -127,11 +127,10 @@ pub enum TargetKind {
 }
 
 /// The popover's content for the targets' latest findings.
-pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
+pub fn popover_view(mut latest: Vec<Latest>) -> PopoverView {
     let targets: Vec<TargetLine> = latest.iter().map(target_line).collect();
     let last_swept = latest.iter().filter_map(|t| t.swept).max();
     let dismissed = latest.iter().map(|t| t.dismissed).sum();
-    let mut latest = latest;
     let mut fixed: Vec<FixedListed> = latest
         .iter_mut()
         .flat_map(|t| {

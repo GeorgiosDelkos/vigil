@@ -436,7 +436,8 @@ Built in step 9a (2026-11-06):
   (worst open severity: low, medium, or critical and high), blue (sweeping), and an unfinished
   spiral in the bar's colour (the last sweep failed or a target got no verdict).
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
-  counts by severity, the six most severe open findings with their keys and fixes on hover,
+  counts by severity, the six most severe open findings with their keys and fixes on hover, a
+  Fixed tab with the fixes confirmed in the last 30 days,
   Sweep now, Edit settings, Launch at login (the autostart plugin's LaunchAgent) and Quit. It
   asks the app for an overview whenever it is shown and on every `changed` event.
 - One sweep at a time: the app checks and claims "sweeping" under one lock, and the core's
@@ -472,8 +473,8 @@ Built in step 9b (2026-11-06):
   folder, repository or server; set the agent, schedule or history) checked like a loaded
   config before it is written.
 - Every value the UI shows is worked out in Rust (owner's rule, 2026-11-06): the core's
-  `popover_view` ranks findings (exploited, then severity, then newest), counts them, writes
-  the headline and the target lines; `settings_view` writes each section's summary, the
+  `popover_view` ranks findings (exploited, then severity, then newest), counts them, lists the confirmed fixes
+  newest first, writes the headline and the target lines; `settings_view` writes each section's summary, the
   choices and which are chosen, folders as `~/...`, and whether a host can be added. The UI
   lays these out and sends `Setting`s; the only formatting left in TypeScript is "5 min ago",
   which follows the popover's clock.
@@ -514,7 +515,9 @@ files.
   dismissed. Dismissed means dismissed in `state/dismissals.json` now, as `fix` checks it, so a
   `dismiss` shows at once. Titles and summaries are printed as plain lines (control and
   invisible characters replaced), since they hold agent text and names from the target.
-  `--json` prints one object per target (`target`, `swept`, `open`, `dismissed`). Each report
+  `--json` prints one object per target (`target`, `swept`, `components`, `open`, `fixed`,
+  `dismissed`); an open entry's `fix_state` is null or `reported` (with `summary` and
+  `pull_request`) or `not_held`. Each report
   entry carries that `title`, so the tray app shows the same line. `--target` matches the
   report name exactly.
 

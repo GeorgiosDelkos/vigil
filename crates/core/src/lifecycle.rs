@@ -1,5 +1,6 @@
-//! What carries over from one sweep to the next: finding keys, dismissals, and what changed
-//! since the target's last sweep.
+//! What carries over from one sweep to the next: finding keys, dismissals, what changed
+//! since the target's last sweep, and which reported fixes a later sweep confirmed
+//! (`state/fixes.jsonl`).
 //!
 //! A [`FindingKey`] names one finding or issue across sweeps, so a dismissal and the
 //! comparison with the last sweep can find it again. Dismissals live in
