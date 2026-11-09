@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { disable, enable, isEnabled } from "@tauri-apps/plugin-autostart";
 import {
   For,
   Match,
@@ -24,6 +23,8 @@ import {
   type Status,
   type TargetLine,
 } from "./overview.ts";
+import { Menu } from "./Menu.tsx";
+import { Orbit } from "./Orbit.tsx";
 import { Settings } from "./Settings.tsx";
 import type { Section } from "./settings.ts";
 import { Glyph, Icon } from "./icons.tsx";
@@ -31,9 +32,56 @@ import { ago, since } from "./time.ts";
 
 type Tab = "needs" | "targets" | "all" | "fixed";
 
+/** The main view, or the list behind it. */
+type Screen = "orbit" | "list";
+
+/** What the popover shows, in the order it decides. */
+type View =
+  | "settings"
+  | "fixing"
+  | "detail"
+  | "orbit"
+  | "busy"
+  | "problem"
+  | "agent"
+  | "clear"
+  | "list";
+
+function viewOf(o: Overview, open: { settings: boolean; detail: boolean; screen: Screen }): View {
+  if (open.settings) {
+    return "settings";
+  }
+  // Once a fix starts, its steps replace the confirmation, whatever is selected.
+  if (o.status.state === "fixing") {
+    return "fixing";
+  }
+  return open.detail ? "detail" : screenOf(o, open.screen);
+}
+
+/** The main view or the list, unless a problem stops sweeps; a running sweep shows either. */
+function screenOf(o: Overview, screen: Screen): View {
+  const blocked = blocker(o);
+  if (screen === "orbit" && (o.busy || blocked === null)) {
+    return "orbit";
+  }
+  if (o.busy) {
+    return "busy";
+  }
+  return blocked ?? (o.all_clear ? "clear" : "list");
+}
+
+/** What stops a sweep before it starts: settings Rust cannot read, or no agent. */
+function blocker(o: Overview): "problem" | "agent" | null {
+  if (o.problem !== null && o.targets.length === 0) {
+    return "problem";
+  }
+  return o.agent === null ? "agent" : null;
+}
+
 export function App() {
   const [overview, { refetch }] = createResource(() => invoke<Overview>("overview"));
   const [now, setNow] = createSignal(new Date());
+  const [screen, setScreen] = createSignal<Screen>("orbit");
   const [tab, setTab] = createSignal<Tab>("needs");
   const [selected, setSelected] = createSignal<string | null>(null);
   const [done, setDone] = createSignal<FixDone | null>(null);
@@ -76,9 +124,24 @@ export function App() {
     setError(null);
     action().catch((e: unknown) => setError(String(e)));
   };
+  const view = () => {
+    const o = overview();
+    return o === undefined
+      ? null
+      : viewOf(o, {
+          settings: settings() !== undefined,
+          detail: chosen() !== null,
+          screen: screen(),
+        });
+  };
+  const list = (at: Tab) => {
+    setTab(at);
+    setScreen("list");
+  };
+  const back = () => setScreen("orbit");
 
   return (
-    <main class="pop">
+    <main class="pop" classList={{ "on-orbit": view() === "orbit" }}>
       <Show when={error()}>{(e) => <p class="banner bad">{e()}</p>}</Show>
       <Show when={done()}>
         {(d) => (
@@ -96,7 +159,7 @@ export function App() {
       <Show when={overview()} fallback={<p class="quiet">Reading the last sweep…</p>}>
         {(o) => (
           <Switch>
-            <Match when={settings() !== undefined}>
+            <Match when={view() === "settings"}>
               <Settings
                 start={settings() ?? null}
                 onClose={() => {
@@ -105,15 +168,14 @@ export function App() {
                 }}
               />
             </Match>
-            <Match when={o().status.state === "fixing"}>
-              {/* Once a fix starts, its steps replace the confirmation, whatever is selected. */}
+            <Match when={view() === "fixing"}>
               <Busy
                 status={o().status}
                 now={now()}
                 onCancel={() => run(() => invoke("cancel_sweep"))}
               />
             </Match>
-            <Match when={chosen()}>
+            <Match when={view() === "detail" && chosen()}>
               {(item) => (
                 <Detail
                   item={item()}
@@ -124,14 +186,31 @@ export function App() {
                 />
               )}
             </Match>
-            <Match when={o().busy}>
+            <Match when={view() === "orbit"}>
+              <Orbit
+                overview={o()}
+                now={now()}
+                actions={{
+                  onList: () => list("needs"),
+                  onTargets: () => list("targets"),
+                  onFinding: setSelected,
+                  onSweep: () => run(() => invoke("sweep_now")),
+                  onCancel: () => run(() => invoke("cancel_sweep")),
+                  onReport: () => run(() => invoke("open_report")),
+                  onSettings: () => setSettings(null),
+                  onError: setError,
+                }}
+              />
+            </Match>
+            <Match when={view() === "busy"}>
+              <Nav onBack={back} />
               <Busy
                 status={o().status}
                 now={now()}
                 onCancel={() => run(() => invoke("cancel_sweep"))}
               />
             </Match>
-            <Match when={o().problem !== null && o().targets.length === 0}>
+            <Match when={view() === "problem"}>
               <Problem
                 title="Settings need a look"
                 text={o().problem ?? ""}
@@ -139,7 +218,7 @@ export function App() {
                 onAction={() => setSettings(null)}
               />
             </Match>
-            <Match when={o().agent === null}>
+            <Match when={view() === "agent"}>
               <Problem
                 title="Choose an agent to start"
                 text="Vigil has a coding agent judge which advisories affect you. Pick one of those installed on this Mac."
@@ -147,10 +226,12 @@ export function App() {
                 onAction={() => setSettings("agent")}
               />
             </Match>
-            <Match when={o().all_clear}>
+            <Match when={view() === "clear"}>
+              <Nav onBack={back} />
               <AllClear overview={o()} now={now()} />
             </Match>
-            <Match when={true}>
+            <Match when={view() === "list"}>
+              <Nav onBack={back} />
               <Summary overview={o()} now={now()} onSweep={() => run(() => invoke("sweep_now"))} />
               <Tabs tab={tab()} onTab={setTab} overview={o()} />
               <Switch>
@@ -181,7 +262,7 @@ export function App() {
           </Switch>
         )}
       </Show>
-      <Show when={settings() === undefined}>
+      <Show when={view() !== "settings" && view() !== "orbit"}>
         <Footer overview={overview()} onSettings={() => setSettings(null)} onError={setError} />
       </Show>
     </main>
@@ -417,6 +498,26 @@ function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
   );
 }
 
+/** Back to the screen before, with its button or Escape. */
+function Nav(props: { onBack: () => void }) {
+  const back = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      props.onBack();
+    }
+  };
+  onMount(() => window.addEventListener("keydown", back));
+  onCleanup(() => window.removeEventListener("keydown", back));
+  return (
+    <div class="nav">
+      <button type="button" class="back" onClick={() => props.onBack()}>
+        <Icon name="chev" />
+        Back
+      </button>
+      <kbd>esc</kbd>
+    </div>
+  );
+}
+
 function Detail(props: {
   item: Listed;
   now: Date;
@@ -427,14 +528,6 @@ function Detail(props: {
   const [preview, setPreview] = createSignal<FixPreview | null>(null);
   const [dismissing, setDismissing] = createSignal(false);
   const [reason, setReason] = createSignal("");
-  const back = (event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      props.onBack();
-    }
-  };
-  onMount(() => window.addEventListener("keydown", back));
-  onCleanup(() => window.removeEventListener("keydown", back));
-
   const askFix = () => {
     invoke<FixPreview>("fix_preview", { key: props.item.key })
       .then(setPreview)
@@ -456,13 +549,7 @@ function Detail(props: {
 
   return (
     <section class="detail-view">
-      <div class="nav">
-        <button type="button" class="back" onClick={() => props.onBack()}>
-          <Icon name="chev" />
-          Back
-        </button>
-        <kbd>esc</kbd>
-      </div>
+      <Nav onBack={props.onBack} />
       <div class="group detail">
         <div class="dhead">
           <Glyph severity={props.item.severity} />
@@ -803,27 +890,6 @@ function Footer(props: {
   onSettings: () => void;
   onError: (error: string) => void;
 }) {
-  const [login, setLogin] = createSignal(false);
-  const [menu, setMenu] = createSignal(false);
-  onMount(() => {
-    isEnabled()
-      .then(setLogin)
-      .catch(() => setLogin(false));
-  });
-  const toggleLogin = (event: Event & { currentTarget: HTMLInputElement }) => {
-    const box = event.currentTarget;
-    (login() ? disable() : enable())
-      .catch((e: unknown) => props.onError(String(e)))
-      .finally(() => {
-        // The box shows what is set, even when changing it failed.
-        isEnabled()
-          .then((on) => {
-            setLogin(on);
-            box.checked = on;
-          })
-          .catch(() => undefined);
-      });
-  };
   return (
     <footer class="foot">
       <span class="agent">
@@ -831,40 +897,7 @@ function Footer(props: {
         {props.overview?.agent ?? "no agent"} · {props.overview?.schedule ?? ""}
       </span>
       <span class="spacer" />
-      <div class="menu-wrap">
-        <button
-          type="button"
-          class="ghost"
-          aria-label="Settings"
-          title="Settings"
-          aria-expanded={menu()}
-          onClick={() => setMenu(!menu())}
-        >
-          <Icon name="settings" />
-        </button>
-        <Show when={menu()}>
-          <div class="menu" role="menu">
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setMenu(false);
-                props.onSettings();
-              }}
-            >
-              Settings…
-            </button>
-            <label class="menuitem">
-              <input id="login" type="checkbox" checked={login()} onChange={toggleLogin} />
-              Launch at login
-            </label>
-            <hr />
-            <button type="button" role="menuitem" onClick={() => void invoke("quit")}>
-              Quit Vigil
-            </button>
-          </div>
-        </Show>
-      </div>
+      <Menu onSettings={props.onSettings} onError={props.onError} />
     </footer>
   );
 }
