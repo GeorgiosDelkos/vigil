@@ -104,9 +104,10 @@ pub struct TargetLine {
     pub kind: TargetKind,
     /// When its newest sweep with a verdict started.
     pub swept: Option<Timestamp>,
-    /// What that sweep checked, one phrase: "139 packages checked", or "no packages listed"
-    /// when it found none (a repository without a dependency graph, for one); `None` before
-    /// a sweep.
+    /// What that sweep checked, one phrase: "139 components checked", or "no components
+    /// listed" when it listed none (a repository without a dependency graph, for one); `None`
+    /// before a sweep. Components, not packages: the count holds the OS and toolchains too, and
+    /// a package once per place it is installed.
     pub checked: Option<String>,
     /// Its open findings by severity.
     pub counts: Counts,
@@ -223,9 +224,9 @@ fn target_line(latest: &Latest) -> TargetLine {
 
 fn checked(components: usize) -> String {
     match components {
-        0 => "no packages listed".to_owned(),
-        1 => "1 package checked".to_owned(),
-        n => format!("{n} packages checked"),
+        0 => "no components listed".to_owned(),
+        1 => "1 component checked".to_owned(),
+        n => format!("{n} components checked"),
     }
 }
 
@@ -380,17 +381,17 @@ mod tests {
         assert_eq!((web.label.as_str(), web.open, web.dismissed), ("web", 1, 1));
         assert!(matches!(web.kind, TargetKind::Server));
         assert_eq!(web.counts.medium, 1);
-        assert_eq!(web.checked.as_deref(), Some("7 packages checked"));
+        assert_eq!(web.checked.as_deref(), Some("7 components checked"));
         assert_eq!(mac.checked, None, "not swept");
         assert_eq!(view.last_swept, Some(Timestamp::from_second(5).unwrap()));
         assert!(matches!(target_kind("github:o/r"), TargetKind::Repo));
     }
 
     #[test]
-    fn a_target_says_how_many_packages_it_checked() {
-        assert_eq!(checked(0), "no packages listed");
-        assert_eq!(checked(1), "1 package checked");
-        assert_eq!(checked(139), "139 packages checked");
+    fn a_target_says_how_many_components_it_checked() {
+        assert_eq!(checked(0), "no components listed");
+        assert_eq!(checked(1), "1 component checked");
+        assert_eq!(checked(139), "139 components checked");
     }
 
     #[test]

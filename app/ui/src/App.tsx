@@ -247,7 +247,7 @@ function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
       when={props.items.length > 0}
       fallback={<p class="quiet">No confirmed fixes from the last 30 days.</p>}
     >
-      <ul class="group list pane" aria-label="Fixed">
+      <ul class="group list pane" aria-label="Fixed" tabindex="0">
         <For each={props.items}>
           {(item) => (
             <li class="row fixed-row">
@@ -340,10 +340,10 @@ function Rows(props: {
 
 function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
   return (
-    <div class="group list pane">
+    <div class="group list pane" role="list" aria-label="Targets" tabindex="0">
       <For each={props.targets}>
         {(t) => (
-          <div class="row static target">
+          <div class="row static target" role="listitem">
             <span class="ticon">
               <Icon name={t.kind} />
             </span>
@@ -354,7 +354,10 @@ function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
                   <For each={SEVERITIES.filter((s) => t.counts[s] > 0)}>
                     {(s) => (
                       <span>
-                        <Glyph severity={s} />
+                        {/* The word follows, so the glyph is not read out a second time. */}
+                        <span class="glyph" aria-hidden="true">
+                          <Glyph severity={s} />
+                        </span>
                         <b>{t.counts[s]}</b> {s}
                       </span>
                     )}
@@ -363,14 +366,25 @@ function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
               </Show>
               <span class="where">
                 <Show when={t.swept} fallback="not swept yet">
-                  {(swept) => `${t.checked ?? ""} · swept ${since(swept(), props.now)} ago`}
+                  {(swept) =>
+                    [t.checked, `swept ${since(swept(), props.now)} ago`]
+                      .filter((part) => part !== null)
+                      .join(" · ")
+                  }
                 </Show>
                 <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
               </span>
             </span>
             <span class="open">
               <Show when={t.swept !== null}>
-                <Show when={t.open > 0} fallback={<Icon name="done" />}>
+                <Show
+                  when={t.open > 0}
+                  fallback={
+                    <>
+                      <Icon name="done" /> clear
+                    </>
+                  }
+                >
                   <b>{t.open}</b> open
                 </Show>
               </Show>

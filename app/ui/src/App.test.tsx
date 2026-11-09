@@ -388,7 +388,7 @@ describe("the tabs", () => {
           label: "This Mac",
           kind: "mac",
           swept: "2026-11-06T11:00:00Z",
-          checked: "42 packages checked",
+          checked: "42 components checked",
           counts: { critical: 0, high: 6, medium: 0, low: 0 },
           open: 6,
           dismissed: 1,
@@ -397,7 +397,7 @@ describe("the tabs", () => {
           label: "web",
           kind: "server",
           swept: "2026-11-06T11:00:00Z",
-          checked: "3 packages checked",
+          checked: "3 components checked",
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
           dismissed: 0,
@@ -417,7 +417,7 @@ describe("the tabs", () => {
     render(() => <App />);
     fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
     expect(
-      within(row("This Mac")).getByText(/42 packages checked · swept .* ago · 1 dismissed/),
+      within(row("This Mac")).getByText(/42 components checked · swept .* ago · 1 dismissed/),
     ).toBeTruthy();
     // Only the severities it has, each named, and the open count in words.
     expect(row("This Mac").querySelector(".sevs")?.textContent).toBe("6 high");
@@ -425,6 +425,12 @@ describe("the tabs", () => {
     expect(row("web").textContent).not.toContain("dismissed");
     expect(row("web").querySelector(".sevs")).toBeNull();
     expect(row("web").querySelector(".open svg")).not.toBeNull();
+    expect(row("web").querySelector(".open")?.textContent).toBe(" clear");
+    // Glyphs beside the words are hidden from screen readers, so each severity is read once.
+    expect(within(row("This Mac")).queryByRole("img", { name: "high" })).toBeNull();
+    // Long lists scroll in their own focusable pane, under the summary and tabs.
+    expect(screen.getByRole("list", { name: "Targets" }).classList.contains("pane")).toBe(true);
+    expect(screen.getByRole("list", { name: "Targets" }).tabIndex).toBe(0);
     expect(within(row("me/app")).getByText("not swept yet")).toBeTruthy();
     expect(row("me/app").querySelector(".open")?.textContent).toBe("");
   });

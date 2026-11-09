@@ -284,6 +284,9 @@ select:focus-visible {
 .list {
   display: grid;
   align-content: start;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 /* The popover's own sections keep their height; a list takes what is left and scrolls in
    it, so the summary and tabs stay in view. A flex item with overflow hidden would shrink
@@ -293,8 +296,12 @@ select:focus-visible {
 }
 .pop > .pane {
   flex-shrink: 1;
-  min-height: 0;
+  /* Arbitrary: about two rows. Past this the popover itself scrolls, as it did before. */
+  min-height: 96px;
   overflow-y: auto;
+}
+.legend .glyph {
+  display: inline-flex;
 }
 .tagline {
   display: flex;
@@ -346,7 +353,7 @@ select:focus-visible {
 button.row:hover {
   background: rgba(255, 255, 255, 0.05);
 }
-.row .sev {
+.row > .sev {
   margin-top: 1px;
 }
 .what {
