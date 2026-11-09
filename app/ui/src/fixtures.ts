@@ -99,7 +99,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
         label: "This Mac",
         kind: "mac",
         swept: null,
-        components: 0,
+        checked: null,
         counts: { critical: 0, high: 0, medium: 0, low: 0 },
         open: 0,
         dismissed: 0,

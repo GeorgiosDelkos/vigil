@@ -268,7 +268,7 @@ function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
       when={props.items.length > 0}
       fallback={<p class="quiet">No confirmed fixes from the last 30 days.</p>}
     >
-      <ul class="group list" aria-label="Fixed">
+      <ul class="group list pane" aria-label="Fixed" tabindex="0">
         <For each={props.items}>
           {(item) => (
             <li class="row fixed-row">
@@ -281,9 +281,7 @@ function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
                   {(url) => <span class="pr">Pull request: {url()}</span>}
                 </Show>
               </span>
-              <span class="side">
-                <span class="age">{ago(item.fixed_at, props.now)}</span>
-              </span>
+              <span class="age">{ago(item.fixed_at, props.now)}</span>
             </li>
           )}
         </For>
@@ -300,6 +298,11 @@ function fixLabel(state: FixState): string {
   return state.pull_request === null ? "Fix reported" : "Pull request open";
 }
 
+/** Whether a row shows any tag: exploited, new, or what a fix came to. */
+function tagged(item: Listed): boolean {
+  return item.known_exploited || item.new || item.fix_state !== null;
+}
+
 function Rows(props: {
   items: readonly Listed[];
   now: Date;
@@ -308,7 +311,7 @@ function Rows(props: {
 }) {
   return (
     <Show when={props.items.length > 0} fallback={<p class="quiet">{props.empty}</p>}>
-      <div class="group list">
+      <div class="group list pane">
         <For each={props.items}>
           {(item) => (
             <button type="button" class="row" onClick={() => props.onOpen(item.key)}>
@@ -318,8 +321,23 @@ function Rows(props: {
                   {item.name}
                   <Show when={item.version}>{(v) => <span class="ver">{v()}</span>}</Show>
                 </span>
-                <Show when={item.advisories.length > 0}>
-                  <span class="id">{item.advisories.join(" · ")}</span>
+                <Show when={item.advisories.length > 0 || tagged(item)}>
+                  <span class="tagline">
+                    <Show when={item.advisories.length > 0}>
+                      <span class="id">{item.advisories.join(" · ")}</span>
+                    </Show>
+                    <Show when={item.known_exploited}>
+                      <span class="tag kev">Exploited</span>
+                    </Show>
+                    <Show when={item.new && !item.known_exploited}>
+                      <span class="tag new">New</span>
+                    </Show>
+                    <Show when={item.fix_state}>
+                      {(state) => (
+                        <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>
+                      )}
+                    </Show>
+                  </span>
                 </Show>
                 <span class="where">
                   {item.target}
@@ -330,19 +348,8 @@ function Rows(props: {
                   {item.fix}
                 </span>
               </span>
-              <span class="side">
-                <Show when={item.known_exploited}>
-                  <span class="tag kev">Exploited</span>
-                </Show>
-                <Show when={item.new && !item.known_exploited}>
-                  <span class="tag new">New</span>
-                </Show>
-                <Show when={item.fix_state}>
-                  {(state) => <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>}
-                </Show>
-                <Show when={item.first_seen}>
-                  {(seen) => <span class="age">{since(seen(), props.now)}</span>}
-                </Show>
+              <span class="age">
+                <Show when={item.first_seen}>{(seen) => since(seen(), props.now)}</Show>
               </span>
             </button>
           )}
@@ -354,39 +361,57 @@ function Rows(props: {
 
 function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
   return (
-    <div class="group list">
+    <div class="group list pane" role="list" aria-label="Targets" tabindex="0">
       <For each={props.targets}>
-        {(t) => {
-          const counts = () => t.counts;
-          return (
-            <div class="row static">
-              <span class="ticon">
-                <Icon name={t.kind} />
-              </span>
-              <span class="what">
-                <span class="t">{t.label}</span>
-                <span class="where">
-                  {t.swept === null
-                    ? "not swept yet"
-                    : `${t.components} checked · swept ${since(t.swept, props.now)} ago`}
-                  <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
+        {(t) => (
+          <div class="row static target" role="listitem">
+            <span class="ticon">
+              <Icon name={t.kind} />
+            </span>
+            <span class="what">
+              <span class="t">{t.label}</span>
+              <Show when={t.open > 0}>
+                <span class="legend sevs">
+                  <For each={SEVERITIES.filter((s) => t.counts[s] > 0)}>
+                    {(s) => (
+                      <span>
+                        {/* The word follows, so the glyph is not read out a second time. */}
+                        <span class="glyph" aria-hidden="true">
+                          <Glyph severity={s} />
+                        </span>
+                        <b>{t.counts[s]}</b> {s}
+                      </span>
+                    )}
+                  </For>
                 </span>
-              </span>
-              <span class="mini" aria-label={`${t.open} open`}>
-                <For each={SEVERITIES}>
-                  {(s) => (
-                    <For each={Array.from({ length: Math.min(counts()[s], 4) })}>
-                      {() => <i class={s} />}
-                    </For>
-                  )}
-                </For>
-                <Show when={t.open === 0 && t.swept !== null}>
-                  <Icon name="done" />
+              </Show>
+              <span class="where">
+                <Show when={t.swept} fallback="not swept yet">
+                  {(swept) =>
+                    [t.checked, `swept ${since(swept(), props.now)} ago`]
+                      .filter((part) => part !== null)
+                      .join(" · ")
+                  }
                 </Show>
+                <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
               </span>
-            </div>
-          );
-        }}
+            </span>
+            <span class="open">
+              <Show when={t.swept !== null}>
+                <Show
+                  when={t.open > 0}
+                  fallback={
+                    <>
+                      <Icon name="done" /> clear
+                    </>
+                  }
+                >
+                  <b>{t.open}</b> open
+                </Show>
+              </Show>
+            </span>
+          </div>
+        )}
       </For>
     </div>
   );
