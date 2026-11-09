@@ -12,6 +12,7 @@ mod runner;
 mod settings;
 mod tray;
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -202,17 +203,17 @@ impl StatusView {
                 title,
                 place,
                 labels,
-                at,
-                log,
+                step,
                 started,
                 step_started,
             } => Self::Fixing {
                 title,
                 place,
-                activity: log
-                    .filter(|_| at == FixProgress::AGENT_STEP)
-                    .and_then(|log| last_activity(&log)),
-                steps: fix_steps(labels, at),
+                activity: match &step {
+                    FixProgress::Agent { log } => last_activity(log),
+                    FixProgress::Preparing | FixProgress::Recording => None,
+                },
+                steps: fix_steps(labels, step.step()),
                 started,
                 step_started,
             },
@@ -246,9 +247,9 @@ fn fix_steps(labels: [String; 3], at: usize) -> Vec<StepView> {
         .map(|(i, label)| StepView {
             label,
             state: match i.cmp(&at) {
-                std::cmp::Ordering::Less => StepState::Done,
-                std::cmp::Ordering::Equal => StepState::Now,
-                std::cmp::Ordering::Greater => StepState::Next,
+                Ordering::Less => StepState::Done,
+                Ordering::Equal => StepState::Now,
+                Ordering::Greater => StepState::Next,
             },
         })
         .collect()
@@ -513,7 +514,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(states(0), [Now, Next, Next], "claimed means preparing");
-        assert_eq!(states(FixProgress::AGENT_STEP), [Done, Now, Next]);
+        assert_eq!(states(1), [Done, Now, Next]);
         assert_eq!(states(2), [Done, Done, Now]);
         let labels: Vec<String> = fix_steps(FixProgress::labels(AgentKind::Grok), 1)
             .into_iter()
@@ -534,12 +535,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("agent.log");
         std::fs::write(&log, "upgrading curl\n").unwrap();
-        let at = |at: usize| Status::Fixing {
+        let at = |step: FixProgress| Status::Fixing {
             title: "t".to_owned(),
             place: "This Mac".to_owned(),
             labels: FixProgress::labels(AgentKind::Grok),
-            at,
-            log: Some(log.clone()),
+            step,
             started: Timestamp::UNIX_EPOCH,
             step_started: Timestamp::UNIX_EPOCH,
         };
@@ -548,10 +548,14 @@ mod tests {
             _ => panic!("still fixing"),
         };
         assert_eq!(
-            activity(at(FixProgress::AGENT_STEP)).as_deref(),
+            activity(at(FixProgress::Agent { log: log.clone() })).as_deref(),
             Some("upgrading curl")
         );
-        assert_eq!(activity(at(2)), None, "not once the agent is done");
+        assert_eq!(
+            activity(at(FixProgress::Recording)),
+            None,
+            "not once the agent is done"
+        );
     }
 
     #[test]

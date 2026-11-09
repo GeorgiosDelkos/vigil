@@ -279,8 +279,6 @@ pub enum FixProgress {
     Preparing,
     /// The agent is applying the fix, with full access, writing its output to `log`.
     Agent {
-        /// The agent.
-        agent: AgentKind,
         /// Its log, which [`last_activity`] reads while it runs.
         log: PathBuf,
     },
@@ -289,14 +287,11 @@ pub enum FixProgress {
 }
 
 impl FixProgress {
-    /// The index of the agent's step, the one whose output [`last_activity`] shows.
-    pub const AGENT_STEP: usize = 1;
-
     /// Which step this is, from 0: the position of its label in [`Self::labels`].
     pub fn step(&self) -> usize {
         match self {
             Self::Preparing => 0,
-            Self::Agent { .. } => Self::AGENT_STEP,
+            Self::Agent { .. } => 1,
             Self::Recording => 2,
         }
     }
@@ -320,7 +315,8 @@ const ACTIVITY_CHARS: usize = 160;
 
 /// The last line the agent wrote to `log` that holds any text, as one plain line (control
 /// characters replaced) of at most [`ACTIVITY_CHARS`] characters; `None` before it has written
-/// any, or when the log cannot be read. The text is the agent's own and untrusted: it is only
+/// any, or when the log cannot be read. Only the last [`ACTIVITY_TAIL`] bytes are read, so
+/// text further back is not found, and a longer line shows its tail. The text is the agent's own and untrusted: it is only
 /// ever shown, never acted on.
 pub fn last_activity(log: &Path) -> Option<String> {
     let mut file = fs::File::open(log).ok()?;
@@ -381,10 +377,7 @@ pub fn run_fix(
     }
 
     let log = dir.join("agent.log");
-    progress(FixProgress::Agent {
-        agent: plan.agent,
-        log: log.clone(),
-    });
+    progress(FixProgress::Agent { log: log.clone() });
     let ran = plan.agent.run(
         &plan.agent.fix_command(&plan.located, &dir, PROMPT_LINE),
         &log,

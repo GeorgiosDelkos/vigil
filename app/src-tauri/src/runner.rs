@@ -131,10 +131,8 @@ pub(crate) enum Status {
         place: String,
         /// Its steps' labels, in order ([`FixProgress::labels`]).
         labels: [String; 3],
-        /// The current step, an index into `labels`.
-        at: usize,
-        /// The agent's log, once the agent runs.
-        log: Option<PathBuf>,
+        /// The current step.
+        step: FixProgress,
         /// When it started.
         started: Timestamp,
         /// When the current step started.
@@ -413,8 +411,7 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
         place: target_label(plan.target()).to_owned(),
         labels: FixProgress::labels(plan.agent()),
         // Claimed means started: the first step is preparing, whatever `run_fix` reports.
-        at: FixProgress::Preparing.step(),
-        log: None,
+        step: FixProgress::Preparing,
         started: now,
         step_started: now,
     })?;
@@ -424,19 +421,13 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
     Ok(())
 }
 
-/// Moves a running fix's status on to step `progress`, keeping the agent's log once it runs.
+/// Moves a running fix's status on to step `progress`.
 fn advance_fix(status: &mut Status, progress: FixProgress) {
     if let Status::Fixing {
-        at,
-        log,
-        step_started,
-        ..
+        step, step_started, ..
     } = status
     {
-        *at = progress.step();
-        if let FixProgress::Agent { log: agent_log, .. } = progress {
-            *log = Some(agent_log);
-        }
+        *step = progress;
         *step_started = Timestamp::now();
     }
 }
@@ -654,8 +645,7 @@ mod tests {
             title: "t".to_owned(),
             place: "This Mac".to_owned(),
             labels: FixProgress::labels(AgentKind::Grok),
-            at: 0,
-            log: None,
+            step: FixProgress::Preparing,
             started: Timestamp::UNIX_EPOCH,
             step_started: Timestamp::UNIX_EPOCH,
         }
@@ -664,28 +654,27 @@ mod tests {
     #[test]
     fn a_fix_moves_through_its_steps() {
         let mut status = fixing();
-        let before = Timestamp::now();
         let log = PathBuf::from("/fixes/x/agent.log");
-        advance_fix(
-            &mut status,
-            FixProgress::Agent {
-                agent: AgentKind::Grok,
-                log: log.clone(),
-            },
-        );
-        advance_fix(&mut status, FixProgress::Recording);
+        advance_fix(&mut status, FixProgress::Agent { log: log.clone() });
         let Status::Fixing {
-            at,
-            log: kept,
-            step_started,
-            ..
-        } = status
+            step, step_started, ..
+        } = &status
         else {
             panic!("still fixing");
         };
-        assert_eq!(at, 2);
-        assert_eq!(kept, Some(log), "the agent's log is kept past its step");
-        assert!(step_started >= before, "each step restarts the clock");
+        assert_eq!(*step, FixProgress::Agent { log });
+        assert!(
+            *step_started > Timestamp::UNIX_EPOCH,
+            "each step restarts the clock"
+        );
+        advance_fix(&mut status, FixProgress::Recording);
+        assert!(matches!(
+            status,
+            Status::Fixing {
+                step: FixProgress::Recording,
+                ..
+            }
+        ));
         let mut idle = Status::Idle;
         advance_fix(&mut idle, FixProgress::Recording);
         assert!(matches!(idle, Status::Idle), "only a running fix advances");
