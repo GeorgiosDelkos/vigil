@@ -1,5 +1,6 @@
-//! What carries over from one sweep to the next: finding keys, dismissals, and what changed
-//! since the target's last sweep.
+//! What carries over from one sweep to the next: finding keys, dismissals, what changed
+//! since the target's last sweep, and which reported fixes a later sweep confirmed
+//! (`state/fixes.jsonl`).
 //!
 //! A [`FindingKey`] names one finding or issue across sweeps, so a dismissal and the
 //! comparison with the last sweep can find it again. Dismissals live in
@@ -26,6 +27,7 @@ use serde::de::IgnoredAny;
 use crate::config::Config;
 use crate::findings::Severity;
 use crate::findings::is_forging;
+use crate::fix;
 use crate::paths::DataDir;
 use crate::sweep;
 
@@ -314,11 +316,54 @@ pub struct Latest {
     pub swept: Option<Timestamp>,
     /// How many components that sweep checked.
     pub components: usize,
-    /// The findings and issues not dismissed, most severe first.
+    /// The findings and issues not dismissed, most severe first; each says whether a fix was
+    /// reported for it.
     pub open: Vec<Open>,
+    /// Confirmed fixes that finished in the last `CONFIRMED_DAYS` days, newest first: a run
+    /// reported the finding fixed, and a later sweep no longer finds it.
+    pub fixed: Vec<Fixed>,
     /// How many are dismissed.
     pub dismissed: usize,
 }
+
+/// A fix a later sweep confirmed: the finding it fixed is gone.
+#[derive(Debug, Serialize)]
+pub struct Fixed {
+    /// The finding's key.
+    pub key: FindingKey,
+    /// Its title when the fix was planned.
+    pub title: String,
+    /// When the fix finished.
+    pub fixed_at: Timestamp,
+    /// The agent's one-line summary of what it did.
+    pub summary: String,
+    /// The pull request it opened, for a repository.
+    pub pull_request: Option<String>,
+}
+
+/// What the fix history says about an open finding.
+#[derive(Debug, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FixState {
+    /// A fix of this very report ended `fixed`; the next sweep confirms it. Still counted.
+    Reported {
+        /// When it finished.
+        at: Timestamp,
+        /// The agent's one-line summary.
+        summary: String,
+        /// The pull request it opened: the fix lands once that is merged.
+        pull_request: Option<String>,
+    },
+    /// A fix ended `fixed`, but a later sweep still finds it: the fix did not hold.
+    NotHeld {
+        /// When that fix finished.
+        at: Timestamp,
+    },
+}
+
+/// How long a confirmed fix stays in [`Latest::fixed`]. The user's choice (2026-11-08): recent
+/// fixes, so what Vigil fixed stays visible; older ones remain in `state/fixes.jsonl`.
+pub(crate) const CONFIRMED_DAYS: i64 = 30;
 
 /// One open finding or issue.
 #[derive(Debug, Serialize)]
@@ -349,6 +394,8 @@ pub struct Open {
     pub first_seen: Option<Timestamp>,
     /// Whether the newest sweep is the first to find it since the one before.
     pub new: bool,
+    /// What the fix history says about it, if anything.
+    pub fix_state: Option<FixState>,
 }
 
 /// Each configured target's open findings and issues, in sweep order. Whether one is
@@ -358,10 +405,14 @@ pub struct Open {
 ///
 /// # Errors
 ///
-/// Fails when a sweep folder, a report or the dismissals cannot be read.
+/// Fails when a sweep folder, a report, the dismissals or `state/fixes.jsonl` cannot be read.
 pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateError> {
     let sweeps = data_dir.sweeps_dir();
     let dismissals = Dismissals::load(data_dir)?;
+    let runs = fix::runs(data_dir)?;
+    // The last run of each key decides: runs are in the order they ran.
+    let last: BTreeMap<FindingKey, &fix::Run> = runs.iter().map(|r| (r.key, r)).collect();
+    let since = Timestamp::now() - jiff::SignedDuration::from_hours(24 * CONFIRMED_DAYS);
     let mut all = Vec::new();
     for (target, dir_name) in sweep::configured_targets(config) {
         let Some((_, saved)) = newest_verdict(&sweeps, &dir_name)? else {
@@ -370,33 +421,81 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
                 swept: None,
                 components: 0,
                 open: Vec::new(),
+                fixed: Vec::new(),
                 dismissed: 0,
             });
             continue;
         };
-        let (dismissed, open): (Vec<_>, Vec<_>) = saved
+        let (dismissed, kept): (Vec<_>, Vec<_>) = saved
             .entries()
             .partition(|e| dismissals.get(e.key, e.modified).is_some());
         let new = |key: FindingKey| saved.changes.as_ref().is_some_and(|c| c.new.contains(&key));
-        let mut open: Vec<Open> = open
+        let mut open: Vec<Open> = kept
             .into_iter()
-            .map(|e| open_entry(e, new(e.key)))
+            .map(|e| {
+                let state = last
+                    .get(&e.key)
+                    .and_then(|run| fix_state(run, saved.started));
+                open_entry(e, new(e.key), state)
+            })
             .collect();
         open.sort_by_key(|o| o.severity);
+        let found: BTreeSet<FindingKey> = saved.entries().map(|e| e.key).collect();
+        let mut fixed: Vec<Fixed> = last
+            .values()
+            .filter(|run| run.target == target && run.finished >= since)
+            .filter(|run| confirmed(run, &found, saved.started))
+            .map(|run| Fixed {
+                key: run.key,
+                title: sweep::plain(&run.title),
+                fixed_at: run.finished,
+                summary: sweep::plain(&run.summary),
+                pull_request: run.pull_request.clone(),
+            })
+            .collect();
+        fixed.sort_by_key(|f| std::cmp::Reverse(f.fixed_at));
         all.push(Latest {
             target,
             swept: Some(saved.started),
             components: saved.components,
             open,
+            fixed,
             dismissed: dismissed.len(),
         });
     }
     Ok(all)
 }
 
+/// What `run`, the last fix run of an open finding in the report that started at `report`,
+/// says about it. Decided by which report the run was planned from, never by comparing
+/// clocks: a fix of this report is reported and awaits the next sweep, and a successful fix of
+/// an earlier report means a later sweep still found the finding.
+fn fix_state(run: &fix::Run, report: Timestamp) -> Option<FixState> {
+    if !run.succeeded() {
+        return None;
+    }
+    let found = run.found?;
+    Some(if found == report {
+        FixState::Reported {
+            at: run.finished,
+            summary: sweep::plain(&run.summary),
+            pull_request: run.pull_request.clone(),
+        }
+    } else {
+        FixState::NotHeld { at: run.finished }
+    })
+}
+
+/// Whether `run` is a confirmed fix: it succeeded, and the newest report of its target, which
+/// started at `report` and holds the keys in `found`, is a later sweep than the one the fix was
+/// planned from and no longer has the finding.
+fn confirmed(run: &fix::Run, found: &BTreeSet<FindingKey>, report: Timestamp) -> bool {
+    run.succeeded() && run.found.is_some_and(|f| f != report) && !found.contains(&run.key)
+}
+
 /// `entry` as shown. Every text is a plain line: it holds agent text and names from the
 /// target. Commands passed the sweep's printable-ASCII check.
-fn open_entry(entry: &SavedEntry, new: bool) -> Open {
+fn open_entry(entry: &SavedEntry, new: bool, fix_state: Option<FixState>) -> Open {
     let plain = |text: &str| sweep::plain(text);
     Open {
         key: entry.key,
@@ -417,6 +516,7 @@ fn open_entry(entry: &SavedEntry, new: bool) -> Open {
         }),
         first_seen: entry.first_seen,
         new,
+        fix_state,
     }
 }
 
@@ -926,6 +1026,167 @@ mod tests {
         );
         assert_eq!(mac.open[0].fix, "up grade", "one line");
         assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
+    }
+
+    /// One `fixes.jsonl` line: a run of `key` planned from the report that started at `found`,
+    /// finished now.
+    fn run(key: FindingKey, found: &str, outcome: &str, exit_code: Option<i32>) -> String {
+        run_finished(key, found, outcome, exit_code, 0)
+    }
+
+    /// [`run`], finished `days_ago` days ago.
+    fn run_finished(
+        key: FindingKey,
+        found: &str,
+        outcome: &str,
+        exit_code: Option<i32>,
+        days_ago: i64,
+    ) -> String {
+        let finished =
+            (Timestamp::now() - jiff::SignedDuration::from_hours(24 * days_ago)).to_string();
+        json!({"key": key, "title": "curl \u{1b}[2J is old", "found": found, "target": "mac",
+            "agent": "grok", "started": finished, "finished": finished,
+            "exit_code": exit_code, "outcome": outcome, "summary": "upgraded\nit",
+            "pull_request": null, "confirmed": "asked", "dir": "/x"})
+        .to_string()
+    }
+
+    fn history(data_dir: &DataDir, lines: &[String]) {
+        let state = data_dir.state_dir();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("fixes.jsonl"), lines.join("\n") + "\n").unwrap();
+    }
+
+    #[test]
+    fn a_reported_fix_is_marked_and_counted_until_a_later_sweep_confirms_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let sweeps = data_dir.sweeps_dir();
+        let [fixed, failed, crashed, refixed, old] = [1, 2, 3, 4, 5].map(FindingKey);
+        let keys = [fixed, failed, crashed, refixed, old];
+        let first = "2026-11-05T10:00:00Z";
+        let modified = "2026-11-01T00:00:00Z";
+        save(
+            &sweeps,
+            "20261105T100000Z/mac",
+            &report(first, None, &keys, modified),
+        );
+        history(
+            &data_dir,
+            &[
+                // Inside the window, near its end: listed once confirmed.
+                run_finished(fixed, first, "fixed", Some(0), CONFIRMED_DAYS - 1),
+                run(failed, first, "failed", Some(0)),
+                // The agent reported fixed, then failed: not a fix.
+                run(crashed, first, "fixed", Some(1)),
+                run(refixed, first, "fixed", Some(0)),
+                // The last run decides, in file order.
+                run(refixed, first, "partial", Some(0)),
+                // Finished just past the window: not listed once confirmed.
+                run_finished(old, first, "fixed", Some(0), CONFIRMED_DAYS + 1),
+            ],
+        );
+
+        let mac = &latest(&data_dir, &config).unwrap()[0];
+        assert_eq!(
+            mac.open.len(),
+            5,
+            "a reported fix is still open and counted"
+        );
+        let marked: Vec<FindingKey> = mac
+            .open
+            .iter()
+            .filter(|o| matches!(o.fix_state, Some(FixState::Reported { .. })))
+            .map(|o| o.key)
+            .collect();
+        assert_eq!(marked, [fixed, old]);
+        assert!(mac.fixed.is_empty(), "no sweep has confirmed it yet");
+
+        // A later sweep: the fixed one is gone, the others are still found.
+        let second = "2026-11-05T13:00:00Z";
+        // The crashed one is gone too, but its fix did not succeed: not a confirmed fix.
+        let rest = [failed, refixed];
+        save(
+            &sweeps,
+            "20261105T130000Z/mac",
+            &report(second, None, &rest, modified),
+        );
+        let mac = &latest(&data_dir, &config).unwrap()[0];
+        let confirmed: Vec<(FindingKey, &str)> = mac
+            .fixed
+            .iter()
+            .map(|f| (f.key, f.title.as_str()))
+            .collect();
+        assert_eq!(confirmed, [(fixed, "curl \u{fffd}[2J is old")]);
+        assert_eq!(mac.fixed[0].summary, "upgraded it", "one line");
+        assert!(mac.open.iter().all(|o| o.fix_state.is_none()));
+    }
+
+    #[test]
+    fn a_fix_a_later_sweep_still_finds_did_not_hold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "[github]\nrepos = [\"o/r\"]\n").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let sweeps = data_dir.sweeps_dir();
+        let key = FindingKey(1);
+        let (first, second) = ("2026-11-05T10:00:00Z", "2026-11-05T13:00:00Z");
+        let modified = "2026-11-01T00:00:00Z";
+        save(
+            &sweeps,
+            "20261105T100000Z/mac",
+            &report(first, None, &[key], modified),
+        );
+        save(
+            &sweeps,
+            "20261105T130000Z/mac",
+            &report(second, None, &[key], modified),
+        );
+        history(&data_dir, &[run(key, first, "fixed", Some(0))]);
+        let all = latest(&data_dir, &config).unwrap();
+        assert!(matches!(
+            all[0].open[0].fix_state,
+            Some(FixState::NotHeld { .. })
+        ));
+        assert!(
+            all[1].fixed.is_empty(),
+            "a fix of the Mac is not the repository's"
+        );
+    }
+
+    #[test]
+    fn the_history_survives_a_line_torn_inside_a_character_and_a_zeroed_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let state = data_dir.state_dir();
+        fs::create_dir_all(&state).unwrap();
+        let good = run(FindingKey(1), "2026-11-05T10:00:00Z", "fixed", Some(0));
+        let torn = run(FindingKey(2), "2026-11-05T10:00:00Z", "fixed", Some(0))
+            .replace("upgraded", "upgradé");
+        // The first of the two bytes of "é": a cut inside the character.
+        let cut = &torn.as_bytes()[..=torn.find('é').unwrap()];
+        let mut bytes = cut.to_vec();
+        bytes.extend_from_slice(b"\n");
+        bytes.extend_from_slice(good.as_bytes());
+        bytes.extend_from_slice(b"\n\0\0\0");
+        fs::write(state.join("fixes.jsonl"), bytes).unwrap();
+        let runs = fix::runs(&data_dir).unwrap();
+        let keys: Vec<FindingKey> = runs.iter().map(|r| r.key).collect();
+        assert_eq!(keys, [FindingKey(1)]);
+    }
+
+    #[test]
+    fn a_history_that_cannot_be_read_fails_and_a_missing_one_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        assert!(fix::runs(&data_dir).unwrap().is_empty(), "no history yet");
+        // A folder where the file should be: reading it fails, and is not taken as no fixes.
+        fs::create_dir_all(data_dir.state_dir().join("fixes.jsonl")).unwrap();
+        assert!(matches!(fix::runs(&data_dir), Err(StateError::Read { .. })));
     }
 
     #[test]

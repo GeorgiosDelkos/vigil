@@ -64,6 +64,7 @@ export type Listed = {
   readonly commands: readonly string[];
   readonly first_seen: string | null;
   readonly new: boolean;
+  readonly fix_state: FixState | null;
   readonly target: string;
   readonly needs_you: boolean;
 };
@@ -78,10 +79,32 @@ export type TargetLine = {
   readonly dismissed: number;
 };
 
+/** What the fix history says about an open finding. */
+export type FixState =
+  | {
+      readonly state: "reported";
+      readonly at: string;
+      readonly summary: string;
+      readonly pull_request: string | null;
+    }
+  | { readonly state: "not_held"; readonly at: string };
+
+/** A fix a later sweep confirmed, from the last 30 days. */
+export type FixedItem = {
+  readonly key: string;
+  readonly title: string;
+  readonly target: string;
+  readonly fixed_at: string;
+  readonly summary: string;
+  readonly pull_request: string | null;
+};
+
 export type Overview = {
   readonly status: Status;
   readonly busy: boolean;
   readonly findings: readonly Listed[];
+  /** Fixes a later sweep confirmed that finished in the last 30 days, newest first. */
+  readonly fixed: readonly FixedItem[];
   readonly needs_you: number;
   readonly exploited: number;
   readonly counts: Counts;

@@ -120,6 +120,15 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   prompt. A GitHub fix works in a fresh clone, on a new branch, and opens a pull request; a
   server fix may run ssh to that one server, with the sweep's ssh options. Each fix is appended
   to `state/fixes.jsonl`.
+- Fixed (decided 2026-11-08 with the user): a fix the agent reports does not hide the
+  finding on its word. A finding whose last fix run ended `fixed` with exit code 0, planned
+  from the report the finding is in, stays open and counted, marked "Fix reported", or "Pull
+  request open" when the run opened one (it lands once merged). A later sweep that still
+  finds it marks it "Still found after a fix". Once a later sweep no longer finds it, the fix
+  is confirmed and listed under Fixed, with the finding's title, the agent's summary and the
+  pull request, for 30 days. Which report a run fixes is decided by the sweep it was planned
+  from (`found` in the record), never by comparing clocks; the last run of a key in
+  `state/fixes.jsonl` decides, in file order. `vigil findings` shows the same.
 
 ### Mac inventory
 
@@ -429,7 +438,8 @@ Built in step 9a (2026-11-06):
 - A left click on the icon shows or hides the popover; a right click opens a menu with only
   Quit Vigil (asked for 2026-11-09), which quits as the popover's Quit does.
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
-  counts by severity, the six most severe open findings with their keys and fixes on hover,
+  counts by severity, the six most severe open findings with their keys and fixes on hover, a
+  Fixed tab with the confirmed fixes that finished in the last 30 days,
   Sweep now, Edit settings, Launch at login (the autostart plugin's LaunchAgent) and Quit. It
   asks the app for an overview whenever it is shown and on every `changed` event.
 - One sweep at a time: the app checks and claims "sweeping" under one lock, and the core's
@@ -484,8 +494,8 @@ Built in step 9b (2026-11-06):
   folder, repository or server; set the agent, schedule or history) checked like a loaded
   config before it is written.
 - Every value the UI shows is worked out in Rust (owner's rule, 2026-11-06): the core's
-  `popover_view` ranks findings (exploited, then severity, then newest), counts them, writes
-  the headline and the target lines; `settings_view` writes each section's summary, the
+  `popover_view` ranks findings (exploited, then severity, then newest), counts them, lists the confirmed fixes
+  newest first, writes the headline and the target lines; `settings_view` writes each section's summary, the
   choices and which are chosen, folders as `~/...`, and whether a host can be added. The UI
   lays these out and sends `Setting`s; the only formatting left in TypeScript is "5 min ago",
   which follows the popover's clock.
@@ -526,7 +536,9 @@ files.
   dismissed. Dismissed means dismissed in `state/dismissals.json` now, as `fix` checks it, so a
   `dismiss` shows at once. Titles and summaries are printed as plain lines (control and
   invisible characters replaced), since they hold agent text and names from the target.
-  `--json` prints one object per target (`target`, `swept`, `open`, `dismissed`). Each report
+  `--json` prints one object per target (`target`, `swept`, `components`, `open`, `fixed`,
+  `dismissed`); an open entry's `fix_state` is null or `reported` (with `summary` and
+  `pull_request`) or `not_held`. Each report
   entry carries that `title`, so the tray app shows the same line. `--target` matches the
   report name exactly.
 

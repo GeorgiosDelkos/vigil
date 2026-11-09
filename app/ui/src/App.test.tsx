@@ -220,6 +220,68 @@ describe("the popover", () => {
     expect(bar.querySelectorAll(".sweep-bar-tick")).toHaveLength(0);
   });
 
+  it("marks a reported fix, an open pull request and a fix that did not hold", async () => {
+    const at = new Date().toISOString();
+    shown = overview({
+      findings: [
+        finding("a", {
+          name: "curl",
+          fix_state: { state: "reported", at, summary: "upgraded", pull_request: null },
+        }),
+        finding("b", {
+          name: "lodash",
+          fix_state: { state: "reported", at, summary: "bumped", pull_request: "https://x/pull/9" },
+        }),
+        finding("c", { name: "zlib", fix_state: { state: "not_held", at } }),
+      ],
+      needs_you: 3,
+      headline: "3 findings need you",
+      last_swept: at,
+      first_sweep_hint: null,
+    });
+    answer();
+    render(() => <App />);
+    await screen.findByText("curl");
+    expect(within(row("curl")).getByText("Fix reported")).toBeTruthy();
+    expect(within(row("lodash")).getByText("Pull request open")).toBeTruthy();
+    expect(within(row("zlib")).getByText("Still found after a fix")).toBeTruthy();
+  });
+
+  it("lists confirmed fixes in a tab of their own and when all is clear", async () => {
+    const confirmed = {
+      key: "f",
+      title: "curl 8.0.0 is old",
+      target: "This Mac",
+      fixed_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+      summary: "upgraded curl to 8.11",
+      pull_request: "https://github.com/o/r/pull/9",
+    };
+    shown = { ...two(), fixed: [confirmed] };
+    answer();
+    render(() => <App />);
+    const tab = await screen.findByRole("tab", { name: /Fixed/ });
+    expect(within(tab).getByText("1")).toBeTruthy();
+    fireEvent.click(tab);
+    const list = await screen.findByRole("list", { name: "Fixed" });
+    expect(within(list).getByText("curl 8.0.0 is old")).toBeTruthy();
+    expect(within(list).getByText("upgraded curl to 8.11")).toBeTruthy();
+    expect(within(list).getByText("5 min ago")).toBeTruthy();
+    expect(within(list).getByText(/pull\/9/)).toBeTruthy();
+
+    cleanup();
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      all_clear: true,
+      fixed: [confirmed],
+    });
+    answer();
+    render(() => <App />);
+    expect(await screen.findByText("All clear")).toBeTruthy();
+    expect(screen.getByText("Fixed in the last 30 days")).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Fixed" })).toBeTruthy();
+  });
+
   it("cancels a running sweep, and shows it stopping", async () => {
     shown = sweeping(false);
     answer({ cancel_sweep: () => null });

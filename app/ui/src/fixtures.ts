@@ -73,6 +73,7 @@ export function finding(key: string, changes: Partial<Listed> = {}): Listed {
     commands: ["npm install pkg@1.0.1"],
     first_seen: "2026-11-06T10:00:00Z",
     new: false,
+    fix_state: null,
     target: "This Mac",
     needs_you: true,
     ...changes,
@@ -91,6 +92,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     last_swept: null,
     first_sweep_hint: "Sweep checks your targets against the newest advisories.",
     all_clear: false,
+    fixed: [],
     target_count: "1 target",
     targets: [
       {

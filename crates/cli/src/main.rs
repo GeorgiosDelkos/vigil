@@ -14,6 +14,7 @@ use vigil_core::DataDir;
 use vigil_core::Feeds;
 use vigil_core::FindingKey;
 use vigil_core::FixProgress;
+use vigil_core::FixState;
 use vigil_core::History;
 use vigil_core::Inventory;
 use vigil_core::Latest;
@@ -231,7 +232,19 @@ fn run_sweep(data_dir: &DataDir, config: &Config, targets: Targets<'_>) -> anyho
     Ok(())
 }
 
-/// The open findings per target, one line each, most severe first.
+/// What a fix of an open finding came to, one line.
+fn fix_line(state: &FixState) -> String {
+    match state {
+        FixState::Reported {
+            pull_request: Some(url),
+            ..
+        } => format!("pull request open: {url}"),
+        FixState::Reported { at, .. } => format!("fix reported at {at}; the next sweep checks it"),
+        FixState::NotHeld { at } => format!("still found after a fix at {at}"),
+    }
+}
+
+/// The open and fixed findings per target, one line each, most severe first.
 fn findings_text(all: &[Latest]) -> String {
     let mut out = String::new();
     for target in all {
@@ -243,8 +256,12 @@ fn findings_text(all: &[Latest]) -> String {
             0 => String::new(),
             n => format!(", {n} dismissed"),
         };
+        let fixed = match target.fixed.len() {
+            0 => String::new(),
+            n => format!(", {n} fixed"),
+        };
         out.push_str(&format!(
-            "{} (swept {swept}): {} open{dismissed}\n",
+            "{} (swept {swept}): {} open{fixed}{dismissed}\n",
             target.target,
             target.open.len()
         ));
@@ -252,6 +269,15 @@ fn findings_text(all: &[Latest]) -> String {
             out.push_str(&format!(
                 "  {:<8} {}  {}\n           fix: {}\n",
                 open.severity, open.key, open.title, open.fix
+            ));
+            if let Some(state) = &open.fix_state {
+                out.push_str(&format!("           {}\n", fix_line(state)));
+            }
+        }
+        for fixed in &target.fixed {
+            out.push_str(&format!(
+                "  fixed    {}  {}\n           at {}: {}\n",
+                fixed.key, fixed.title, fixed.fixed_at, fixed.summary
             ));
         }
     }
@@ -542,6 +568,87 @@ fn warn(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use vigil_core::Fixed;
+    use vigil_core::Open;
+    use vigil_core::Severity;
+
+    #[test]
+    fn findings_text_marks_a_reported_fix_and_lists_confirmed_ones() {
+        let at = "2026-11-05T11:00:00Z".parse().unwrap();
+        let key: FindingKey = "0000000000000001".parse().unwrap();
+        let open = Open {
+            key,
+            severity: Severity::High,
+            title: "curl is old".to_owned(),
+            name: "curl".to_owned(),
+            version: Some("8.0.0".to_owned()),
+            advisories: Vec::new(),
+            place: String::new(),
+            known_exploited: false,
+            explanation: String::new(),
+            fix: "upgrade curl".to_owned(),
+            commands: Vec::new(),
+            first_seen: None,
+            new: false,
+            fix_state: Some(FixState::Reported {
+                at,
+                summary: "upgraded".to_owned(),
+                pull_request: None,
+            }),
+        };
+        let fixed = Fixed {
+            key: "0000000000000002".parse().unwrap(),
+            title: "zlib is old".to_owned(),
+            fixed_at: at,
+            summary: "upgraded zlib".to_owned(),
+            pull_request: None,
+        };
+        let latest = Latest {
+            target: "mac".to_owned(),
+            swept: Some(at),
+            components: 3,
+            open: vec![open],
+            fixed: vec![fixed],
+            dismissed: 0,
+        };
+        let text = findings_text(&[latest]);
+        assert!(
+            text.contains("mac (swept 2026-11-05T11:00:00Z): 1 open, 1 fixed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("fix reported at 2026-11-05T11:00:00Z"),
+            "{text}"
+        );
+        assert!(
+            text.contains("fixed    0000000000000002  zlib is old"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_fix_line_names_an_open_pull_request_and_a_fix_that_did_not_hold() {
+        let at = "2026-11-05T11:00:00Z".parse().unwrap();
+        let url = "https://github.com/o/r/pull/9".to_owned();
+        let reported = |pull_request| FixState::Reported {
+            at,
+            summary: String::new(),
+            pull_request,
+        };
+        assert_eq!(
+            fix_line(&reported(Some(url))),
+            "pull request open: https://github.com/o/r/pull/9"
+        );
+        assert_eq!(
+            fix_line(&reported(None)),
+            "fix reported at 2026-11-05T11:00:00Z; the next sweep checks it"
+        );
+        assert_eq!(
+            fix_line(&FixState::NotHeld { at }),
+            "still found after a fix at 2026-11-05T11:00:00Z"
+        );
+    }
 
     #[test]
     fn error_chain_joins_sources() {
