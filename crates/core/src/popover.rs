@@ -18,8 +18,8 @@ use crate::lifecycle::Open;
 pub struct PopoverView {
     /// Every open finding across targets, ranked by risk.
     pub findings: Vec<Listed>,
-    /// The findings a fix reported fixed since the sweep that found them, newest fix first.
-    /// They are not in `findings`, the counts or the headline.
+    /// Fixes a later sweep confirmed in the last 30 days, newest first. A fix only reported is
+    /// still in `findings`, marked by its `fix_state`.
     pub fixed: Vec<FixedListed>,
     /// How many of them need the user.
     pub needs_you: usize,
@@ -253,6 +253,7 @@ mod tests {
             commands: Vec::new(),
             first_seen: first_seen.map(|s| Timestamp::from_second(s).unwrap()),
             new: false,
+            fix_state: None,
         }
     }
 
@@ -274,7 +275,8 @@ mod tests {
     #[test]
     fn fixed_findings_are_listed_apart_and_counted_nowhere_else() {
         let fixed = |key: u64, at: i64| Fixed {
-            open: open(key, Severity::Critical, false, None),
+            key: format!("{key:016x}").parse().unwrap(),
+            title: format!("finding {key}"),
             fixed_at: Timestamp::from_second(at).unwrap(),
             summary: "upgraded".to_owned(),
             pull_request: None,
@@ -287,7 +289,7 @@ mod tests {
         let listed: Vec<(&str, &str)> = view
             .fixed
             .iter()
-            .map(|f| (f.fixed.open.title.as_str(), f.target.as_str()))
+            .map(|f| (f.fixed.title.as_str(), f.target.as_str()))
             .collect();
         assert_eq!(
             listed,

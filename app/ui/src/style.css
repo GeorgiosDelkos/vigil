@@ -818,3 +818,16 @@ kbd {
   overflow-wrap: anywhere;
   user-select: text;
 }
+
+/* Fixes: the pull request link wraps and can be selected and copied. */
+.fixed-row .pr,
+.row .pr {
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.tag.fix-reported {
+  color: var(--ok);
+}
+.tag.fix-not_held {
+  color: var(--high);
+}

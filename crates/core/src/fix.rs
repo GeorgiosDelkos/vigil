@@ -67,6 +67,8 @@ pub struct FixPlan {
     destination: String,
     /// When the sweep that found it started.
     found: Timestamp,
+    /// The finding's one-line title, for the fix history.
+    title: String,
     fix: Fix,
     /// What the agent is given in `fix.json`.
     brief: Value,
@@ -147,6 +149,7 @@ pub fn plan_fix(data_dir: &DataDir, config: &Config, key: FindingKey) -> Result<
         target: report.target,
         destination,
         found: report.started,
+        title: sweep::plain(entry["title"].as_str().unwrap_or_default()),
         fix,
         brief,
         access,
@@ -199,6 +202,10 @@ struct Saved {
 pub struct FixRecord {
     /// The finding or issue.
     pub key: FindingKey,
+    /// Its one-line title when the fix was planned.
+    pub title: String,
+    /// When the sweep the fix was planned from started: which report it fixes.
+    pub found: Timestamp,
     /// Where the fix ran.
     pub target: String,
     /// The agent that ran it.
@@ -325,6 +332,8 @@ pub fn run_fix(
     };
     let record = FixRecord {
         key: plan.key,
+        title: plan.title.clone(),
+        found: plan.found,
         target: plan.target.clone(),
         agent: plan.agent,
         started,
@@ -424,10 +433,57 @@ fn read_result(path: &Path, repo: Option<&str>) -> Result<AgentResult, String> {
 /// Appends `record` to `state/fixes.jsonl` as one line, under the state lock. A last line cut
 /// short by a crash gets its line break first, so the new record is not glued onto it; the
 /// folder is synced too, as the dismissals writer does.
+/// The fix history's file in `state/`, written by [`append`] and read by [`runs`].
+const FIXES_FILE: &str = "fixes.jsonl";
+
+/// One recorded fix run, as the lifecycle reads it back.
+#[derive(Debug, Deserialize)]
+pub(crate) struct Run {
+    pub(crate) key: FindingKey,
+    pub(crate) target: String,
+    /// When the sweep it was planned from started; missing in records written before it was.
+    #[serde(default)]
+    pub(crate) found: Option<Timestamp>,
+    #[serde(default)]
+    pub(crate) title: String,
+    pub(crate) finished: Timestamp,
+    exit_code: Option<i32>,
+    outcome: Outcome,
+    pub(crate) summary: String,
+    pub(crate) pull_request: Option<String>,
+}
+
+impl Run {
+    /// Whether the run counts as a fix: the agent reported `fixed` and exited 0, as `vigil
+    /// fix` requires to call it a success.
+    pub(crate) fn succeeded(&self) -> bool {
+        self.outcome == Outcome::Fixed && self.exit_code == Some(0)
+    }
+}
+
+/// Every fix run in `state/fixes.jsonl`, in the order they were appended, which is the order
+/// they ran: appends hold the state lock, and a fix holds the sweeps lock.
+///
+/// Read as bytes and parsed line by line: a crash can cut the last record anywhere, even
+/// inside a multi-byte character, and [`append`] then starts the next record on a new line.
+/// A line that does not parse is that torn record, and is skipped; the run it held is lost.
+pub(crate) fn runs(data_dir: &DataDir) -> Result<Vec<Run>, StateError> {
+    let path = data_dir.state_dir().join(FIXES_FILE);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => return Err(StateError::Read { path, source }),
+    };
+    Ok(bytes
+        .split(|&b| b == b'\n')
+        .filter_map(|line| serde_json::from_slice::<Run>(line).ok())
+        .collect())
+}
+
 fn append(data_dir: &DataDir, record: &FixRecord) -> Result<(), FixError> {
     let line = serde_json::to_string(record).expect("a fix record serializes");
     lifecycle::locked(data_dir, |state| {
-        let path = state.join("fixes.jsonl");
+        let path = state.join(FIXES_FILE);
         let written = fs::OpenOptions::new()
             .create(true)
             .read(true)
@@ -679,6 +735,7 @@ mod tests {
             target: "mac".to_owned(),
             destination: "this Mac".to_owned(),
             found: "2026-11-05T00:00:00Z".parse().unwrap(),
+            title: "t".to_owned(),
             fix: Fix::deserialize(&json!({"summary": "s", "steps": [], "commands": []})).unwrap(),
             brief: json!({}),
             access: String::new(),
@@ -710,6 +767,8 @@ mod tests {
     fn record(n: u8) -> FixRecord {
         FixRecord {
             key: FindingKey::new(&[&n.to_string()]),
+            title: "t".to_owned(),
+            found: Timestamp::UNIX_EPOCH,
             target: "mac".to_owned(),
             agent: AgentKind::Claude,
             started: Timestamp::UNIX_EPOCH,

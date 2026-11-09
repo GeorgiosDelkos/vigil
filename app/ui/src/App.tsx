@@ -17,6 +17,7 @@ import {
   SEVERITIES,
   type FixDone,
   type FixedItem,
+  type FixState,
   type FixPreview,
   type Listed,
   type Overview,
@@ -26,7 +27,7 @@ import {
 import { Settings } from "./Settings.tsx";
 import type { Section } from "./settings.ts";
 import { Glyph, Icon } from "./icons.tsx";
-import { since } from "./time.ts";
+import { ago, since } from "./time.ts";
 
 type Tab = "needs" | "targets" | "all" | "fixed";
 
@@ -239,12 +240,12 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
   );
 }
 
-/** Findings a fix reported fixed, newest first: what was fixed, where, when, and how. */
+/** Fixes a later sweep confirmed: what was fixed, where, when, and how. */
 function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
   return (
     <Show
       when={props.items.length > 0}
-      fallback={<p class="quiet">Nothing has been fixed since the last sweep.</p>}
+      fallback={<p class="quiet">No fixes confirmed in the last 30 days.</p>}
     >
       <ul class="group list" aria-label="Fixed">
         <For each={props.items}>
@@ -252,20 +253,15 @@ function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
             <li class="row fixed-row">
               <Icon name="done" />
               <span class="what">
-                <span class="t">
-                  {item.name}
-                  <Show when={item.version}>{(v) => <span class="ver">{v()}</span>}</Show>
-                </span>
-                <span class="where">
-                  {item.target} · {item.title}
-                </span>
+                <span class="t">{item.title}</span>
+                <span class="where">{item.target}</span>
                 <span class="fix">{item.summary}</span>
                 <Show when={item.pull_request}>
                   {(url) => <span class="pr">Pull request: {url()}</span>}
                 </Show>
               </span>
               <span class="side">
-                <span class="age">fixed {since(item.fixed_at, props.now)} ago</span>
+                <span class="age">{ago(item.fixed_at, props.now)}</span>
               </span>
             </li>
           )}
@@ -273,6 +269,14 @@ function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
       </ul>
     </Show>
   );
+}
+
+/** The badge of an open finding a fix was reported for, as its fix state says. */
+function fixLabel(state: FixState): string {
+  if (state.state === "not_held") {
+    return "Still found after a fix";
+  }
+  return state.pull_request === null ? "Fix reported" : "Pull request open";
 }
 
 function Rows(props: {
@@ -311,6 +315,9 @@ function Rows(props: {
                 </Show>
                 <Show when={item.new && !item.known_exploited}>
                   <span class="tag new">New</span>
+                </Show>
+                <Show when={item.fix_state}>
+                  {(state) => <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>}
                 </Show>
                 <Show when={item.first_seen}>
                   {(seen) => <span class="age">{since(seen(), props.now)}</span>}
@@ -669,6 +676,7 @@ function AllClear(props: { overview: Overview; now: Date }) {
       </p>
       <Targets targets={props.overview.targets} now={props.now} />
       <Show when={props.overview.fixed.length > 0}>
+        <h2 class="label">Fixed in the last 30 days</h2>
         <FixedRows items={props.overview.fixed} now={props.now} />
       </Show>
     </section>

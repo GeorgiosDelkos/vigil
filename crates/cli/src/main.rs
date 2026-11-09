@@ -12,6 +12,7 @@ use vigil_core::Confirmed;
 use vigil_core::DataDir;
 use vigil_core::Feeds;
 use vigil_core::FindingKey;
+use vigil_core::FixMark;
 use vigil_core::History;
 use vigil_core::Inventory;
 use vigil_core::Latest;
@@ -193,7 +194,7 @@ fn run_sweep(data_dir: &DataDir, config: &Config, targets: Targets<'_>) -> anyho
     Ok(())
 }
 
-/// The open findings per target, one line each, most severe first.
+/// The open and fixed findings per target, one line each, most severe first.
 fn findings_text(all: &[Latest]) -> String {
     let mut out = String::new();
     for target in all {
@@ -219,11 +220,26 @@ fn findings_text(all: &[Latest]) -> String {
                 "  {:<8} {}  {}\n           fix: {}\n",
                 open.severity, open.key, open.title, open.fix
             ));
+            match &open.fix_state {
+                Some(FixMark::Reported {
+                    pull_request: Some(url),
+                    ..
+                }) => out.push_str(&format!("           pull request open: {url}\n")),
+                Some(FixMark::Reported { at, .. }) => {
+                    out.push_str(&format!(
+                        "           fix reported at {at}; the next sweep checks it\n"
+                    ));
+                }
+                Some(FixMark::NotHeld { at }) => {
+                    out.push_str(&format!("           still found after a fix at {at}\n"));
+                }
+                None => {}
+            }
         }
         for fixed in &target.fixed {
             out.push_str(&format!(
                 "  fixed    {}  {}\n           at {}: {}\n",
-                fixed.open.key, fixed.open.title, fixed.fixed_at, fixed.summary
+                fixed.key, fixed.title, fixed.fixed_at, fixed.summary
             ));
         }
     }
@@ -508,6 +524,64 @@ fn warn(text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use vigil_core::Fixed;
+    use vigil_core::Open;
+    use vigil_core::Severity;
+
+    #[test]
+    fn findings_text_marks_a_reported_fix_and_lists_confirmed_ones() {
+        let at = "2026-11-05T11:00:00Z".parse().unwrap();
+        let key: FindingKey = "0000000000000001".parse().unwrap();
+        let open = Open {
+            key,
+            severity: Severity::High,
+            title: "curl is old".to_owned(),
+            name: "curl".to_owned(),
+            version: Some("8.0.0".to_owned()),
+            advisories: Vec::new(),
+            place: String::new(),
+            known_exploited: false,
+            explanation: String::new(),
+            fix: "upgrade curl".to_owned(),
+            commands: Vec::new(),
+            first_seen: None,
+            new: false,
+            fix_state: Some(FixMark::Reported {
+                at,
+                summary: "upgraded".to_owned(),
+                pull_request: None,
+            }),
+        };
+        let fixed = Fixed {
+            key: "0000000000000002".parse().unwrap(),
+            title: "zlib is old".to_owned(),
+            fixed_at: at,
+            summary: "upgraded zlib".to_owned(),
+            pull_request: None,
+        };
+        let latest = Latest {
+            target: "mac".to_owned(),
+            swept: Some(at),
+            components: 3,
+            open: vec![open],
+            fixed: vec![fixed],
+            dismissed: 0,
+        };
+        let text = findings_text(&[latest]);
+        assert!(
+            text.contains("mac (swept 2026-11-05T11:00:00Z): 1 open, 1 fixed"),
+            "{text}"
+        );
+        assert!(
+            text.contains("fix reported at 2026-11-05T11:00:00Z"),
+            "{text}"
+        );
+        assert!(
+            text.contains("fixed    0000000000000002  zlib is old"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn error_chain_joins_sources() {

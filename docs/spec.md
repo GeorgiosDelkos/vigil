@@ -120,11 +120,15 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   prompt. A GitHub fix works in a fresh clone, on a new branch, and opens a pull request; a
   server fix may run ssh to that one server, with the sweep's ssh options. Each fix is appended
   to `state/fixes.jsonl`.
-- Fixed (decided 2026-11-08): a finding whose newest fix run ended `fixed` after the sweep
-  that found it leaves the open findings, the counts, the headline and the tray, and is listed
-  under Fixed with when it was fixed, the agent's summary and its pull request. A later sweep
-  that still finds it lists it as open again: the fix did not hold. `partial`, `failed` and
-  `unknown` stay open. `vigil findings` shows the same split.
+- Fixed (decided 2026-11-08 with the user): a fix the agent reports does not hide the
+  finding on its word. A finding whose last fix run ended `fixed` with exit code 0, planned
+  from the report the finding is in, stays open and counted, marked "Fix reported", or "Pull
+  request open" when the run opened one (it lands once merged). A later sweep that still
+  finds it marks it "Still found after a fix". Once a later sweep no longer finds it, the fix
+  is confirmed and listed under Fixed, with the finding's title, the agent's summary and the
+  pull request, for 30 days. Which report a run fixes is decided by the sweep it was planned
+  from (`found` in the record), never by comparing clocks; the last run of a key in
+  `state/fixes.jsonl` decides, in file order. `vigil findings` shows the same.
 
 ### Mac inventory
 
