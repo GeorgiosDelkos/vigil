@@ -166,7 +166,8 @@ pub fn undismiss(data_dir: &DataDir, key: FindingKey) -> Result<Dismissal, State
     })
 }
 
-/// Runs `change` holding `state/.lock`, which every write to the state folder takes.
+/// Runs `change` holding `state/.lock`, which every write to the state folder takes, and the
+/// write of the HTML report.
 pub(crate) fn locked<T>(
     data_dir: &DataDir,
     change: impl FnOnce(&Path) -> Result<T, StateError>,

@@ -22,6 +22,7 @@ use crate::lifecycle::FixState;
 use crate::lifecycle::Latest;
 use crate::lifecycle::StateError;
 use crate::lifecycle::latest;
+use crate::lifecycle::locked;
 use crate::paths::DataDir;
 use crate::popover::FixedListed;
 use crate::popover::Listed;
@@ -47,14 +48,19 @@ pub fn write_html_report(data_dir: &DataDir, config: &Config) -> Result<PathBuf,
     let dir = path
         .parent()
         .expect("the report file is inside the data directory");
-    // Written under another name and renamed, so a browser never shows half a page. Not
-    // synced: the page is a view of other files and is written again on the next request.
+    // Written under another name and renamed, so a browser never shows half a page, and
+    // under the state lock, as the CLI and the app (or two clicks) may write it at once and
+    // would share the partial file. A partial file a failed write leaves is replaced by the
+    // next one. Not synced: the page is a view of other files and is written again on the
+    // next request.
     let partial = dir.join(".report.html.partial");
-    fs::create_dir_all(dir)
-        .and_then(|()| fs::File::create(&partial))
-        .and_then(|mut file| file.write_all(html.as_bytes()))
-        .and_then(|()| fs::rename(&partial, &path))
-        .map_err(write_err)?;
+    locked(data_dir, |_| {
+        fs::create_dir_all(dir)
+            .and_then(|()| fs::File::create(&partial))
+            .and_then(|mut file| file.write_all(html.as_bytes()))
+            .and_then(|()| fs::rename(&partial, &path))
+            .map_err(write_err)
+    })?;
     Ok(path)
 }
 
@@ -156,16 +162,19 @@ fn exploited_callout(view: &PopoverView) -> String {
         .map(|f| {
             let open = &f.open;
             let first = open.commands.first().unwrap_or(&open.fix);
+            let first = if first.is_empty() {
+                String::new()
+            } else {
+                format!(" Fix it first: <span class=\"mono\">{}</span>", esc(first))
+            };
             format!(
-                "<p><b>{}{} on {}</b> is affected by {}, which attackers are using now. \
-                 Fix it first: <span class=\"mono\">{}</span></p>",
+                "<p><b>{}{} on {}</b> is affected by {}, which attackers are using now.{first}</p>",
                 esc(&open.name),
                 open.version
                     .as_ref()
                     .map_or(String::new(), |v| format!(" {}", esc(v))),
                 esc(&f.target),
                 advisory_links(&open.advisories),
-                esc(first)
             )
         })
         .collect();
@@ -182,10 +191,18 @@ fn exploited_callout(view: &PopoverView) -> String {
 /// "Needs you", then "Lower"; or one line saying nothing is open.
 fn findings(view: &PopoverView) -> String {
     if view.findings.is_empty() {
-        let text = if view.all_clear {
-            "Nothing is open. Every target's newest sweep found nothing affected or risky."
-        } else {
-            "No target has a sweep with a verdict yet, so nothing is known."
+        let unswept = view.targets.iter().filter(|t| t.swept.is_none()).count();
+        let text = match (view.all_clear, unswept) {
+            (false, _) => {
+                "No target has a sweep with a verdict yet, so nothing is known.".to_owned()
+            }
+            (true, 0) => "Nothing is open. Every target's newest sweep found nothing affected \
+                          or risky."
+                .to_owned(),
+            (true, n) => format!(
+                "Nothing is open in the swept targets; {} not swept yet.",
+                plural(n, "target")
+            ),
         };
         return format!("<section class=\"rep-clear\"><p>{text}</p></section>\n");
     }
@@ -199,8 +216,7 @@ fn findings(view: &PopoverView) -> String {
         out.push_str(&format!("<section><h2>{title}</h2>\n"));
         for (i, listed) in group.into_iter().enumerate() {
             // The worst finding that needs the user starts expanded, as in the mockup.
-            let open = title == "Needs you" && i == 0;
-            out.push_str(&item(listed, open));
+            out.push_str(&item(listed, listed.needs_you && i == 0));
         }
         out.push_str("</section>\n");
     }
@@ -487,11 +503,13 @@ fn plural(n: usize, noun: &str) -> String {
 /// No request of any kind: inline styles, an inline SVG, and only the one script whose hash is
 /// here. The hash is the base64 SHA-256 of [`COPY_SCRIPT`]; a test recomputes it.
 const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
-                   script-src 'sha256-zqFu0oV8r8Ng8aiozbWI1lQX+NR/ciR3pM+pdzOZSmI='; \
+                   script-src 'sha256-2puN7X5gHhznz7AN+jqHuycIANGj9d/cqyTyUaB4TJ0='; \
                    base-uri 'none'; form-action 'none'";
 
-/// Copies the command beside a Copy button. The clipboard API needs a secure context, which a
-/// `file:` page may not be; selecting the text and `execCommand("copy")` is the fallback.
+/// Selects and copies the command beside a Copy button. `execCommand("copy")` comes first, while
+/// the click still counts as the user's gesture (Safari refuses it later); the clipboard API,
+/// which needs a secure context that a `file:` page may not be, is the fallback. When both
+/// fail, the command stays selected for the user to copy.
 const COPY_SCRIPT: &str = r#"
 document.addEventListener("click", (event) => {
   const button = event.target.closest(".cmdl button");
@@ -501,16 +519,13 @@ document.addEventListener("click", (event) => {
     button.textContent = "Copied";
     setTimeout(() => { button.textContent = "Copy"; }, 1500);
   };
-  const fallback = () => {
-    const range = document.createRange();
-    range.selectNodeContents(code);
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
-    if (document.execCommand("copy")) done();
-  };
-  if (navigator.clipboard) navigator.clipboard.writeText(code.textContent).then(done, fallback);
-  else fallback();
+  const range = document.createRange();
+  range.selectNodeContents(code);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  if (document.execCommand("copy")) done();
+  else if (navigator.clipboard) navigator.clipboard.writeText(code.textContent).then(done);
 });
 "#;
 
@@ -585,7 +600,7 @@ h2 { margin: 0 0 12px; font: 600 13px var(--mono); letter-spacing: .1em; text-tr
 .f .why { max-width: 72ch; color: #cdd3e4; }
 .f .ev { font: 12.5px/1.55 var(--mono); border-radius: 10px; padding: 12px 14px; color: #b5bdd3;
   background: rgba(0,0,0,.35); box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
-  white-space: pre-wrap; overflow-wrap: anywhere; }
+  overflow-wrap: anywhere; }
 .f .fixsum { color: #cdd3e4; }
 .f .steps { margin: 0; padding-left: 20px; color: #cdd3e4; }
 .f .cmdl { display: flex; gap: 10px; align-items: center; font: 13px var(--mono);
@@ -630,6 +645,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::findings::Confidence;
     use crate::findings::Severity;
     use crate::lifecycle::Fixed;
     use crate::lifecycle::Open;
@@ -749,11 +765,125 @@ mod tests {
         }
 
         #[test]
-        fn a_linked_id_holds_only_url_safe_characters(id in any::<String>()) {
-            if is_cve(&id) || is_osv_id(&id) {
-                prop_assert!(id.bytes().all(|b| b.is_ascii_alphanumeric()
-                    || matches!(b, b'-' | b'_' | b'.' | b':')));
+        fn a_link_is_the_page_of_its_id_and_nothing_else(
+            id in "(CVE-[0-9]{4}-[0-9]{3,6}|[A-Za-z][A-Za-z0-9._:/?#%\"' <>&-]{0,70})"
+        ) {
+            let shown = advisory_link(&id);
+            if shown.starts_with("<a ") {
+                prop_assert!(!id.contains(['/', '?', '#', '%', '"', '\'', ' ', '<', '>', '&']));
+                let base = if is_cve(&id) {
+                    "https://nvd.nist.gov/vuln/detail/"
+                } else {
+                    "https://osv.dev/vulnerability/"
+                };
+                prop_assert_eq!(shown, format!("<a href=\"{base}{id}\">{id}</a>"));
+            } else {
+                prop_assert_eq!(shown, esc(&id));
             }
+        }
+    }
+
+    #[test]
+    fn every_text_from_the_agent_or_the_target_is_escaped() {
+        let evil = "<x\"'>";
+        let reported = Open {
+            title: evil.to_owned(),
+            name: evil.to_owned(),
+            version: Some(evil.to_owned()),
+            advisories: vec![evil.to_owned()],
+            place: evil.to_owned(),
+            evidence: evil.to_owned(),
+            explanation: evil.to_owned(),
+            fix: evil.to_owned(),
+            steps: vec![evil.to_owned()],
+            commands: Vec::new(),
+            fix_state: Some(FixState::Reported {
+                at: at("2026-11-08T00:00:00Z"),
+                summary: evil.to_owned(),
+                pull_request: Some(evil.to_owned()),
+            }),
+            ..open(1, Severity::High, true)
+        };
+        let issue = Open {
+            title: evil.to_owned(),
+            advisories: Vec::new(),
+            ..open(2, Severity::Low, false)
+        };
+        let mut target = mac(vec![reported, issue]);
+        target.target = format!("github:{evil}");
+        target.fixed = vec![Fixed {
+            key: "0000000000000009".parse().unwrap(),
+            title: evil.to_owned(),
+            fixed_at: at("2026-11-08T10:00:00Z"),
+            summary: evil.to_owned(),
+            pull_request: Some(evil.to_owned()),
+        }];
+        let html = page(vec![target]);
+        assert!(!html.contains("<x"), "{html}");
+        assert!(!html.contains("x\"'"));
+        // The callout, the summary line, the advisory, Installed, Where, the evidence, the fix
+        // and its step, the fix status (summary and pull request), the issue's subject and
+        // the targets, and the fixed row (title, target, summary and pull request).
+        assert!(html.matches("&lt;x&quot;&#39;&gt;").count() >= 20);
+        assert_eq!(html.matches("<script").count(), 1);
+    }
+
+    #[test]
+    fn each_finding_lists_what_its_report_keeps_and_an_issue_its_subject() {
+        let mut reported = open(1, Severity::High, false);
+        reported.confidence = Some(Confidence::Likely);
+        reported.new = true;
+        reported.fix_state = Some(FixState::Reported {
+            at: at("2026-11-08T00:00:00Z"),
+            summary: "upgraded".to_owned(),
+            pull_request: Some("https://github.com/o/r/pull/7".to_owned()),
+        });
+        let mut not_held = open(2, Severity::High, false);
+        not_held.first_seen = None;
+        not_held.fix_state = Some(FixState::NotHeld {
+            at: at("2026-11-07T00:00:00Z"),
+        });
+        let issue = Open {
+            version: None,
+            advisories: Vec::new(),
+            place: String::new(),
+            title: "file github/workflows/ci.yml".to_owned(),
+            ..open(3, Severity::Low, false)
+        };
+        let html = page(vec![mac(vec![reported, not_held, issue])]);
+        let item = |n: usize| {
+            let from = html.find(&format!("pkg{n}")).unwrap();
+            let to = html[from..].find("</details>").unwrap();
+            &html[from..from + to]
+        };
+        assert!(item(1).contains("<dt>Confidence</dt><dd>likely</dd>"));
+        assert!(
+            item(1)
+                .contains("<dt>First seen</dt><dd>1 Nov 2026, 00:00 UTC (new in the last sweep)")
+        );
+        assert!(item(1).contains(
+            "<dt>Fix status</dt><dd>fix reported on 8 Nov 2026, 00:00 UTC: upgraded; pull \
+             request <span class=\"mono\">https://github.com/o/r/pull/7</span>. The next sweep \
+             checks it.</dd>"
+        ));
+        assert!(item(1).contains("<dt>Installed</dt><dd>pkg1 1.0.0</dd>"));
+        assert!(item(1).contains("<dt>Where</dt><dd>This Mac · Homebrew</dd>"));
+        assert!(item(1).contains("<dt>Key</dt><dd><span class=\"mono\">0000000000000001"));
+        assert!(item(2).contains("<dt>First seen</dt><dd>not recorded</dd>"));
+        assert!(item(2).contains(
+            "<dt>Fix status</dt><dd>still found after a fix on 7 Nov 2026, 00:00 UTC</dd>"
+        ));
+        assert!(!item(2).contains("Confidence"));
+        let issue = item(3);
+        assert!(issue.contains("<dt>Subject</dt><dd>file github/workflows/ci.yml</dd>"));
+        assert!(issue.contains("<dt>Where</dt><dd>This Mac</dd>"));
+        for absent in [
+            "<dt>Advisor",
+            "<dt>Installed",
+            "<dt>Confidence",
+            "<dt>Fix status",
+        ] {
+            assert!(!issue.contains(absent), "{absent}");
         }
     }
 
@@ -774,6 +904,16 @@ mod tests {
              <span class=\"mono\">brew upgrade webp</span></p>"
         ));
         assert_eq!(html.matches("sevlbl kev").count(), 1, "only on pkg2");
+
+        let mut bare = open(3, Severity::Low, true);
+        bare.commands = Vec::new();
+        bare.fix = String::new();
+        let html = page(vec![mac(vec![bare])]);
+        assert!(
+            html.contains("which attackers are using now.</p>"),
+            "no empty fix"
+        );
+        assert!(!html.contains("Fix it first"));
         assert!(html.contains("<div class=\"hot\"><b>1</b><span>exploited in the wild</span>"));
     }
 
@@ -823,6 +963,12 @@ mod tests {
 
         let mut never = mac(Vec::new());
         never.swept = None;
+        let mut repo = mac(Vec::new());
+        repo.target = "github:o/r".to_owned();
+        repo.swept = None;
+        let html = page(vec![mac(Vec::new()), repo]);
+        assert!(html.contains("Nothing is open in the swept targets; 1 target not swept yet."));
+
         let html = page(vec![never]);
         assert!(html.contains("<h1>Not swept yet</h1>"));
         assert!(html.contains("No target has a sweep with a verdict yet"));
@@ -915,10 +1061,9 @@ mod tests {
         write_html_report(&data_dir, &config).unwrap();
         let html = fs::read_to_string(&path).unwrap();
         assert!(html.starts_with("<!doctype html>") && html.contains("Not swept yet"));
-        let names: Vec<_> = fs::read_dir(tmp.path().join("data"))
-            .unwrap()
-            .map(|e| e.unwrap().file_name())
-            .collect();
-        assert_eq!(names, ["report.html"], "no partial file left");
+        assert!(
+            !tmp.path().join("data/.report.html.partial").exists(),
+            "renamed into place"
+        );
     }
 }
