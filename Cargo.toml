@@ -5,6 +5,7 @@ default-members = ["crates/core", "crates/cli"]
 
 [workspace.package]
 edition = "2024"
+license = "MIT"
 
 [workspace.metadata.house-check]
 baseline = true

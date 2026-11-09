@@ -7,7 +7,7 @@
 **Know which new vulnerabilities affect your Mac, your repositories and your servers,
 and fix them with one confirmed click.**
 
-[![test](https://github.com/GeorgiosDelkos/vigil/actions/workflows/test.yml/badge.svg)](https://github.com/GeorgiosDelkos/vigil/actions/workflows/test.yml) [![check](https://github.com/GeorgiosDelkos/vigil/actions/workflows/check.yml/badge.svg)](https://github.com/GeorgiosDelkos/vigil/actions/workflows/check.yml) [![app](https://github.com/GeorgiosDelkos/vigil/actions/workflows/app.yml/badge.svg)](https://github.com/GeorgiosDelkos/vigil/actions/workflows/app.yml) ![macOS](https://img.shields.io/badge/platform-macOS-1f2430) ![Rust](https://img.shields.io/badge/Rust-1.99-1f2430?logo=rust) ![Tauri](https://img.shields.io/badge/Tauri-2-1f2430?logo=tauri)
+[![test](https://github.com/GeorgiosDelkos/vigil/actions/workflows/test.yml/badge.svg)](https://github.com/GeorgiosDelkos/vigil/actions/workflows/test.yml) [![check](https://github.com/GeorgiosDelkos/vigil/actions/workflows/check.yml/badge.svg)](https://github.com/GeorgiosDelkos/vigil/actions/workflows/check.yml) [![app](https://github.com/GeorgiosDelkos/vigil/actions/workflows/app.yml/badge.svg)](https://github.com/GeorgiosDelkos/vigil/actions/workflows/app.yml) ![macOS](https://img.shields.io/badge/platform-macOS-1f2430) ![Rust](https://img.shields.io/badge/Rust-1.99-1f2430?logo=rust) ![Tauri](https://img.shields.io/badge/Tauri-2-1f2430?logo=tauri) [![License: MIT](https://img.shields.io/badge/license-MIT-1f2430)](LICENSE)
 
 </div>
 
@@ -43,6 +43,7 @@ It sweeps three kinds of target in one pass:
 - [Project layout](#project-layout)
 - [Development](#development)
 - [Status](#status)
+- [License](#license)
 
 ## Highlights
 
@@ -337,3 +338,9 @@ target types. Next on the list:
 - Lockfiles not read yet: `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `Pipfile.lock` and
   `go.sum`
 - Node and Python versions managed by nvm, fnm, volta, asdf or pyenv, beyond the one on `PATH`
+
+## License
+
+Vigil is released under the [MIT License](LICENSE). It is provided as is, without warranty
+of any kind: review a fix before you confirm it, since the agent then runs it with full
+access.
