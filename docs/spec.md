@@ -421,6 +421,8 @@ Built in step 9a (2026-11-06):
 - The tray icon is the mark: in the menu bar's own colour (nothing open), slate, amber or red
   (worst open severity: low, medium, or critical and high), blue (sweeping), and an unfinished
   spiral in the bar's colour (the last sweep failed or a target got no verdict).
+- A left click on the icon shows or hides the popover; a right click opens a menu with only
+  Quit Vigil (asked for 2026-11-09), which quits as the popover's Quit does.
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
   counts by severity, the six most severe open findings with their keys and fixes on hover,
   Sweep now, Edit settings, Launch at login (the autostart plugin's LaunchAgent) and Quit. It
