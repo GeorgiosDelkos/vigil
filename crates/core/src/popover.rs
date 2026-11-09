@@ -104,10 +104,10 @@ pub struct TargetLine {
     pub kind: TargetKind,
     /// When its newest sweep with a verdict started.
     pub swept: Option<Timestamp>,
-    /// What that sweep checked, one phrase: "139 components checked", or "no components
-    /// listed" when it listed none (a repository without a dependency graph, for one); `None`
-    /// before a sweep. Components, not packages: the count holds the OS and toolchains too, and
-    /// a package once per place it is installed.
+    /// What that sweep checked, one phrase: "139 components checked" (or "1 component
+    /// checked"), or "no components listed" when it listed none (a repository without a
+    /// dependency graph, for one); `None` before a sweep. Components, not packages: on the Mac
+    /// the count holds the OS and toolchains too, and a package once per place it is installed.
     pub checked: Option<String>,
     /// Its open findings by severity.
     pub counts: Counts,
