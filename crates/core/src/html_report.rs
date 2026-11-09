@@ -109,32 +109,15 @@ fn head(view: &PopoverView, components: usize, now: Timestamp) -> String {
     format!(
         "<header class=\"rep-head\">{}<div><h1>{}</h1><p>{sub}</p></div>\
          <div class=\"stamp\">generated {}{swept}</div></header>\n",
-        mark(),
+        MARK,
         esc(&view.headline),
         when(now)
     )
 }
 
-/// Vigil's mark: a spiral arm of 16 dots growing outwards, as in the app's tray icon.
-fn mark() -> String {
-    let mut dots = String::new();
-    for i in 0..16_u8 {
-        let t = f64::from(i) / 15.0;
-        // Angles in radians and lengths in the 54-unit view box; from the approved mockup.
-        let (angle, radius) = (1.2 + t * 9.4, 3.0 + t * 18.0);
-        dots.push_str(&format!(
-            "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" opacity=\"{:.2}\"/>",
-            27.0 + angle.cos() * radius,
-            27.0 + angle.sin() * radius,
-            0.6 + t * 2.4,
-            0.4 + t * 0.6
-        ));
-    }
-    format!(
-        "<svg class=\"mark\" width=\"54\" height=\"54\" viewBox=\"0 0 54 54\" \
-         aria-hidden=\"true\"><rect width=\"54\" height=\"54\" rx=\"13\"/>{dots}</svg>"
-    )
-}
+/// Vigil's mark: the tray icon's three-arm vortex (app/src-tauri/icons/src/mark.svg, drawn by
+/// marks.py) on the report's tile, with the outer streaks in the findings' pink.
+const MARK: &str = include_str!("html_report/mark.svg");
 
 /// The row of key numbers; the first two glow when they are not zero.
 fn numbers(view: &PopoverView) -> String {
@@ -558,7 +541,8 @@ p { margin: 0; }
 .mono, code { font-family: var(--mono); }
 .rep-head { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; }
 .mark rect { fill: #12162a; }
-.mark circle { fill: #a9b8ff; }
+.mark path { stroke: #8fa2ff; }
+.mark path.edge { stroke: #ff2e88; }
 .rep-head h1 { margin: 0; font: 700 30px/1.05 var(--display); letter-spacing: -.02em;
   color: #f4f6ff; }
 .rep-head p { color: #8e96ad; font-size: 14px; }
@@ -698,6 +682,12 @@ mod tests {
 
     fn page(latest: Vec<Latest>) -> String {
         render(latest, at("2026-11-09T14:00:00Z"))
+    }
+
+    #[test]
+    fn a_zero_does_not_glow() {
+        let html = page(vec![mac(vec![open(1, Severity::Low, false)])]);
+        assert!(html.contains("<div><b>0</b><span>exploited in the wild</span>"));
     }
 
     #[test]
