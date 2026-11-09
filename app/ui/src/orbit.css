@@ -1,0 +1,389 @@
+/* Orbit, in neon: the main view. Coloured light drifts slowly behind the panel, frosted glass
+   chips blur it, and the spiral glows on a canvas (Orbit.tsx). The owner chose this design on
+   2026-11-09, then asked for a softer, less blurred light: blur 80px at 0.42 opacity behind,
+   8px in the glass. */
+
+/* Instrument Serif, from google/fonts at 5bb28733cec313b63fbd415b574b5ae35c8aa8b8
+   (https://github.com/google/fonts/tree/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/instrumentserif),
+   under the SIL Open Font License 1.1 in fonts/OFL.txt. Bundled so the popover looks the same
+   offline; the system serif (New York) is wider and reads as a different design. */
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("./fonts/InstrumentSerif-Regular.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 400;
+}
+@font-face {
+  font-family: "Instrument Serif";
+  src: url("./fonts/InstrumentSerif-Italic.ttf") format("truetype");
+  font-style: italic;
+  font-weight: 400;
+}
+
+:root {
+  --n-cyan: #3ef0ff;
+  --n-violet: #9b5cff;
+  --n-pink: #ff2e88;
+  --n-green: #3dffa8;
+  --n-dim: rgba(143, 162, 255, 0.4);
+  --n-ink: #f2f4ff;
+  --n-ink2: rgba(242, 244, 255, 0.6);
+  --serif: "Instrument Serif", ui-serif, Georgia, serif;
+}
+
+.pop.on-orbit {
+  position: relative;
+  isolation: isolate;
+  padding: 0;
+  gap: 0;
+  background: #06050d;
+  color: var(--n-ink);
+  overflow: hidden;
+}
+.pop.on-orbit > .banner {
+  margin: 10px 14px 0;
+}
+
+.orbit {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* The light reaches past the panel so its blur does not fade at the edges; the sky clips it,
+   so the panel does not grow a scrollable overflow. */
+.orbit .sky {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+.orbit .aurora {
+  position: absolute;
+  inset: -60px;
+  filter: blur(80px);
+  opacity: 0.42;
+}
+.orbit .aurora i {
+  position: absolute;
+  border-radius: 50%;
+}
+.orbit .aurora .a1 {
+  width: 260px;
+  height: 260px;
+  left: -40px;
+  top: 40px;
+  background: radial-gradient(circle, rgba(155, 92, 255, 0.85), transparent 70%);
+  animation: drift1 18s ease-in-out infinite alternate;
+}
+.orbit .aurora .a2 {
+  width: 240px;
+  height: 240px;
+  right: -50px;
+  top: 160px;
+  background: radial-gradient(circle, rgba(62, 240, 255, 0.6), transparent 70%);
+  animation: drift2 22s ease-in-out infinite alternate;
+}
+.orbit .aurora .a3 {
+  width: 220px;
+  height: 220px;
+  left: 60px;
+  bottom: -60px;
+  background: radial-gradient(circle, rgba(255, 46, 136, 0.55), transparent 70%);
+  animation: drift1 26s ease-in-out infinite alternate-reverse;
+}
+.orbit.green .aurora .a3 {
+  background: radial-gradient(circle, rgba(61, 255, 168, 0.45), transparent 70%);
+}
+@keyframes drift1 {
+  to {
+    transform: translate(40px, 30px) scale(1.15);
+  }
+}
+@keyframes drift2 {
+  to {
+    transform: translate(-30px, -40px) scale(1.1);
+  }
+}
+/* The page is hidden while the popover is closed; nothing keeps moving behind it. */
+.orbit.paused * {
+  animation-play-state: paused;
+}
+
+.glass {
+  border: 0;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(8px) saturate(120%);
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.11),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  border-radius: 16px;
+}
+.glass:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.orbit-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 12px 0 18px;
+}
+.orbit-top b {
+  font: 600 11px var(--ui);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: rgba(242, 244, 255, 0.7);
+}
+.orbit-top span {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--n-ink2);
+}
+.orbit-top .menu {
+  top: 30px;
+  bottom: auto;
+  z-index: 2;
+}
+.orbit > .banner {
+  margin: 8px 14px 0;
+}
+
+.stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+}
+.stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+.centre {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  max-width: 190px;
+  padding: 6px;
+  border: 0;
+  border-radius: 16px;
+  background: none;
+  color: var(--n-ink);
+  text-align: center;
+  cursor: pointer;
+}
+.centre .n {
+  font: 400 92px/0.85 var(--serif);
+  text-shadow:
+    0 0 18px rgba(62, 240, 255, 0.55),
+    0 0 42px rgba(155, 92, 255, 0.45);
+}
+.centre .n.percent {
+  font-size: 66px;
+}
+.centre .n.percent small {
+  font-size: 34px;
+}
+.centre .n.word {
+  font-size: 60px;
+  font-style: italic;
+  text-shadow:
+    0 0 18px rgba(61, 255, 168, 0.55),
+    0 0 42px rgba(62, 240, 255, 0.35);
+}
+.centre .n.word.small {
+  font-size: 40px;
+  line-height: 1;
+  text-shadow:
+    0 0 18px rgba(62, 240, 255, 0.45),
+    0 0 42px rgba(155, 92, 255, 0.35);
+}
+.centre .l {
+  font: 500 12px var(--ui);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(242, 244, 255, 0.7);
+}
+.centre .kev-pill {
+  margin-top: 10px;
+  font: 700 10px/1 var(--ui);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #fff;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(255, 46, 136, 0.22);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 46, 136, 0.7),
+    0 0 18px rgba(255, 46, 136, 0.6);
+}
+
+.urgent {
+  margin: 0 16px;
+  padding: 12px 14px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+.urgent .glow {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow:
+    0 0 6px var(--c),
+    0 0 16px var(--c);
+}
+.urgent .glow.beat {
+  animation: beat 1.8s ease-in-out infinite;
+}
+@keyframes beat {
+  50% {
+    transform: scale(1.35);
+    opacity: 0.75;
+  }
+}
+.urgent b {
+  display: block;
+  font-weight: 600;
+  font-size: 13.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.urgent small {
+  display: block;
+  color: var(--n-ink2);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.urgent small::first-letter {
+  text-transform: uppercase;
+}
+.urgent .go {
+  color: rgba(242, 244, 255, 0.5);
+  font-size: 18px;
+}
+.orbit-hint {
+  margin: 0 18px;
+  color: var(--n-ink2);
+  font-size: 12px;
+  text-align: center;
+}
+
+.progress p {
+  margin: 10px 16px 0;
+  color: var(--n-ink2);
+  font-size: 12px;
+}
+.neon-bar {
+  margin: 0 16px;
+  height: 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.neon-bar i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--n-cyan), var(--n-violet));
+  box-shadow: 0 0 12px var(--n-cyan);
+}
+
+.chips {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 16px 0;
+}
+.chips button {
+  display: grid;
+  gap: 5px;
+  justify-items: center;
+  padding: 10px 4px;
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+}
+.chips .icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: rgba(242, 244, 255, 0.7);
+}
+.chips b {
+  font-size: 11.5px;
+  font-weight: 600;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chips i {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 4px;
+  min-height: 7px;
+}
+.chips i span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: 0 0 8px var(--c);
+}
+
+.orbit-foot {
+  margin-top: 14px;
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 16px;
+}
+.orbit-btn {
+  flex: 1;
+  font: 600 13px var(--ui);
+  border: 0;
+  border-radius: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+  color: var(--n-ink);
+  background: rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.orbit-btn.lit {
+  background: linear-gradient(120deg, var(--n-cyan) 0%, var(--n-violet) 55%, var(--n-pink) 110%);
+  color: #07060f;
+  box-shadow:
+    0 0 22px -4px rgba(155, 92, 255, 0.9),
+    0 0 40px -12px rgba(62, 240, 255, 0.8);
+}
+.orbit-btn:hover {
+  filter: brightness(1.1);
+}
+.orbit-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit * {
+    animation: none !important;
+    transition: none !important;
+  }
+}
