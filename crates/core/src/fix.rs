@@ -78,6 +78,11 @@ pub struct FixPlan {
 }
 
 impl FixPlan {
+    /// The target it fixes: `mac`, `github:owner/name` or `server:name`.
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
     /// Where the agent will work, as the user should read it before confirming.
     pub fn destination(&self) -> &str {
         &self.destination
@@ -268,39 +273,70 @@ pub enum Confirmed {
 }
 
 /// What a fix is doing, for a progress display. The steps come in this order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FixProgress {
     /// Writing the fix folder: the prompt, the brief and the result schema.
     Preparing,
-    /// The agent is applying the fix, with full access.
+    /// The agent is applying the fix, with full access, writing its output to `log`.
     Agent {
         /// The agent.
         agent: AgentKind,
+        /// Its log, which [`last_activity`] reads while it runs.
+        log: PathBuf,
     },
     /// Reading the agent's result and recording the run.
     Recording,
 }
 
 impl FixProgress {
-    /// The steps of a fix by `agent`, in order.
-    pub fn steps(agent: AgentKind) -> [Self; 3] {
-        [Self::Preparing, Self::Agent { agent }, Self::Recording]
+    /// The index of the agent's step, the one whose output [`last_activity`] shows.
+    pub const AGENT_STEP: usize = 1;
+
+    /// Which step this is, from 0: the position of its label in [`Self::labels`].
+    pub fn step(&self) -> usize {
+        match self {
+            Self::Preparing => 0,
+            Self::Agent { .. } => Self::AGENT_STEP,
+            Self::Recording => 2,
+        }
+    }
+
+    /// The labels of a fix's steps by `agent`, in order: "grok is applying the fix".
+    pub fn labels(agent: AgentKind) -> [String; 3] {
+        [
+            "preparing the fix".to_owned(),
+            format!("{agent} is applying the fix"),
+            "recording the result".to_owned(),
+        ]
     }
 }
 
-impl fmt::Display for FixProgress {
-    /// One line for a progress display: "grok is applying the fix".
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Preparing => f.write_str("preparing the fix"),
-            Self::Agent { agent } => write!(f, "{agent} is applying the fix"),
-            Self::Recording => f.write_str("recording the result"),
-        }
-    }
+/// How many bytes of a log's end [`last_activity`] reads. Arbitrary: a few lines of an
+/// agent's output, read every few seconds while a fix runs.
+const ACTIVITY_TAIL: u64 = 4096;
+
+/// How long a line [`last_activity`] returns. Arbitrary: about two lines of the popover.
+const ACTIVITY_CHARS: usize = 160;
+
+/// The last line the agent wrote to `log` that holds any text, as one plain line (control
+/// characters replaced) of at most [`ACTIVITY_CHARS`] characters; `None` before it has written
+/// any, or when the log cannot be read. The text is the agent's own and untrusted: it is only
+/// ever shown, never acted on.
+pub fn last_activity(log: &Path) -> Option<String> {
+    let mut file = fs::File::open(log).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(ACTIVITY_TAIL)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let line = text.lines().rev().map(str::trim).find(|l| !l.is_empty())?;
+    Some(sweep::plain(line).chars().take(ACTIVITY_CHARS).collect())
 }
 
 /// Runs the confirmed `plan` with full access and records the run in `state/fixes.jsonl`.
-/// Call it only after the user confirmed what the plan shows. Calls `progress` at each step.
+/// Call it only after the user confirmed what the plan shows. Calls `progress` at each step,
+/// with the sweeps lock held, so it should return quickly.
 ///
 /// Blocks until the agent finishes; there is no time limit. An agent that cannot start is
 /// recorded as `unknown` with the reason, like one that writes no result, and so is one that
@@ -316,8 +352,8 @@ pub fn run_fix(
     data_dir: &DataDir,
     plan: &FixPlan,
     confirmed: Confirmed,
-    cancel: &Cancel,
     progress: &mut dyn FnMut(FixProgress),
+    cancel: &Cancel,
 ) -> Result<FixRecord, FixError> {
     let _lock = Lock::acquire(&data_dir.sweeps_dir())?;
     if current_report(data_dir, plan.key)? != plan.report {
@@ -344,10 +380,14 @@ pub fn run_fix(
         fs::write(&path, text).map_err(|source| FixError::Write { path, source })?;
     }
 
-    progress(FixProgress::Agent { agent: plan.agent });
+    let log = dir.join("agent.log");
+    progress(FixProgress::Agent {
+        agent: plan.agent,
+        log: log.clone(),
+    });
     let ran = plan.agent.run(
         &plan.agent.fix_command(&plan.located, &dir, PROMPT_LINE),
-        &dir.join("agent.log"),
+        &log,
         cancel,
     );
     progress(FixProgress::Recording);
@@ -740,8 +780,8 @@ mod tests {
             &data_dir,
             &plan,
             Confirmed::Asked,
-            &Cancel::new(),
             &mut |_| {},
+            &Cancel::new(),
         )
         .unwrap_err();
         assert!(matches!(err, FixError::Dismissed { .. }), "{err:?}");
@@ -752,8 +792,8 @@ mod tests {
             &data_dir,
             &plan,
             Confirmed::Asked,
-            &Cancel::new(),
             &mut |_| {},
+            &Cancel::new(),
         )
         .unwrap_err();
         assert!(matches!(err, FixError::Changed { .. }), "{err:?}");
@@ -768,8 +808,8 @@ mod tests {
             &data_dir,
             &plan,
             Confirmed::Asked,
-            &Cancel::new(),
             &mut |_| {},
+            &Cancel::new(),
         )
         .unwrap_err();
         assert!(matches!(err, FixError::Stale { .. }), "{err:?}");
@@ -790,6 +830,23 @@ mod tests {
             confirmed: Confirmed::Asked,
             dir: PathBuf::from("/f"),
         }
+    }
+
+    #[test]
+    fn the_last_activity_is_the_agent_s_last_line_with_text_as_one_short_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("agent.log");
+        assert_eq!(last_activity(&log), None, "no log yet");
+        fs::write(&log, "").unwrap();
+        assert_eq!(last_activity(&log), None, "nothing written yet");
+        fs::write(&log, "reading fix.json\nupgrading curl \u{1b}[2J\n\n  \n").unwrap();
+        assert_eq!(
+            last_activity(&log).as_deref(),
+            Some("upgrading curl \u{fffd}[2J")
+        );
+        let long = format!("{}\n{}\n", "x".repeat(10_000), "y".repeat(500));
+        fs::write(&log, long).unwrap();
+        assert_eq!(last_activity(&log), Some("y".repeat(ACTIVITY_CHARS)));
     }
 
     #[test]

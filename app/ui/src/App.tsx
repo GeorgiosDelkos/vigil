@@ -25,7 +25,7 @@ import {
 import { Settings } from "./Settings.tsx";
 import type { Section } from "./settings.ts";
 import { Glyph, Icon } from "./icons.tsx";
-import { since } from "./time.ts";
+import { ago, since } from "./time.ts";
 
 type Tab = "needs" | "targets" | "all";
 
@@ -57,6 +57,15 @@ export function App() {
   });
   const tick = setInterval(() => setNow(new Date()), 30_000);
   onCleanup(() => clearInterval(tick));
+  // A fix's agent reports nothing until it ends, so while one runs the popover asks Rust again
+  // every few seconds, for the agent's latest line and the elapsed time.
+  const poll = setInterval(() => {
+    if (overview()?.status.state === "fixing") {
+      setNow(new Date());
+      void refetch();
+    }
+  }, 4_000);
+  onCleanup(() => clearInterval(poll));
 
   const listed = () => overview()?.findings ?? [];
   const chosen = createMemo(() => listed().find((o) => o.key === selected()) ?? null);
@@ -92,6 +101,14 @@ export function App() {
                   setSettings(undefined);
                   void refetch();
                 }}
+              />
+            </Match>
+            <Match when={o().status.state === "fixing"}>
+              {/* Once a fix starts, its steps replace the confirmation, whatever is selected. */}
+              <Busy
+                status={o().status}
+                now={now()}
+                onCancel={() => run(() => invoke("cancel_sweep"))}
               />
             </Match>
             <Match when={chosen()}>
@@ -609,54 +626,66 @@ function Busy(props: { status: Status; now: Date; onCancel: () => void }) {
         )}
       </Match>
       <Match when={props.status.state === "fixing" ? props.status : null}>
-        {(f) => (
-          <section class="summary">
-            <div class="headline">
-              <div class="headline-text">
-                <h1>Fixing</h1>
-                <p class="sub">
-                  {f().destination} · started {since(f().started, props.now)} ago
-                </p>
+        {(f) => {
+          const current = () => f().steps.find((s) => s.state === "now");
+          return (
+            <section class="summary">
+              <div class="headline">
+                <div class="headline-text">
+                  <h1>Fixing</h1>
+                  <p class="sub">
+                    {f().place} · started {ago(f().started, props.now)}
+                  </p>
+                </div>
+                <span class="spin" aria-hidden="true" />
               </div>
-              <span class="spin" aria-label="Fixing" />
-            </div>
-            <p class="fix-title">{f().title}</p>
-            <ol class="group steps" aria-label="Fix progress">
-              <For each={f().steps}>
-                {(step) => (
-                  <li
-                    class={`step ${step.state}`}
-                    aria-current={step.state === "now" ? "step" : undefined}
-                  >
-                    <Switch>
-                      <Match when={step.state === "done"}>
-                        <Icon name="done" />
-                      </Match>
-                      <Match when={step.state === "now"}>
-                        <span class="spin" />
-                      </Match>
-                      <Match when={step.state === "next"}>
-                        <Icon name="wait" />
-                      </Match>
-                    </Switch>
-                    <span class="step-detail-now">{step.label}</span>
-                    <span class="st">
-                      {step.state === "now"
-                        ? since(f().step_started, props.now)
-                        : step.state === "done"
-                          ? "done"
-                          : "next"}
-                    </span>
-                  </li>
-                )}
-              </For>
-            </ol>
-            <p class="hint">
-              The agent is working with full access. A fix cannot be stopped halfway, since that
-              could leave a change half made; you can close this.
-            </p>
-          </section>
-        )}
+              <p class="fix-title">{f().title}</p>
+              <ol class="group steps" role="list" aria-label="Fix progress">
+                <For each={f().steps}>
+                  {(step) => (
+                    <li
+                      class={`step ${step.state}`}
+                      aria-current={step.state === "now" ? "step" : undefined}
+                    >
+                      <Switch>
+                        <Match when={step.state === "done"}>
+                          <Icon name="done" />
+                        </Match>
+                        <Match when={step.state === "now"}>
+                          <span class="spin" aria-hidden="true" />
+                        </Match>
+                        <Match when={step.state === "next"}>
+                          <Icon name="wait" />
+                        </Match>
+                      </Switch>
+                      <span class="step-text">
+                        <span class="step-label">{step.label}</span>
+                        <Show when={step.state === "now" && f().activity}>
+                          {(line) => <span class="step-detail activity">{line()}</span>}
+                        </Show>
+                      </span>
+                      <span class="st">
+                        {step.state === "now"
+                          ? since(f().step_started, props.now)
+                          : step.state === "done"
+                            ? "done"
+                            : "next"}
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ol>
+              {/* Announces each new step once; the list itself would repeat its ticking time. */}
+              <p class="sr-only" aria-live="polite">
+                {current()?.label}
+              </p>
+              <p class="hint">
+                The agent is working with full access. There is no Cancel: stopping a fix halfway
+                could leave a change half made. You can close this.
+              </p>
+            </section>
+          );
+        }}
       </Match>
     </Switch>
   );

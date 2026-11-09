@@ -31,6 +31,7 @@ use vigil_core::FindingKey;
 use vigil_core::FixProgress;
 use vigil_core::ParseFindingKeyError;
 use vigil_core::PopoverView;
+use vigil_core::last_activity;
 use vigil_core::latest;
 use vigil_core::plan_fix;
 use vigil_core::popover_view;
@@ -145,9 +146,11 @@ enum StatusView {
     },
     Fixing {
         title: String,
-        destination: String,
+        place: String,
         /// Every step of the fix in order, each done, now or next.
         steps: Vec<StepView>,
+        /// The agent's last line of output while it runs, one plain line.
+        activity: Option<String>,
         started: Timestamp,
         step_started: Timestamp,
     },
@@ -197,15 +200,19 @@ impl StatusView {
             }
             Status::Fixing {
                 title,
-                destination,
-                agent,
-                step,
+                place,
+                labels,
+                at,
+                log,
                 started,
                 step_started,
             } => Self::Fixing {
                 title,
-                destination,
-                steps: fix_steps(agent, step),
+                place,
+                activity: log
+                    .filter(|_| at == FixProgress::AGENT_STEP)
+                    .and_then(|log| last_activity(&log)),
+                steps: fix_steps(labels, at),
                 started,
                 step_started,
             },
@@ -215,7 +222,7 @@ impl StatusView {
 }
 
 /// One step of a running fix, as the popover lists it.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Serialize)]
 struct StepView {
     label: String,
     state: StepState,
@@ -230,20 +237,18 @@ enum StepState {
     Next,
 }
 
-/// The steps of a fix by `agent` whose current step is `current` (`None` before the first),
-/// with the steps before it done and those after it next.
-fn fix_steps(agent: AgentKind, current: Option<FixProgress>) -> Vec<StepView> {
-    let steps = FixProgress::steps(agent);
-    let at = current.and_then(|c| steps.iter().position(|s| *s == c));
-    steps
-        .iter()
+/// The steps of a fix, `labels` in order, with the one at `at` running, those before it done
+/// and those after it next.
+fn fix_steps(labels: [String; 3], at: usize) -> Vec<StepView> {
+    labels
+        .into_iter()
         .enumerate()
-        .map(|(i, step)| StepView {
-            label: step.to_string(),
-            state: match at {
-                Some(at) if i < at => StepState::Done,
-                Some(at) if i == at => StepState::Now,
-                _ => StepState::Next,
+        .map(|(i, label)| StepView {
+            label,
+            state: match i.cmp(&at) {
+                std::cmp::Ordering::Less => StepState::Done,
+                std::cmp::Ordering::Equal => StepState::Now,
+                std::cmp::Ordering::Greater => StepState::Next,
             },
         })
         .collect()
@@ -500,29 +505,53 @@ mod tests {
 
     #[test]
     fn a_fix_lists_its_steps_done_now_and_next() {
-        let states = |current| -> Vec<(String, StepState)> {
-            fix_steps(AgentKind::Grok, current)
+        use StepState::{Done, Next, Now};
+        let states = |at| -> Vec<StepState> {
+            fix_steps(FixProgress::labels(AgentKind::Grok), at)
                 .into_iter()
-                .map(|s| (s.label, s.state))
+                .map(|s| s.state)
                 .collect()
         };
+        assert_eq!(states(0), [Now, Next, Next], "claimed means preparing");
+        assert_eq!(states(FixProgress::AGENT_STEP), [Done, Now, Next]);
+        assert_eq!(states(2), [Done, Done, Now]);
+        let labels: Vec<String> = fix_steps(FixProgress::labels(AgentKind::Grok), 1)
+            .into_iter()
+            .map(|s| s.label)
+            .collect();
         assert_eq!(
-            states(Some(FixProgress::Agent {
-                agent: AgentKind::Grok
-            })),
+            labels,
             [
-                ("preparing the fix".to_owned(), StepState::Done),
-                ("grok is applying the fix".to_owned(), StepState::Now),
-                ("recording the result".to_owned(), StepState::Next),
+                "preparing the fix",
+                "grok is applying the fix",
+                "recording the result"
             ]
         );
-        assert!(
-            states(None).iter().all(|(_, s)| *s == StepState::Next),
-            "before the first step"
+    }
+
+    #[test]
+    fn a_fix_s_view_shows_the_agent_s_last_line_only_while_it_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("agent.log");
+        std::fs::write(&log, "upgrading curl\n").unwrap();
+        let at = |at: usize| Status::Fixing {
+            title: "t".to_owned(),
+            place: "This Mac".to_owned(),
+            labels: FixProgress::labels(AgentKind::Grok),
+            at,
+            log: Some(log.clone()),
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        };
+        let activity = |status| match StatusView::of(status) {
+            StatusView::Fixing { activity, .. } => activity,
+            _ => panic!("still fixing"),
+        };
+        assert_eq!(
+            activity(at(FixProgress::AGENT_STEP)).as_deref(),
+            Some("upgrading curl")
         );
-        let last = states(Some(FixProgress::Recording));
-        assert_eq!(last[2].1, StepState::Now);
-        assert_eq!(last[0].1, StepState::Done);
+        assert_eq!(activity(at(2)), None, "not once the agent is done");
     }
 
     #[test]

@@ -39,10 +39,12 @@ export type Status =
   | {
       readonly state: "fixing";
       readonly title: string;
-      /** Where it runs: "this Mac", the repository, or the server. */
-      readonly destination: string;
+      /** Its target's name: "This Mac", `owner/name`, the server. */
+      readonly place: string;
       /** Every step of the fix in order, as Rust places them. */
       readonly steps: readonly FixStep[];
+      /** The agent's last line of output while it runs. */
+      readonly activity: string | null;
       readonly started: string;
       readonly step_started: string;
     }

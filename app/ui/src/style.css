@@ -629,8 +629,26 @@ ol.steps {
   padding: 0;
   list-style: none;
 }
-.step-detail-now::first-letter {
+.step-label {
+  overflow-wrap: anywhere;
+}
+/* The label is a block inside the row's grid, so its first letter can be raised. */
+.step-label::first-letter {
   text-transform: uppercase;
+}
+.activity {
+  font-family: var(--mono);
+}
+.headline .sub {
+  overflow-wrap: anywhere;
+}
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 .step-name {
   overflow-wrap: anywhere;

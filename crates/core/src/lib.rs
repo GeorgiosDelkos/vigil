@@ -74,6 +74,7 @@ pub use crate::fix::FixPlan;
 pub use crate::fix::FixProgress;
 pub use crate::fix::FixRecord;
 pub use crate::fix::Outcome;
+pub use crate::fix::last_activity;
 pub use crate::fix::plan_fix;
 pub use crate::fix::run_fix;
 pub use crate::inventory::Component;

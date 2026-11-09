@@ -29,7 +29,6 @@ use tauri::AppHandle;
 use tauri::Emitter as _;
 use tauri::Manager as _;
 use tauri_plugin_notification::NotificationExt as _;
-use vigil_core::AgentKind;
 use vigil_core::Cancel;
 use vigil_core::Config;
 use vigil_core::Confirmed;
@@ -47,6 +46,7 @@ use vigil_core::last_sweep_started;
 use vigil_core::plan_fix;
 use vigil_core::run_fix;
 use vigil_core::sweep;
+use vigil_core::target_label;
 use vigil_core::target_names;
 
 use crate::tray;
@@ -127,12 +127,14 @@ pub(crate) enum Status {
     Fixing {
         /// What it fixes, one line.
         title: String,
-        /// Where it runs: "this Mac", the repository, or the server.
-        destination: String,
-        /// The agent applying it.
-        agent: AgentKind,
-        /// Its current step, or `None` before the first.
-        step: Option<FixProgress>,
+        /// Its target, as `target_label` shows it: "This Mac", `owner/name`, the server.
+        place: String,
+        /// Its steps' labels, in order ([`FixProgress::labels`]).
+        labels: [String; 3],
+        /// The current step, an index into `labels`.
+        at: usize,
+        /// The agent's log, once the agent runs.
+        log: Option<PathBuf>,
         /// When it started.
         started: Timestamp,
         /// When the current step started.
@@ -352,17 +354,6 @@ fn run(app: &AppHandle, config: Result<Config, String>, cancel: &Cancel) -> Stat
     }
 }
 
-/// Moves a running fix's status on to step `progress`.
-fn advance_fix(status: &mut Status, progress: FixProgress) {
-    if let Status::Fixing {
-        step, step_started, ..
-    } = status
-    {
-        *step = Some(progress);
-        *step_started = Timestamp::now();
-    }
-}
-
 /// Moves a running sweep's status on by one progress event: a new target finishes the one
 /// before it.
 fn advance(status: &mut Status, progress: &Progress<'_>) {
@@ -419,9 +410,11 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
     let now = Timestamp::now();
     let cancel = app.state::<Runner>().claim(Status::Fixing {
         title: plan.fix().summary.clone(),
-        destination: plan.destination().to_owned(),
-        agent: plan.agent(),
-        step: None,
+        place: target_label(plan.target()).to_owned(),
+        labels: FixProgress::labels(plan.agent()),
+        // Claimed means started: the first step is preparing, whatever `run_fix` reports.
+        at: FixProgress::Preparing.step(),
+        log: None,
         started: now,
         step_started: now,
     })?;
@@ -429,6 +422,23 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
     let app = app.clone();
     thread::spawn(move || fix_thread(&app, key, &plan, &cancel));
     Ok(())
+}
+
+/// Moves a running fix's status on to step `progress`, keeping the agent's log once it runs.
+fn advance_fix(status: &mut Status, progress: FixProgress) {
+    if let Status::Fixing {
+        at,
+        log,
+        step_started,
+        ..
+    } = status
+    {
+        *at = progress.step();
+        if let FixProgress::Agent { log: agent_log, .. } = progress {
+            *log = Some(agent_log);
+        }
+        *step_started = Timestamp::now();
+    }
 }
 
 /// Runs a claimed fix, then tells the popover how it ended.
@@ -443,8 +453,8 @@ fn fix_thread(app: &AppHandle, key: FindingKey, plan: &FixPlan, cancel: &Cancel)
             runner.data_dir(),
             plan,
             Confirmed::Asked,
-            cancel,
             &mut progress,
+            cancel,
         )
         .map_err(|e| e.to_string())
     }))
@@ -555,6 +565,8 @@ pub(crate) fn schedule(app: AppHandle) {
 mod tests {
     use super::*;
 
+    use vigil_core::AgentKind;
+
     #[test]
     fn a_new_target_finishes_the_one_before_it() {
         let mut status = Status::Sweeping {
@@ -640,9 +652,10 @@ mod tests {
     fn fixing() -> Status {
         Status::Fixing {
             title: "t".to_owned(),
-            destination: "this Mac".to_owned(),
-            agent: AgentKind::Grok,
-            step: None,
+            place: "This Mac".to_owned(),
+            labels: FixProgress::labels(AgentKind::Grok),
+            at: 0,
+            log: None,
             started: Timestamp::UNIX_EPOCH,
             step_started: Timestamp::UNIX_EPOCH,
         }
@@ -651,18 +664,28 @@ mod tests {
     #[test]
     fn a_fix_moves_through_its_steps() {
         let mut status = fixing();
+        let before = Timestamp::now();
+        let log = PathBuf::from("/fixes/x/agent.log");
+        advance_fix(
+            &mut status,
+            FixProgress::Agent {
+                agent: AgentKind::Grok,
+                log: log.clone(),
+            },
+        );
         advance_fix(&mut status, FixProgress::Recording);
         let Status::Fixing {
-            step, step_started, ..
+            at,
+            log: kept,
+            step_started,
+            ..
         } = status
         else {
             panic!("still fixing");
         };
-        assert_eq!(step, Some(FixProgress::Recording));
-        assert!(
-            step_started > Timestamp::UNIX_EPOCH,
-            "each step restarts the clock"
-        );
+        assert_eq!(at, 2);
+        assert_eq!(kept, Some(log), "the agent's log is kept past its step");
+        assert!(step_started >= before, "each step restarts the clock");
         let mut idle = Status::Idle;
         advance_fix(&mut idle, FixProgress::Recording);
         assert!(matches!(idle, Status::Idle), "only a running fix advances");
