@@ -701,6 +701,17 @@ mod tests {
     }
 
     #[test]
+    fn the_fix_line_shows_only_when_there_is_a_fix() {
+        let with = page(vec![mac(vec![open(1, Severity::High, false)])]);
+        assert!(with.contains("<b>Fix:</b> upgrade it"));
+
+        let mut bare = open(1, Severity::High, false);
+        bare.fix = String::new();
+        let without = page(vec![mac(vec![bare])]);
+        assert!(!without.contains("<b>Fix:</b>"));
+    }
+
+    #[test]
     fn agent_text_stays_text() {
         let mut o = open(1, Severity::High, false);
         o.explanation = "<script>alert('x')</script> & \"q\"".to_owned();
