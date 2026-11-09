@@ -15,6 +15,7 @@ mod tray;
 use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
 
 use jiff::Timestamp;
 use serde::Serialize;
@@ -81,9 +82,16 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // The popover closes when it loses focus, like a menu.
-            if let WindowEvent::Focused(false) = event {
-                tray::hide_on_blur(window);
+            match event {
+                // The popover closes when it loses focus, like a menu.
+                WindowEvent::Focused(false) => tray::hide_on_blur(window),
+                // The menu bar changed between light and dark: switch the icon's palette. Off
+                // the main thread, where clicks arrive: an idle refresh reads every report.
+                WindowEvent::ThemeChanged(_) => {
+                    let app = window.app_handle().clone();
+                    thread::spawn(move || tray::refresh(&app));
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())

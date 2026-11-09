@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/images/logo.png" width="112" alt="Vigil's mark: a spiral arm of dots">
+<img src="docs/images/logo.png" width="112" alt="Vigil's mark: a vortex of light streaks on three arms">
 
 # Vigil
 
@@ -87,7 +87,7 @@ example targets.
   </tr>
 </table>
 
-The menu-bar icon is Vigil's mark, a spiral of dots, and its colour carries the state:
+The menu-bar icon is the vortex in brief, three streaks on each arm, and its colours carry the state:
 
 <p align="center">
   <img src="docs/images/tray-states.png" alt="The six menu-bar icon states: clear, low, medium, high, sweeping and failed" width="100%">

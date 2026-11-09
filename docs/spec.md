@@ -16,7 +16,7 @@ and the user can approve a fix the agent then performs.
 
 | Area | Decision |
 |---|---|
-| Name | Vigil (2026-11-07; was Ancient Protector, which the owner found not technical enough). Mark: one spiral arm of dots growing outward, a sweep spreading from a point; its SVGs and `marks.py`, which draws them and says how the PNGs are rendered, in `app/src-tauri/icons/src/`. The data folder and the Keychain service use the bundle id `io.github.georgiosdelkos.vigil`, as `vigil` alone is generic enough for another app to share |
+| Name | Vigil (2026-11-07; was Ancient Protector, which the owner found not technical enough). Mark (changed 2026-11-09, the owner's choice): the main view's vortex. The app icon is the Findings view's vortex itself on the dark tile (`vortex.html`); the tray keeps three streaks on each of its three arms (`marks.py`, which also says how the PNGs are rendered), both in `app/src-tauri/icons/src/`. The data folder and the Keychain service use the bundle id `io.github.georgiosdelkos.vigil`, as `vigil` alone is generic enough for another app to share |
 | Outcome | Report, and fix on per-finding approval |
 | Who decides "affected" | The agent. The app only narrows input |
 | Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
@@ -433,9 +433,12 @@ Built in step 9a (2026-11-06):
 
 - Settings were first only shown, with "Edit settings" opening `config.toml`; step 9b edits
   them in the popover. The config is read again on every refresh.
-- The tray icon is the mark: in the menu bar's own colour (nothing open), slate, amber or red
-  (worst open severity: low, medium, or critical and high), blue (sweeping), and an unfinished
-  spiral in the bar's colour (the last sweep failed or a target got no verdict).
+- The tray icon is the mark: in the menu bar's own colour (nothing open); grey inner streaks
+  with blue, yellow or pink outer ones (worst open severity: low, medium, or critical and
+  high); all cyan (sweeping); and with one arm missing, in the bar's colour (the last sweep
+  failed or a target got no verdict). The coloured icons come in two palettes switched with the
+  menu bar's appearance (decided 2026-11-09): neon on a dark bar, the same hues deepened to 3:1
+  contrast on a light one.
 - A left click on the icon shows or hides the popover; a right click opens a menu with only
   Quit Vigil (asked for 2026-11-09), which quits as the popover's Quit does.
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
