@@ -220,23 +220,27 @@ fn stop(child: &mut Child) {
     drop(child.wait());
 }
 
-/// Sends `signal` to process group `group` and to each process in `tree`, except pids 0 and 1
-/// and this process: `kill` with pid 0 signals the sender's own process group, pid 1 is
-/// launchd, and neither can be a program this process started. A pid in `tree` that
+/// Sends `signal` to process group `group` and to each process in `tree` that
+/// [`signallable`] keeps. A pid in `tree` that
 /// exited during the grace period could have been reused by then; accepted, as macOS has been
 /// seen to hand out pids in increasing order (observed, not documented) and the period is
 /// seconds.
 fn signal(group: u32, tree: &BTreeSet<u32>, signal: &str) {
     signal_group(group, signal);
-    let own = std::process::id();
-    let pids: Vec<String> = tree
-        .iter()
-        .filter(|&&pid| pid > 1 && pid != own)
-        .map(u32::to_string)
-        .collect();
+    let pids = signallable(tree, std::process::id());
     if !pids.is_empty() {
         kill(&["-s", signal, "--"], &pids);
     }
+}
+
+/// The pids in `tree` it is safe to signal, as `kill` arguments: all but 0, 1 and `own`. `kill`
+/// with pid 0 signals the sender's own process group, pid 1 is launchd, and none of the three
+/// can be a program this process started.
+fn signallable(tree: &BTreeSet<u32>, own: u32) -> Vec<String> {
+    tree.iter()
+        .filter(|&&pid| pid > 1 && pid != own)
+        .map(u32::to_string)
+        .collect()
 }
 
 /// Sends `signal` to every process in `group`.
@@ -277,6 +281,11 @@ fn descendants(root: u32) -> BTreeSet<u32> {
             Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
         })
         .collect();
+    tree(&pairs, root)
+}
+
+/// The pids in `pairs` (pid, parent pid) descended from `root`.
+fn tree(pairs: &[(u32, u32)], root: u32) -> BTreeSet<u32> {
     let mut found = BTreeSet::new();
     let mut frontier = vec![root];
     while let Some(parent) = frontier.pop() {
@@ -745,6 +754,20 @@ mod tests {
         assert!(tmp.path().join(RUNNING).exists());
         drop(running);
         assert!(!tmp.path().join(RUNNING).exists());
+    }
+
+    #[test]
+    fn the_tree_holds_the_root_s_descendants_and_nothing_else() {
+        // 10 started 11 and 12, and 11 started 13; 20 and its child 21 are unrelated.
+        let pairs = [(11, 10), (12, 10), (13, 11), (20, 1), (21, 20), (10, 1)];
+        assert_eq!(tree(&pairs, 10), BTreeSet::from([11, 12, 13]));
+        assert_eq!(tree(&pairs, 13), BTreeSet::new());
+    }
+
+    #[test]
+    fn neither_pid_0_nor_1_nor_this_process_is_ever_signalled() {
+        let tree = BTreeSet::from([0, 1, 2, 500, 900]);
+        assert_eq!(signallable(&tree, 500), ["2", "900"]);
     }
 
     #[test]
