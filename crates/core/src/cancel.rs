@@ -220,14 +220,21 @@ fn stop(child: &mut Child) {
     drop(child.wait());
 }
 
-/// Sends `signal` to process group `group` and to each process in `tree`. A pid in `tree` that
+/// Sends `signal` to process group `group` and to each process in `tree`, except pids 0 and 1
+/// and this process: `kill` with pid 0 signals the sender's own process group, pid 1 is
+/// launchd, and neither can be a program this process started. A pid in `tree` that
 /// exited during the grace period could have been reused by then; accepted, as macOS has been
 /// seen to hand out pids in increasing order (observed, not documented) and the period is
 /// seconds.
 fn signal(group: u32, tree: &BTreeSet<u32>, signal: &str) {
     signal_group(group, signal);
-    if !tree.is_empty() {
-        let pids: Vec<String> = tree.iter().map(u32::to_string).collect();
+    let own = std::process::id();
+    let pids: Vec<String> = tree
+        .iter()
+        .filter(|&&pid| pid > 1 && pid != own)
+        .map(u32::to_string)
+        .collect();
+    if !pids.is_empty() {
         kill(&["-s", signal, "--"], &pids);
     }
 }
