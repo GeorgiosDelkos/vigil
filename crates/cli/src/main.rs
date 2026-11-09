@@ -35,6 +35,7 @@ use vigil_core::report_markdown;
 use vigil_core::run_fix;
 use vigil_core::sweep;
 use vigil_core::undismiss;
+use vigil_core::write_html_report;
 
 /// Sweep this Mac, GitHub repos and servers for known vulnerabilities.
 #[derive(Debug, Parser)]
@@ -95,6 +96,16 @@ enum Command {
         /// One JSON object per target instead of text.
         #[arg(long)]
         json: bool,
+    },
+    /// Write an HTML page with every target's open findings and issues in full, the fixes
+    /// confirmed in the last 30 days and the targets, and print its path.
+    ///
+    /// The page is the data directory's report.html, replaced each time. It is one file that
+    /// loads nothing, so it works offline.
+    Report {
+        /// Open the page in the default browser.
+        #[arg(long)]
+        open: bool,
     },
     /// Hide a finding or issue from reports, for a reason.
     ///
@@ -163,6 +174,13 @@ fn main() -> anyhow::Result<()> {
                 print(&findings_text(&all));
             }
         }
+        Command::Report { open } => {
+            let path = write_html_report(&data_dir, &load_config(&data_dir, &home()?)?)?;
+            print(&path.display().to_string());
+            if open {
+                open_in_browser(&path)?;
+            }
+        }
         Command::Dismiss { key, reason } => {
             dismiss(&data_dir, key, &reason)?;
             print(&format!(
@@ -229,6 +247,16 @@ fn run_sweep(data_dir: &DataDir, config: &Config, targets: Targets<'_>) -> anyho
     if !failures.is_empty() {
         anyhow::bail!("sweep incomplete: {}", failures.join("; "));
     }
+    Ok(())
+}
+
+/// Opens `path` with the default app for its type, as Finder would.
+fn open_in_browser(path: &Path) -> anyhow::Result<()> {
+    let status = std::process::Command::new("/usr/bin/open")
+        .arg(path)
+        .status()
+        .context("run /usr/bin/open")?;
+    anyhow::ensure!(status.success(), "/usr/bin/open {} failed", path.display());
     Ok(())
 }
 
@@ -586,8 +614,11 @@ mod tests {
             advisories: Vec::new(),
             place: String::new(),
             known_exploited: false,
+            confidence: None,
+            evidence: String::new(),
             explanation: String::new(),
             fix: "upgrade curl".to_owned(),
+            steps: Vec::new(),
             commands: Vec::new(),
             first_seen: None,
             new: false,
