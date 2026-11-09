@@ -16,7 +16,8 @@
 [history]
 since = "all"
 
-# Folders searched for lockfiles (Cargo.lock, package-lock.json, uv.lock, go.sum, ...).
+# Folders searched for lockfiles: Cargo.lock, package-lock.json, npm-shrinkwrap.json, uv.lock
+# and poetry.lock.
 [mac]
 project_dirs = []
 
