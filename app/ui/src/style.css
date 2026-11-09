@@ -325,6 +325,9 @@ select:focus-visible {
   grid-template-columns: 22px minmax(0, 1fr) auto;
 }
 .target .open {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   line-height: 22px;
   font-size: 11.5px;
   color: var(--l2);
