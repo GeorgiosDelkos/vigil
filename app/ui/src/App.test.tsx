@@ -72,7 +72,12 @@ const two = () =>
   });
 
 /** What the spiral's canvas drew, and whether the test asks for reduced motion. */
-const canvas = vi.hoisted(() => ({ dots: 0, reduce: false }));
+const canvas = vi.hoisted(() => ({
+  dots: 0,
+  reduce: false,
+  /** Reports a new size for the spiral's canvas, as the browser's ResizeObserver would. */
+  resize: undefined as ((width: number, height: number) => void) | undefined,
+}));
 
 /** A 2D context that counts the dots drawn: jsdom has none. */
 const context = {
@@ -99,6 +104,19 @@ beforeEach(() => {
     configurable: true,
     value: () => context,
   });
+  canvas.resize = undefined;
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        canvas.resize = (width, height) =>
+          callback([{ contentRect: { width, height } } as ResizeObserverEntry], this);
+      }
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
   vi.stubGlobal("matchMedia", (query: string) => ({
     media: query,
     matches: canvas.reduce && query === "(prefers-reduced-motion: reduce)",
@@ -998,6 +1016,10 @@ describe("the main view", () => {
     expect(canvas.dots).toBe(drawn);
     expect(frames).not.toHaveBeenCalled();
     frames.mockRestore();
+
+    // A banner taking room resizes the canvas; the still frame is drawn again to fit.
+    canvas.resize?.(360, 300);
+    expect(canvas.dots).toBe(drawn * 2);
   });
 
   it("turns while a sweep runs, and stops while the popover is hidden", async () => {

@@ -254,6 +254,14 @@ function reducedMotion(): boolean {
  * then it draws one still frame. */
 function Spiral(props: { scene: Scene; turning: boolean; pulsing: boolean; visible: boolean }) {
   const [canvas, setCanvas] = createSignal<HTMLCanvasElement>();
+  // Its size in CSS pixels, which changes when a banner above it takes room.
+  const [box, setBox] = createSignal<Box>({ width: 0, height: 0 });
+  const watch = new ResizeObserver(([entry]) => {
+    if (entry !== undefined) {
+      setBox({ width: entry.contentRect.width, height: entry.contentRect.height });
+    }
+  });
+  onCleanup(() => watch.disconnect());
   const calm = reducedMotion();
 
   let frame = 0;
@@ -264,12 +272,14 @@ function Spiral(props: { scene: Scene; turning: boolean; pulsing: boolean; visib
     if (target === undefined) {
       return;
     }
+    watch.observe(target);
+    const g = fit(target, box());
     const scene = props.scene;
     const turning = props.turning;
     const moving = !calm && props.visible && (turning || props.pulsing);
     // In milliseconds per radian of turn, and of the pulse's sine; the mockup's values.
     const draw = (time: number) =>
-      paint(target, scene, {
+      paint(g, box(), scene, {
         spin: moving && turning ? time / 9000 : 0,
         beat: moving ? 0.75 + 0.25 * Math.sin(time / 300) : 1,
       });
@@ -286,21 +296,29 @@ function Spiral(props: { scene: Scene; turning: boolean; pulsing: boolean; visib
   return <canvas ref={setCanvas} aria-hidden="true" />;
 }
 
-function paint(canvas: HTMLCanvasElement, scene: Scene, motion: { spin: number; beat: number }) {
+type Box = { readonly width: number; readonly height: number };
+
+/** Sizes the canvas's pixels to its box on this display, and returns its context. */
+function fit(canvas: HTMLCanvasElement, box: Box): CanvasRenderingContext2D {
   const ratio = window.devicePixelRatio || 1;
-  const width = canvas.clientWidth;
-  const height = canvas.clientHeight;
-  if (canvas.width !== Math.round(width * ratio)) {
-    canvas.width = Math.round(width * ratio);
-    canvas.height = Math.round(height * ratio);
-  }
+  canvas.width = Math.round(box.width * ratio);
+  canvas.height = Math.round(box.height * ratio);
   const g = canvas.getContext("2d");
   if (g === null) {
     throw new Error("the spiral's canvas has no 2D context");
   }
   g.setTransform(ratio, 0, 0, ratio, 0, 0);
-  g.clearRect(0, 0, width, height);
-  for (const dot of dots(scene, { width, height, ...motion })) {
+  return g;
+}
+
+function paint(
+  g: CanvasRenderingContext2D,
+  box: Box,
+  scene: Scene,
+  motion: { spin: number; beat: number },
+) {
+  g.clearRect(0, 0, box.width, box.height);
+  for (const dot of dots(scene, { ...box, ...motion })) {
     paintDot(g, dot);
   }
   g.globalAlpha = 1;
