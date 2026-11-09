@@ -635,6 +635,15 @@ kbd {
 .steps {
   display: grid;
 }
+.busy-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.busy-foot .hint {
+  margin: 0;
+}
 .step {
   position: relative;
   display: grid;

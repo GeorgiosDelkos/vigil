@@ -7,6 +7,7 @@ use anyhow::Context as _;
 use clap::ArgGroup;
 use clap::Parser;
 use clap::Subcommand;
+use vigil_core::Cancel;
 use vigil_core::Config;
 use vigil_core::Confirmed;
 use vigil_core::DataDir;
@@ -24,6 +25,7 @@ use vigil_core::Package;
 use vigil_core::Product;
 use vigil_core::Progress;
 use vigil_core::SshConn;
+use vigil_core::SweepError;
 use vigil_core::Targets;
 use vigil_core::dismiss;
 use vigil_core::latest;
@@ -178,9 +180,44 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A cancel request that Ctrl-C makes. The agent runs in its own process group, so the
+/// terminal's Ctrl-C reaches only this process, which then stops the agent and everything it
+/// started and cleans up: a few seconds at most. A second Ctrl-C exits at once, and so does a
+/// closed terminal or `kill`; the core's watchdog then stops the agent within a few seconds,
+/// and the next sweep removes the unfinished folder.
+fn cancel_on_ctrl_c() -> anyhow::Result<Cancel> {
+    let cancel = Cancel::new();
+    let handler = cancel.clone();
+    ctrlc::set_handler(move || {
+        if handler.is_cancelled() {
+            // 128 + SIGINT, the shell's code for a command stopped by Ctrl-C.
+            std::process::exit(130);
+        }
+        status("stopping; Ctrl-C again to quit at once");
+        handler.cancel();
+    })
+    .context("handle Ctrl-C")?;
+    Ok(cancel)
+}
+
 /// Sweeps `targets` and prints each report; fails when any target swept has no valid verdict.
 fn run_sweep(data_dir: &DataDir, config: &Config, targets: Targets<'_>) -> anyhow::Result<()> {
-    let reports = sweep(data_dir, config, targets, &mut |p| show_progress(&p))?;
+    let cancel = cancel_on_ctrl_c()?;
+    let reports = match sweep(
+        data_dir,
+        config,
+        targets,
+        &mut |p| show_progress(&p),
+        &cancel,
+    ) {
+        // The sweep has stopped its agent and removed its unfinished folder; 130 is the code
+        // a shell gives a command stopped by Ctrl-C, as a second Ctrl-C exits.
+        Err(SweepError::Cancelled) => {
+            status("the sweep was cancelled");
+            std::process::exit(130);
+        }
+        swept => swept?,
+    };
     let mut failures = Vec::new();
     for report in &reports {
         print(&report_markdown(report));
@@ -289,7 +326,7 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
     } else {
         Confirmed::Asked
     };
-    let record = run_fix(data_dir, &plan, confirmed)?;
+    let record = run_fix(data_dir, &plan, confirmed, &cancel_on_ctrl_c()?)?;
     let pull_request = record
         .pull_request
         .as_ref()

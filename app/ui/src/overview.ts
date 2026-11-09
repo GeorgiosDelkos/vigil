@@ -26,6 +26,8 @@ export type Status =
       readonly ticks: readonly number[];
       /** The current step has no known length (the agent is running). */
       readonly open_ended: boolean;
+      /** The user cancelled it, and it is stopping its agent and cleaning up. */
+      readonly stopping: boolean;
       readonly started: string;
       readonly step_started: string;
     }

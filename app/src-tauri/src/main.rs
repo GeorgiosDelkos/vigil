@@ -20,6 +20,7 @@ use serde::Serialize;
 use tauri::ActivationPolicy;
 use tauri::AppHandle;
 use tauri::Manager as _;
+use tauri::RunEvent;
 use tauri::State;
 use tauri::WindowEvent;
 use tauri_plugin_autostart::MacosLauncher;
@@ -54,6 +55,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             overview,
             sweep_now,
+            cancel_sweep,
             open_config,
             quit,
             fix_preview,
@@ -79,8 +81,19 @@ fn main() {
                 tray::hide_on_blur(window);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("the app's context and plugins are valid");
+        .build(tauri::generate_context!())
+        .expect("the app's context and plugins are valid")
+        .run(|app, event| {
+            // An exit request while a sweep or fix runs goes through `runner::quit`, which
+            // cancels it and exits once it has ended. A quit that skips this event (logout,
+            // `kill`, a crash) is covered by the core's watchdog, which stops the programs.
+            if let RunEvent::ExitRequested { api, .. } = event
+                && runner::must_wait_to_quit(app)
+            {
+                api.prevent_exit();
+                runner::quit(app);
+            }
+        });
 }
 
 /// What the popover shows.
@@ -124,6 +137,8 @@ enum StatusView {
         ticks: Vec<f64>,
         /// Whether the current step has no known length, so the bar moves instead of filling.
         open_ended: bool,
+        /// Whether the user cancelled it, and it is stopping.
+        stopping: bool,
         started: Timestamp,
         step_started: Timestamp,
     },
@@ -149,6 +164,7 @@ impl StatusView {
                 pending,
                 thousandths,
                 open_ended,
+                stopping,
                 started,
                 step_started,
             } => {
@@ -165,6 +181,7 @@ impl StatusView {
                     target_end: position * 100 / total.max(1),
                     ticks: ticks(total),
                     open_ended,
+                    stopping,
                     step_started,
                     current: current.map(|t| target_label(&t).to_owned()),
                     done: labels(done),
@@ -202,7 +219,7 @@ const MAX_MARKED_TARGETS: usize = 12;
 )]
 fn overview(runner: State<'_, Runner>) -> Overview {
     let status = runner.status();
-    let busy = matches!(status, Status::Sweeping { .. } | Status::Fixing { .. });
+    let busy = status.is_busy();
     let config_path = runner.data_dir().config_file();
     let (config, problem) = match Config::load_or_default(&config_path, runner.home()) {
         Ok(config) => (Some(config), None),
@@ -236,6 +253,16 @@ fn sweep_now(app: AppHandle) -> Result<(), String> {
     runner::start(&app).map_err(ToString::to_string)
 }
 
+/// Cancels the running sweep (see [`runner::cancel_sweep`]).
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn cancel_sweep(app: AppHandle) -> Result<(), String> {
+    runner::cancel_sweep(&app).map_err(ToString::to_string)
+}
+
 /// Opens `config.toml` in the user's text editor, creating the default one first. Async, so
 /// waiting for `open` never stalls the UI.
 #[tauri::command(async)]
@@ -266,7 +293,7 @@ fn open_config(runner: State<'_, Runner>) -> Result<(), String> {
     reason = "Tauri hands command arguments over by value"
 )]
 fn quit(app: AppHandle) {
-    app.exit(0);
+    runner::quit(&app);
 }
 
 /// What the detail view shows before the user confirms a fix.
@@ -351,6 +378,7 @@ mod tests {
             pending: pending.iter().map(|&t| t.to_owned()).collect(),
             thousandths: 500,
             open_ended: true,
+            stopping: false,
             started,
             step_started: started,
         };

@@ -108,7 +108,11 @@ export function App() {
               )}
             </Match>
             <Match when={o().busy}>
-              <Busy status={o().status} now={now()} />
+              <Busy
+                status={o().status}
+                now={now()}
+                onCancel={() => run(() => invoke("cancel_sweep"))}
+              />
             </Match>
             <Match when={o().problem !== null && o().targets.length === 0}>
               <Problem
@@ -583,7 +587,7 @@ function Bar(props: {
   );
 }
 
-function Busy(props: { status: Status; now: Date }) {
+function Busy(props: { status: Status; now: Date; onCancel: () => void }) {
   return (
     <Switch>
       <Match when={props.status.state === "sweeping" ? props.status : null}>
@@ -639,7 +643,16 @@ function Busy(props: { status: Status; now: Date }) {
                 )}
               </For>
             </div>
-            <p class="hint">You can close this; a notification tells you what it finds.</p>
+            <div class="busy-foot">
+              <p class="hint">
+                {s().stopping
+                  ? "Stopping the agent and cleaning up…"
+                  : "You can close this; a notification tells you what it finds."}
+              </p>
+              <button type="button" class="btn" disabled={s().stopping} onClick={props.onCancel}>
+                {s().stopping ? "Stopping…" : "Cancel"}
+              </button>
+            </div>
           </section>
         )}
       </Match>
