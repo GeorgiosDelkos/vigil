@@ -388,7 +388,7 @@ describe("the tabs", () => {
           label: "This Mac",
           kind: "mac",
           swept: "2026-11-06T11:00:00Z",
-          components: 42,
+          checked: "42 packages checked",
           counts: { critical: 0, high: 6, medium: 0, low: 0 },
           open: 6,
           dismissed: 1,
@@ -397,7 +397,7 @@ describe("the tabs", () => {
           label: "web",
           kind: "server",
           swept: "2026-11-06T11:00:00Z",
-          components: 3,
+          checked: "3 packages checked",
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
           dismissed: 0,
@@ -406,7 +406,7 @@ describe("the tabs", () => {
           label: "me/app",
           kind: "repo",
           swept: null,
-          components: 0,
+          checked: null,
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
           dismissed: 0,
@@ -417,14 +417,16 @@ describe("the tabs", () => {
     render(() => <App />);
     fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
     expect(
-      within(row("This Mac")).getByText(/42 checked · swept .* ago · 1 dismissed/),
+      within(row("This Mac")).getByText(/42 packages checked · swept .* ago · 1 dismissed/),
     ).toBeTruthy();
-    expect(row("This Mac").querySelectorAll(".mini i")).toHaveLength(4);
-    expect(within(row("This Mac")).getByLabelText("6 open")).toBeTruthy();
+    // Only the severities it has, each named, and the open count in words.
+    expect(row("This Mac").querySelector(".sevs")?.textContent).toBe("6 high");
+    expect(row("This Mac").querySelector(".open")?.textContent).toBe("6 open");
     expect(row("web").textContent).not.toContain("dismissed");
-    expect(row("web").querySelector(".mini svg")).not.toBeNull();
+    expect(row("web").querySelector(".sevs")).toBeNull();
+    expect(row("web").querySelector(".open svg")).not.toBeNull();
     expect(within(row("me/app")).getByText("not swept yet")).toBeTruthy();
-    expect(row("me/app").querySelector(".mini svg")).toBeNull();
+    expect(row("me/app").querySelector(".open")?.textContent).toBe("");
   });
 });
 
@@ -445,12 +447,14 @@ describe("the rows", () => {
     expect(within(a).getByText("GHSA-a")).toBeTruthy();
     expect(within(a).getByText(/This Mac · \/Users\/me\/code/)).toBeTruthy();
     expect(within(a).getByText("Update to 1.0.1")).toBeTruthy();
-    expect(within(a).getByText("Exploited")).toBeTruthy();
+    // Tags sit on the advisories' line, so the age alone fills the right column.
+    expect(a.querySelector(".tagline")?.textContent).toBe("GHSA-aExploited");
     expect(within(a).queryByText("New")).toBeNull();
-    expect(a.querySelector(".age")).not.toBeNull();
+    expect(a.querySelector(".age")?.textContent).not.toBe("");
     const b = screen.getByText("pkg-b").closest("button") as HTMLElement;
     expect(within(b).getByText("New")).toBeTruthy();
-    expect(b.querySelector(".ver, .id, .age")).toBeNull();
+    expect(b.querySelector(".ver, .id")).toBeNull();
+    expect(b.querySelector(".age")?.textContent).toBe("");
     expect(within(b).getByText("This Mac").textContent).toBe("This Mac");
   });
 });

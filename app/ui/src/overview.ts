@@ -55,7 +55,8 @@ export type TargetLine = {
   readonly label: string;
   readonly kind: "mac" | "repo" | "server";
   readonly swept: string | null;
-  readonly components: number;
+  /** What its last sweep checked ("139 packages checked"); null before a sweep. */
+  readonly checked: string | null;
   readonly counts: Counts;
   readonly open: number;
   readonly dismissed: number;

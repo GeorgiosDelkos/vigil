@@ -283,6 +283,24 @@ select:focus-visible {
 }
 .list {
   display: grid;
+  align-content: start;
+}
+/* The popover's own sections keep their height; a list takes what is left and scrolls in
+   it, so the summary and tabs stay in view. A flex item with overflow hidden would shrink
+   to the space left and cut its rows off. */
+.pop > * {
+  flex-shrink: 0;
+}
+.pop > .pane {
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.tagline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  align-items: center;
 }
 .row {
   position: relative;
@@ -298,7 +316,23 @@ select:focus-visible {
 }
 .row.static {
   grid-template-columns: 22px minmax(0, 1fr) auto;
-  align-items: center;
+}
+.target .open {
+  line-height: 22px;
+  font-size: 11.5px;
+  color: var(--l2);
+  white-space: nowrap;
+}
+.target .open b {
+  color: var(--l1);
+  font-weight: 600;
+}
+.target .open .icon {
+  color: var(--ok);
+}
+.sevs {
+  gap: 4px 10px;
+  font-size: 11px;
 }
 .row + .row::before {
   content: "";
@@ -357,12 +391,9 @@ button.row:hover {
 .fixline {
   margin: 0;
 }
-.side {
-  display: grid;
-  gap: 5px;
-  justify-items: end;
-}
 .age {
+  /* The title's line height, so the age sits level with it on every row. */
+  line-height: 18px;
   font-size: 11px;
   color: var(--l3);
   font-variant-numeric: tabular-nums;
@@ -393,30 +424,6 @@ button.row:hover {
   place-items: center;
   background: rgba(255, 255, 255, 0.08);
   color: var(--l2);
-}
-.mini {
-  display: flex;
-  gap: 3px;
-  align-items: center;
-}
-.mini i {
-  display: block;
-  width: 6px;
-  height: 14px;
-  border-radius: 2px;
-}
-.mini .critical {
-  background: var(--critical);
-}
-.mini .high {
-  background: var(--high);
-}
-.mini .medium {
-  background: var(--medium);
-}
-.mini .low {
-  background: var(--low);
-  opacity: 0.6;
 }
 
 /* Detail */
