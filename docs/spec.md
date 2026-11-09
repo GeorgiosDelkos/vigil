@@ -69,6 +69,7 @@ Core modules (one concept each):
 ```
 ~/Library/Application Support/io.github.georgiosdelkos.vigil/
   config.toml
+  report.html (the HTML report, replaced each time it is asked for)
   prompts/{sweep,sweep-github,sweep-server,fix}.md
   feeds/osv/<id>.json, feeds/nvd/<product>.json
   state/.lock, state/dismissals.json, state/fixes.jsonl
@@ -522,11 +523,32 @@ Built in step 9b (2026-11-06):
   the Tauri commands mocked, checking that each control sends the right command and shows
   what Rust returns.
 
+HTML report (asked for 2026-11-09: "click on a button and get that opened on the browser
+with all the details", dark, not white):
+
+- `write_html_report` writes `report.html` in the data directory, replacing the last one, and
+  the app's `open_report` command (for the popover's report button) writes it and opens it
+  with `/usr/bin/open`. It renders `latest` through `popover_view`, so it shows what `vigil
+  findings` and the popover show: the headline, the key numbers (need you, exploited, open,
+  fixed in 30 days, dismissed), a callout for each finding exploited in the wild with the
+  command to run first, the open findings and issues under "Needs you" (exploited, critical
+  or high) and "Lower", each expanding to its explanation, advisories, installed version,
+  place, confidence, first seen, fix status, key, the agent's evidence, the fix's summary,
+  steps and commands with Copy buttons; then a table of targets and one of the fixes
+  confirmed in the last 30 days, and the sources. Times are in UTC.
+- Dark only, after the approved mockup: the night ground with faint violet and cyan light,
+  glass panels, neon severity colours, system fonts.
+- One file that loads nothing: inline CSS, an inline SVG mark, and one inline script for the
+  Copy buttons. Its Content Security Policy allows no request and only that script, by hash.
+- Every text is HTML-escaped: it holds agent text and names from the target. Advisory ids
+  link only to NVD (CVE ids) or OSV.dev (other ids), and only when the id has a strict
+  shape; anything else, the agent's pull request URLs included, is plain text.
+
 ### CLI
 
-`vigil sweep [--target <id>]`, `findings [--json]`, `dismiss <key> --reason <text>`,
-`undismiss <key>`, `fix <key> [--yes]` (shows the fix and asks to confirm). Same core, same
-files.
+`vigil sweep [--target <id>]`, `findings [--json]`, `report [--open]`,
+`dismiss <key> --reason <text>`, `undismiss <key>`, `fix <key> [--yes]` (shows the fix and
+asks to confirm). Same core, same files.
 
 - `sweep --target` takes a report name (`mac`, `github:<owner>/<name>`, `server:<name>`) of a
   configured target and sweeps only it; an unknown name fails before anything runs.
@@ -541,6 +563,8 @@ files.
   `pull_request`) or `not_held`. Each report
   entry carries that `title`, so the tray app shows the same line. `--target` matches the
   report name exactly.
+- `report` writes the HTML report (see UI) to `report.html` in the data directory and prints
+  its path; `--open` also opens it in the default browser.
 
 ## Risks to keep visible
 
