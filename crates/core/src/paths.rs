@@ -37,6 +37,11 @@ impl DataDir {
         self.root.join("config.toml")
     }
 
+    /// Returns the path of `report.html`, the HTML report.
+    pub(crate) fn report_html_file(&self) -> PathBuf {
+        self.root.join("report.html")
+    }
+
     /// Returns the folder holding one subfolder per sweep.
     pub(crate) fn sweeps_dir(&self) -> PathBuf {
         self.root.join("sweeps")
