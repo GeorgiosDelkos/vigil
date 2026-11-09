@@ -259,6 +259,7 @@ select:focus-visible {
   align-items: center;
   justify-content: center;
   gap: 5px;
+  white-space: nowrap;
 }
 .seg button[aria-selected="true"] {
   background: rgba(255, 255, 255, 0.13);
