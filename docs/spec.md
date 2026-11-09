@@ -437,7 +437,7 @@ Built in step 9a (2026-11-06):
   spiral in the bar's colour (the last sweep failed or a target got no verdict).
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
   counts by severity, the six most severe open findings with their keys and fixes on hover, a
-  Fixed tab with the fixes confirmed in the last 30 days,
+  Fixed tab with the confirmed fixes that finished in the last 30 days,
   Sweep now, Edit settings, Launch at login (the autostart plugin's LaunchAgent) and Quit. It
   asks the app for an overview whenever it is shown and on every `changed` event.
 - One sweep at a time: the app checks and claims "sweeping" under one lock, and the core's

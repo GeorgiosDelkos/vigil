@@ -56,6 +56,9 @@ const HEREDOC_END: &str = "VIGIL_END";
 /// The JSON Schema of `result.json`, written into each fix folder for the agent.
 const RESULT_SCHEMA: &str = include_str!("fix-result.schema.json");
 
+/// The fix history's file in `state/`, written by [`append`] and read by [`runs`].
+const FIXES_FILE: &str = "fixes.jsonl";
+
 /// A checked fix, ready to show the user and, once confirmed, to run.
 #[derive(Debug)]
 pub struct FixPlan {
@@ -430,18 +433,13 @@ fn read_result(path: &Path, repo: Option<&str>) -> Result<AgentResult, String> {
     })
 }
 
-/// Appends `record` to `state/fixes.jsonl` as one line, under the state lock. A last line cut
-/// short by a crash gets its line break first, so the new record is not glued onto it; the
-/// folder is synced too, as the dismissals writer does.
-/// The fix history's file in `state/`, written by [`append`] and read by [`runs`].
-const FIXES_FILE: &str = "fixes.jsonl";
-
 /// One recorded fix run, as the lifecycle reads it back.
 #[derive(Debug, Deserialize)]
 pub(crate) struct Run {
     pub(crate) key: FindingKey,
     pub(crate) target: String,
-    /// When the sweep it was planned from started; missing in records written before it was.
+    /// When the sweep it was planned from started; missing in records written before it was,
+    /// which therefore mark nothing and are never listed as confirmed.
     #[serde(default)]
     pub(crate) found: Option<Timestamp>,
     #[serde(default)]
@@ -480,6 +478,9 @@ pub(crate) fn runs(data_dir: &DataDir) -> Result<Vec<Run>, StateError> {
         .collect())
 }
 
+/// Appends `record` to `state/fixes.jsonl` as one line, under the state lock. A last line cut
+/// short by a crash gets its line break first, so the new record is not glued onto it; the
+/// folder is synced too, as the dismissals writer does.
 fn append(data_dir: &DataDir, record: &FixRecord) -> Result<(), FixError> {
     let line = serde_json::to_string(record).expect("a fix record serializes");
     lifecycle::locked(data_dir, |state| {

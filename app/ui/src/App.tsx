@@ -245,7 +245,7 @@ function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
   return (
     <Show
       when={props.items.length > 0}
-      fallback={<p class="quiet">No fixes confirmed in the last 30 days.</p>}
+      fallback={<p class="quiet">No confirmed fixes from the last 30 days.</p>}
     >
       <ul class="group list" aria-label="Fixed">
         <For each={props.items}>

@@ -12,7 +12,7 @@ use vigil_core::Confirmed;
 use vigil_core::DataDir;
 use vigil_core::Feeds;
 use vigil_core::FindingKey;
-use vigil_core::FixMark;
+use vigil_core::FixState;
 use vigil_core::History;
 use vigil_core::Inventory;
 use vigil_core::Latest;
@@ -194,6 +194,18 @@ fn run_sweep(data_dir: &DataDir, config: &Config, targets: Targets<'_>) -> anyho
     Ok(())
 }
 
+/// What a fix of an open finding came to, one line.
+fn fix_line(state: &FixState) -> String {
+    match state {
+        FixState::Reported {
+            pull_request: Some(url),
+            ..
+        } => format!("pull request open: {url}"),
+        FixState::Reported { at, .. } => format!("fix reported at {at}; the next sweep checks it"),
+        FixState::NotHeld { at } => format!("still found after a fix at {at}"),
+    }
+}
+
 /// The open and fixed findings per target, one line each, most severe first.
 fn findings_text(all: &[Latest]) -> String {
     let mut out = String::new();
@@ -220,20 +232,8 @@ fn findings_text(all: &[Latest]) -> String {
                 "  {:<8} {}  {}\n           fix: {}\n",
                 open.severity, open.key, open.title, open.fix
             ));
-            match &open.fix_state {
-                Some(FixMark::Reported {
-                    pull_request: Some(url),
-                    ..
-                }) => out.push_str(&format!("           pull request open: {url}\n")),
-                Some(FixMark::Reported { at, .. }) => {
-                    out.push_str(&format!(
-                        "           fix reported at {at}; the next sweep checks it\n"
-                    ));
-                }
-                Some(FixMark::NotHeld { at }) => {
-                    out.push_str(&format!("           still found after a fix at {at}\n"));
-                }
-                None => {}
+            if let Some(state) = &open.fix_state {
+                out.push_str(&format!("           {}\n", fix_line(state)));
             }
         }
         for fixed in &target.fixed {
@@ -547,7 +547,7 @@ mod tests {
             commands: Vec::new(),
             first_seen: None,
             new: false,
-            fix_state: Some(FixMark::Reported {
+            fix_state: Some(FixState::Reported {
                 at,
                 summary: "upgraded".to_owned(),
                 pull_request: None,
@@ -580,6 +580,29 @@ mod tests {
         assert!(
             text.contains("fixed    0000000000000002  zlib is old"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_fix_line_names_an_open_pull_request_and_a_fix_that_did_not_hold() {
+        let at = "2026-11-05T11:00:00Z".parse().unwrap();
+        let url = "https://github.com/o/r/pull/9".to_owned();
+        let reported = |pull_request| FixState::Reported {
+            at,
+            summary: String::new(),
+            pull_request,
+        };
+        assert_eq!(
+            fix_line(&reported(Some(url))),
+            "pull request open: https://github.com/o/r/pull/9"
+        );
+        assert_eq!(
+            fix_line(&reported(None)),
+            "fix reported at 2026-11-05T11:00:00Z; the next sweep checks it"
+        );
+        assert_eq!(
+            fix_line(&FixState::NotHeld { at }),
+            "still found after a fix at 2026-11-05T11:00:00Z"
         );
     }
 

@@ -319,8 +319,8 @@ pub struct Latest {
     /// The findings and issues not dismissed, most severe first; each says whether a fix was
     /// reported for it.
     pub open: Vec<Open>,
-    /// The fixes confirmed in the last [`CONFIRMED_DAYS`] days, newest first: a run reported
-    /// the finding fixed, and a later sweep no longer finds it.
+    /// Confirmed fixes that finished in the last 30 days (`CONFIRMED_DAYS`), newest first: a run
+    /// reported the finding fixed, and a later sweep no longer finds it.
     pub fixed: Vec<Fixed>,
     /// How many are dismissed.
     pub dismissed: usize,
@@ -344,7 +344,7 @@ pub struct Fixed {
 /// What the fix history says about an open finding.
 #[derive(Debug, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub enum FixMark {
+pub enum FixState {
     /// A fix of this very report ended `fixed`; the next sweep confirms it. Still counted.
     Reported {
         /// When it finished.
@@ -395,7 +395,7 @@ pub struct Open {
     /// Whether the newest sweep is the first to find it since the one before.
     pub new: bool,
     /// What the fix history says about it, if anything.
-    pub fix_state: Option<FixMark>,
+    pub fix_state: Option<FixState>,
 }
 
 /// Each configured target's open findings and issues, in sweep order. Whether one is
@@ -433,11 +433,10 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
         let mut open: Vec<Open> = kept
             .into_iter()
             .map(|e| {
-                let mut shown = open_entry(e, new(e.key));
-                shown.fix_state = last
+                let state = last
                     .get(&e.key)
-                    .and_then(|run| fix_mark(run, saved.started));
-                shown
+                    .and_then(|run| fix_state(run, saved.started));
+                open_entry(e, new(e.key), state)
             })
             .collect();
         open.sort_by_key(|o| o.severity);
@@ -471,19 +470,19 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
 /// says about it. Decided by which report the run was planned from, never by comparing
 /// clocks: a fix of this report is reported and awaits the next sweep, and a successful fix of
 /// an earlier report means a later sweep still found the finding.
-fn fix_mark(run: &fix::Run, report: Timestamp) -> Option<FixMark> {
+fn fix_state(run: &fix::Run, report: Timestamp) -> Option<FixState> {
     if !run.succeeded() {
         return None;
     }
     let found = run.found?;
     Some(if found == report {
-        FixMark::Reported {
+        FixState::Reported {
             at: run.finished,
             summary: sweep::plain(&run.summary),
             pull_request: run.pull_request.clone(),
         }
     } else {
-        FixMark::NotHeld { at: run.finished }
+        FixState::NotHeld { at: run.finished }
     })
 }
 
@@ -496,7 +495,7 @@ fn confirmed(run: &fix::Run, found: &BTreeSet<FindingKey>, report: Timestamp) ->
 
 /// `entry` as shown. Every text is a plain line: it holds agent text and names from the
 /// target. Commands passed the sweep's printable-ASCII check.
-fn open_entry(entry: &SavedEntry, new: bool) -> Open {
+fn open_entry(entry: &SavedEntry, new: bool, fix_state: Option<FixState>) -> Open {
     let plain = |text: &str| sweep::plain(text);
     Open {
         key: entry.key,
@@ -517,7 +516,7 @@ fn open_entry(entry: &SavedEntry, new: bool) -> Open {
         }),
         first_seen: entry.first_seen,
         new,
-        fix_state: None,
+        fix_state,
     }
 }
 
@@ -1029,9 +1028,22 @@ mod tests {
         assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
     }
 
-    /// One `fixes.jsonl` line: a run of `key` planned from the report that started at `found`.
+    /// One `fixes.jsonl` line: a run of `key` planned from the report that started at `found`,
+    /// finished now.
     fn run(key: FindingKey, found: &str, outcome: &str, exit_code: Option<i32>) -> String {
-        let finished = Timestamp::now().to_string();
+        run_finished(key, found, outcome, exit_code, 0)
+    }
+
+    /// [`run`], finished `days_ago` days ago.
+    fn run_finished(
+        key: FindingKey,
+        found: &str,
+        outcome: &str,
+        exit_code: Option<i32>,
+        days_ago: i64,
+    ) -> String {
+        let finished =
+            (Timestamp::now() - jiff::SignedDuration::from_hours(24 * days_ago)).to_string();
         json!({"key": key, "title": "curl \u{1b}[2J is old", "found": found, "target": "mac",
             "agent": "grok", "started": finished, "finished": finished,
             "exit_code": exit_code, "outcome": outcome, "summary": "upgraded\nit",
@@ -1053,8 +1065,8 @@ mod tests {
         fs::write(&config_path, "").unwrap();
         let config = Config::load(&config_path, tmp.path()).unwrap();
         let sweeps = data_dir.sweeps_dir();
-        let [fixed, failed, crashed, refixed] = [1, 2, 3, 4].map(FindingKey);
-        let keys = [fixed, failed, crashed, refixed];
+        let [fixed, failed, crashed, refixed, old] = [1, 2, 3, 4, 5].map(FindingKey);
+        let keys = [fixed, failed, crashed, refixed, old];
         let first = "2026-11-05T10:00:00Z";
         let modified = "2026-11-01T00:00:00Z";
         save(
@@ -1072,22 +1084,24 @@ mod tests {
                 run(refixed, first, "fixed", Some(0)),
                 // The last run decides, in file order.
                 run(refixed, first, "partial", Some(0)),
+                // Finished just past the window: not listed once confirmed.
+                run_finished(old, first, "fixed", Some(0), CONFIRMED_DAYS + 1),
             ],
         );
 
         let mac = &latest(&data_dir, &config).unwrap()[0];
         assert_eq!(
             mac.open.len(),
-            4,
+            5,
             "a reported fix is still open and counted"
         );
         let marked: Vec<FindingKey> = mac
             .open
             .iter()
-            .filter(|o| matches!(o.fix_state, Some(FixMark::Reported { .. })))
+            .filter(|o| matches!(o.fix_state, Some(FixState::Reported { .. })))
             .map(|o| o.key)
             .collect();
-        assert_eq!(marked, [fixed]);
+        assert_eq!(marked, [fixed, old]);
         assert!(mac.fixed.is_empty(), "no sweep has confirmed it yet");
 
         // A later sweep: the fixed one is gone, the others are still found.
@@ -1134,7 +1148,7 @@ mod tests {
         let all = latest(&data_dir, &config).unwrap();
         assert!(matches!(
             all[0].open[0].fix_state,
-            Some(FixMark::NotHeld { .. })
+            Some(FixState::NotHeld { .. })
         ));
         assert!(
             all[1].fixed.is_empty(),

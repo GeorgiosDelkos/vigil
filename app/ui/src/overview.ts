@@ -85,7 +85,7 @@ export type Overview = {
   readonly status: Status;
   readonly busy: boolean;
   readonly findings: readonly Listed[];
-  /** Fixes a later sweep confirmed in the last 30 days, newest first. */
+  /** Fixes a later sweep confirmed that finished in the last 30 days, newest first. */
   readonly fixed: readonly FixedItem[];
   readonly needs_you: number;
   readonly exploited: number;

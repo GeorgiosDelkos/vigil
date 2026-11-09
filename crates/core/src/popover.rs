@@ -18,7 +18,7 @@ use crate::lifecycle::Open;
 pub struct PopoverView {
     /// Every open finding across targets, ranked by risk.
     pub findings: Vec<Listed>,
-    /// Fixes a later sweep confirmed in the last 30 days, newest first. A fix only reported is
+    /// Fixes a later sweep confirmed that finished in the last 30 days, newest first. A fix only reported is
     /// still in `findings`, marked by its `fix_state`.
     pub fixed: Vec<FixedListed>,
     /// How many of them need the user.
