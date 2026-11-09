@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { finding } from "./fixtures.ts";
-import { ARMS, NEON, SHOWN, STREAKS, neon, streaks, vortex, type Scene } from "./orbit.ts";
+import { NEON, STREAKS, neon, streaks, vortex, type Scene } from "./orbit.ts";
 
 const box = { width: 360, height: 372 };
 
@@ -12,7 +12,6 @@ function hueOf(colour: string): number {
 
 describe("the streaks", () => {
   it("lie on three arms, in turn", () => {
-    expect(ARMS).toBe(3);
     expect(new Set(STREAKS.map((s) => s.arm))).toEqual(new Set([0, 1, 2]));
     expect(STREAKS.slice(0, 6).map((s) => s.arm)).toEqual([0, 1, 2, 0, 1, 2]);
   });
@@ -46,7 +45,7 @@ describe("the vortex", () => {
       finding("c", { severity: "medium" }),
       finding("d", { severity: "low" }),
     ];
-    const scene: Scene = { mood: "findings", lit: findings.map(neon), progress: 0 };
+    const scene: Scene = { mood: "findings", lit: findings.map(neon) };
     const picture = vortex(scene, box);
     expect(picture.findings.map((s) => s.colour)).toEqual([
       NEON.exploited,
@@ -63,13 +62,12 @@ describe("the vortex", () => {
   });
 
   it("shows at most two findings per arm", () => {
-    const scene: Scene = { mood: "findings", lit: Array(10).fill(NEON.high), progress: 0 };
-    expect(vortex(scene, box).findings).toHaveLength(SHOWN);
-    expect(SHOWN).toBe(6);
+    const scene: Scene = { mood: "findings", lit: Array<string>(10).fill(NEON.high) };
+    expect(vortex(scene, box).findings).toHaveLength(6);
   });
 
   it("keeps the light behind findings cool, so warm colours mean a finding", () => {
-    const picture = vortex({ mood: "findings", lit: [NEON.high], progress: 0 }, box);
+    const picture = vortex({ mood: "findings", lit: [NEON.high] }, box);
     expect(picture.light).toHaveLength(STREAKS.length);
     for (const s of picture.light) {
       expect(hueOf(s.colour)).toBeGreaterThanOrEqual(188);
@@ -78,7 +76,7 @@ describe("the vortex", () => {
   });
 
   it("lights only the streaks within a sweep's progress", () => {
-    const picture = vortex({ mood: "progress", lit: [], progress: 0.42 }, box);
+    const picture = vortex({ mood: "progress", progress: 0.42 }, box);
     expect(picture.findings).toHaveLength(0);
     for (const [index, s] of picture.light.entries()) {
       const seed = STREAKS[index];
@@ -90,8 +88,16 @@ describe("the vortex", () => {
     expect(lit).toBeLessThan(STREAKS.length);
   });
 
+  it("dims every streak before the first sweep", () => {
+    const picture = vortex({ mood: "unswept" }, box);
+    expect(picture.findings).toHaveLength(0);
+    for (const [index, s] of picture.light.entries()) {
+      expect(s.alpha).toBeCloseTo((STREAKS[index]?.alpha ?? 0) * 0.18, 10);
+    }
+  });
+
   it("is green and draws no findings when all is clear", () => {
-    const picture = vortex({ mood: "clear", lit: [NEON.high], progress: 1 }, box);
+    const picture = vortex({ mood: "clear" }, box);
     expect(picture.findings).toHaveLength(0);
     for (const s of picture.light) {
       expect(hueOf(s.colour)).toBeGreaterThanOrEqual(150);
@@ -101,7 +107,7 @@ describe("the vortex", () => {
   });
 
   it("is centred on the canvas and reaches its corners", () => {
-    const picture = vortex({ mood: "clear", lit: [], progress: 1 }, { width: 200, height: 150 });
+    const picture = vortex({ mood: "clear" }, { width: 200, height: 150 });
     expect(picture.centre).toEqual({ x: 100, y: 75 });
     expect(picture.reach).toBe(125);
     for (const s of picture.light) {
@@ -112,7 +118,7 @@ describe("the vortex", () => {
   });
 
   it("curls each streak inward along its arm", () => {
-    const picture = vortex({ mood: "clear", lit: [], progress: 1 }, box);
+    const picture = vortex({ mood: "clear" }, box);
     for (const s of picture.light) {
       const radii = s.points.map((p) => Math.hypot(p.x - 180, p.y - 186));
       expect(radii.toSorted((a, b) => b - a)).toEqual(radii);

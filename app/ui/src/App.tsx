@@ -141,7 +141,7 @@ export function App() {
   const back = () => setScreen("orbit");
 
   return (
-    <main class={`pop ${view() === "orbit" ? "on-orbit" : ""}`}>
+    <main class="pop" classList={{ "on-orbit": view() === "orbit" }}>
       <Show when={error()}>{(e) => <p class="banner bad">{e()}</p>}</Show>
       <Show when={done()}>
         {(d) => (

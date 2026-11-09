@@ -21,16 +21,23 @@ export function neon(finding: Pick<Listed, "severity" | "known_exploited">): str
   return finding.known_exploited ? NEON.exploited : NEON[finding.severity];
 }
 
-/** What the vortex shows: findings on its arms, a sweep lighting it, or all clear. */
-export type Mood = "findings" | "progress" | "clear";
+/** What the vortex shows: findings on its arms, a sweep lighting it, all clear, or nothing lit
+ * before the first sweep. */
+export type Scene =
+  | {
+      readonly mood: "findings";
+      /** The colours of the findings' streaks, most urgent first. */
+      readonly lit: readonly string[];
+    }
+  | {
+      readonly mood: "progress";
+      /** How far out from the centre the streaks are lit, 0 to 1. */
+      readonly progress: number;
+    }
+  | { readonly mood: "clear" }
+  | { readonly mood: "unswept" };
 
-export type Scene = {
-  readonly mood: Mood;
-  /** The colours of the findings' streaks, most urgent first ("findings"). */
-  readonly lit: readonly string[];
-  /** How far out from the centre the streaks are lit, 0 to 1 ("progress"). */
-  readonly progress: number;
-};
+type Mood = Scene["mood"];
 
 export type Box = { readonly width: number; readonly height: number };
 
@@ -76,7 +83,8 @@ export type Seed = {
 /** The owner asked for three arms and few streaks, kept close to each arm (2026-11-09). */
 export const ARMS = 3;
 const COUNT = 150;
-/** Two findings per arm, so they read as part of the swirl; Rust ranks the rest behind them. */
+/** Two findings per arm, so they read as part of the swirl; Rust ranks the rest behind them,
+ * and the list shows them all. */
 export const SHOWN = 2 * ARMS;
 /** The radius the arms start from, in CSS pixels. */
 const INNER = 30;
@@ -116,6 +124,13 @@ export const STREAKS: readonly Seed[] = streaks(7, COUNT);
 
 type Hsl = readonly [hue: number, saturation: number, lightness: number];
 
+/** A sweep's hues, also before the first sweep, when every streak is dimmed. */
+const SWEEP: readonly Hsl[] = [
+  [190, 100, 62],
+  [222, 100, 64],
+  [250, 95, 68],
+];
+
 /** Cool hues only behind findings, so pink, orange and yellow mean a finding and nothing else. */
 const HUES: Readonly<Record<Mood, readonly Hsl[]>> = {
   findings: [
@@ -124,11 +139,8 @@ const HUES: Readonly<Record<Mood, readonly Hsl[]>> = {
     [228, 100, 68],
     [262, 95, 70],
   ],
-  progress: [
-    [190, 100, 62],
-    [222, 100, 64],
-    [250, 95, 68],
-  ],
+  progress: SWEEP,
+  unswept: SWEEP,
   clear: [
     [150, 100, 58],
     [175, 100, 58],
@@ -175,7 +187,7 @@ export function vortex(scene: Scene, box: Box): Vortex {
   const light = STREAKS.map((s) => {
     const r = INNER + s.u * (reach - INNER);
     const [h, sat, l] = hue(hues, s.pick);
-    const dark = scene.mood === "progress" && s.u > scene.progress;
+    const dark = scene.mood === "unswept" || (scene.mood === "progress" && s.u > scene.progress);
     return {
       points: arc(centre, armAngle(s.arm, r) + s.jitter, r, s.length, 8),
       colour: `hsl(${h}, ${sat}%, ${l}%)`,

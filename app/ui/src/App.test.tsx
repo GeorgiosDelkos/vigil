@@ -95,10 +95,18 @@ const context = {
   stroke: () => undefined,
 };
 
+/** The colours of the dots on the target chip named `name`. */
+function colours(name: RegExp): string[] {
+  const chip = screen.getByRole("button", { name });
+  return [...chip.querySelectorAll<HTMLElement>("i span")].map((dot) =>
+    dot.style.getPropertyValue("--c"),
+  );
+}
+
 /** Renders the popover and opens the list behind the main view. */
 async function openList() {
   render(() => <App />);
-  fireEvent.click(await screen.findByTitle("Open the list"));
+  fireEvent.click(await screen.findByTitle("Show details"));
 }
 
 beforeEach(() => {
@@ -871,7 +879,7 @@ describe("the main view", () => {
     shown = two();
     answer();
     render(() => <App />);
-    const count = await screen.findByTitle("Open the list");
+    const count = await screen.findByTitle("Show details");
     expect(within(count).getByText("2")).toBeTruthy();
     expect(within(count).getByText("need you")).toBeTruthy();
     expect(within(count).getByText("1 exploited")).toBeTruthy();
@@ -880,7 +888,7 @@ describe("the main view", () => {
     expect(screen.getByRole("button", { name: /^This Mac/ })).toBeTruthy();
     expect(screen.getByText(/^swept .* ago$/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sweep now" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Open report ↗" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open report" })).toBeTruthy();
     // The settings menu moves to the top; the footer would not fit under the spiral.
     expect(document.querySelector(".foot")).toBeNull();
     expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
@@ -896,8 +904,8 @@ describe("the main view", () => {
     });
     answer();
     render(() => <App />);
-    const count = await screen.findByTitle("Open the list");
-    expect(count.textContent).toBe("1open");
+    const count = await screen.findByTitle("Show details");
+    expect(count.textContent).toBe("1openShow details");
     expect(screen.getByText("low · This Mac")).toBeTruthy();
   });
 
@@ -915,8 +923,8 @@ describe("the main view", () => {
     shown = sweeping(false);
     answer({ cancel_sweep: () => null });
     render(() => <App />);
-    const count = await screen.findByTitle("Open the list");
-    expect(count.textContent).toBe("50%grok is judging 3 advisories");
+    const count = await screen.findByTitle("Show details");
+    expect(count.textContent).toBe("50%grok is judging 3 advisoriesShow details");
     expect(screen.getByText("sweeping This Mac")).toBeTruthy();
     const bar = screen.getByRole("progressbar", { name: "Sweep progress" });
     expect(bar.querySelector("i")?.style.width).toBe("50%");
@@ -953,29 +961,31 @@ describe("the main view", () => {
     });
     answer();
     render(() => <App />);
-    const count = await screen.findByTitle("Open the list");
-    expect(count.textContent).toBe("Clearnothing open");
+    const count = await screen.findByTitle("Show details");
+    expect(count.textContent).toBe("Clearnothing openShow details");
     expect(document.querySelector(".orbit.green")).not.toBeNull();
     expect(screen.getByText("1 fixed in the last 30 days")).toBeTruthy();
     expect(screen.getByText("3 targets · every 6 hours")).toBeTruthy();
     const chip = screen.getByRole("button", { name: /^This Mac/ });
-    expect(chip.querySelector("span")?.style.getPropertyValue("--c")).toBe("var(--n-green)");
+    expect(chip.querySelector<HTMLElement>("i span")?.style.getPropertyValue("--c")).toBe(
+      "var(--n-green)",
+    );
   });
 
   it("opens the list from the count, and goes back with Back or Escape", async () => {
     shown = two();
     answer();
     render(() => <App />);
-    fireEvent.click(await screen.findByTitle("Open the list"));
+    fireEvent.click(await screen.findByTitle("Show details"));
     expect(screen.getByText("2 findings need you")).toBeTruthy();
     expect(screen.getByRole("tab", { name: /Needs you/ }).getAttribute("aria-selected")).toBe(
       "true",
     );
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(await screen.findByTitle("Open the list")).toBeTruthy();
-    fireEvent.click(screen.getByTitle("Open the list"));
+    expect(await screen.findByTitle("Show details")).toBeTruthy();
+    fireEvent.click(screen.getByTitle("Show details"));
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(await screen.findByTitle("Open the list")).toBeTruthy();
+    expect(await screen.findByTitle("Show details")).toBeTruthy();
   });
 
   it("opens the most urgent finding, and goes back to the main view", async () => {
@@ -985,7 +995,68 @@ describe("the main view", () => {
     fireEvent.click((await screen.findByText("openssl 1.0.0")).closest("button") as HTMLElement);
     expect(await screen.findByText("Reachable from the app.")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Back" }));
-    expect(await screen.findByTitle("Open the list")).toBeTruthy();
+    expect(await screen.findByTitle("Show details")).toBeTruthy();
+  });
+
+  it("shows each target's findings as dots by severity, worst first", async () => {
+    const swept = "2026-11-06T11:00:00Z";
+    const line = overview().targets[0];
+    if (line === undefined) {
+      throw new Error("the fixture has a target");
+    }
+    shown = {
+      ...two(),
+      targets: [
+        {
+          ...line,
+          label: "web",
+          kind: "server",
+          swept,
+          counts: { critical: 1, high: 5, medium: 2, low: 0 },
+          open: 8,
+        },
+        { ...line, label: "me/app", kind: "repo", swept },
+        { ...line, label: "This Mac", swept: null },
+      ],
+    };
+    answer();
+    render(() => <App />);
+    await screen.findByTitle("Show details");
+    expect(colours(/^web/)).toEqual([
+      "#ff3b3b",
+      "#ff8a1f",
+      "#ff8a1f",
+      "#ff8a1f",
+      "#ff8a1f",
+      "#ff8a1f",
+    ]);
+    expect(screen.getByRole("button", { name: "web, 8 open" })).toBeTruthy();
+    expect(colours(/^me\/app/)).toEqual(["var(--n-green)"]);
+    expect(screen.getByRole("button", { name: "me/app, clear" })).toBeTruthy();
+    expect(colours(/^This Mac/)).toEqual(["var(--n-dim)"]);
+    expect(screen.getByRole("button", { name: "This Mac, not swept yet" })).toBeTruthy();
+
+    shown = sweeping(false);
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByText("sweeping This Mac");
+    expect(colours(/^This Mac/)).toEqual(["var(--n-dim)"]);
+  });
+
+  it("shows why the last sweep failed", async () => {
+    shown = { ...two(), status: { state: "failed", error: "grok exited with 1" } };
+    answer();
+    render(() => <App />);
+    expect(await screen.findByText("Last sweep: grok exited with 1")).toBeTruthy();
+  });
+
+  it("shows a running sweep's steps behind the main view, and goes back", async () => {
+    shown = sweeping(false);
+    answer();
+    render(() => <App />);
+    fireEvent.click(await screen.findByTitle("Show details"));
+    expect(await screen.findByText("Sweeping This Mac")).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByText("sweeping This Mac")).toBeTruthy();
   });
 
   it("opens the list at the targets from a target", async () => {
@@ -1005,7 +1076,7 @@ describe("the main view", () => {
     render(() => <App />);
     fireEvent.click(await screen.findByRole("button", { name: "Sweep now" }));
     expect(invoke).toHaveBeenCalledWith("sweep_now");
-    fireEvent.click(screen.getByRole("button", { name: "Open report ↗" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open report" }));
     expect(invoke).toHaveBeenCalledWith("open_report");
     expect(await screen.findByText("Error: no sweep has a report yet")).toBeTruthy();
   });
@@ -1015,9 +1086,12 @@ describe("the main view", () => {
     shown = sweeping(false);
     answer();
     render(() => <App />);
-    await screen.findByTitle("Open the list");
+    await screen.findByTitle("Show details");
+    // Nothing is painted before layout gives the canvas a size.
+    expect(canvas.paints).toBe(0);
+    canvas.resize?.(360, 372);
     const first = canvas.paints;
-    expect(first).toBeGreaterThan(0);
+    expect(first).toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(canvas.paints).toBe(first);
     expect(frames).not.toHaveBeenCalled();

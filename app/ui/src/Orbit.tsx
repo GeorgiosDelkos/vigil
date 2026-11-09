@@ -1,18 +1,25 @@
-// The main view: Vigil's spiral as a still vortex of light, the count of what needs you in its centre, the most
-// urgent finding, the targets and two actions. The full list is a screen behind it.
+// The main view: Vigil's spiral as a still vortex of light, the count of what needs you in its
+// centre, the most urgent finding, the targets and two actions. The details are a screen behind it:
+// the list, or a running sweep's steps.
 
-import { For, Match, Show, Switch, createEffect, createSignal, onCleanup } from "solid-js";
+import { Index, Match, Show, Switch, createEffect, createSignal, onCleanup } from "solid-js";
 
 import { Icon } from "./icons.tsx";
 import { Menu } from "./Menu.tsx";
-import { neon, vortex, type Box, type Scene, type Streak, type Vortex } from "./orbit.ts";
-import type { Listed, Overview, Status, TargetLine } from "./overview.ts";
+import { NEON, neon, vortex, type Box, type Scene, type Streak, type Vortex } from "./orbit.ts";
+import {
+  SEVERITIES,
+  type Listed,
+  type Overview,
+  type Status,
+  type TargetLine,
+} from "./overview.ts";
 import { since } from "./time.ts";
 
 type Sweeping = Extract<Status, { state: "sweeping" }>;
 
 export type OrbitActions = {
-  /** Opens the list behind the main view. */
+  /** Opens the screen behind the main view: the list, or a running sweep's steps. */
   readonly onList: () => void;
   /** Opens the list at its targets. */
   readonly onTargets: () => void;
@@ -24,30 +31,29 @@ export type OrbitActions = {
   readonly onError: (error: string) => void;
 };
 
+/** What the spiral shows for this overview. */
+function sceneOf(overview: Overview): Scene {
+  if (overview.status.state === "sweeping") {
+    return { mood: "progress", progress: overview.status.percent / 100 };
+  }
+  if (overview.all_clear) {
+    return { mood: "clear" };
+  }
+  // Rust says all clear once a sweep found nothing, so no findings here means no sweep yet.
+  return overview.findings.length > 0
+    ? { mood: "findings", lit: overview.findings.map(neon) }
+    : { mood: "unswept" };
+}
+
 export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActions }) {
   const sweeping = () =>
     props.overview.status.state === "sweeping" ? props.overview.status : null;
   const clear = () => sweeping() === null && props.overview.all_clear;
   const first = () => (sweeping() === null ? props.overview.findings[0] : undefined);
-  const scene = (): Scene => {
-    const s = sweeping();
-    if (s !== null) {
-      return { mood: "progress", lit: [], progress: s.percent / 100 };
-    }
-    if (props.overview.all_clear) {
-      return { mood: "clear", lit: [], progress: 1 };
-    }
-    // Before the first sweep nothing is lit yet.
-    return {
-      mood: first() ? "findings" : "progress",
-      lit: props.overview.findings.map(neon),
-      progress: 0,
-    };
-  };
   const failed = () => (props.overview.status.state === "failed" ? props.overview.status : null);
 
   return (
-    <section class={`orbit ${clear() ? "green" : ""}`}>
+    <section class="orbit" classList={{ green: clear() }}>
       <div class="sky" aria-hidden="true">
         <div class="aurora">
           <i class="a1" />
@@ -57,7 +63,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
       </div>
       <div class="orbit-top">
         <b>Vigil</b>
-        <span>
+        <span class="orbit-when">
           <Show when={sweeping()} fallback={swept(props.overview, props.now)}>
             {(s) => `sweeping ${s().current ?? ""}`}
           </Show>
@@ -66,14 +72,15 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
       </div>
       <Show when={failed()}>{(f) => <p class="banner bad">Last sweep: {f().error}</p>}</Show>
       <div class="stage">
-        <Spiral scene={scene()} />
+        <Spiral scene={sceneOf(props.overview)} />
         <button
           type="button"
           class="centre"
-          title="Open the list"
+          title="Show details"
           onClick={() => props.actions.onList()}
         >
           <Centre overview={props.overview} sweeping={sweeping()} />
+          <span class="sr-only">Show details</span>
         </button>
       </div>
       <Switch>
@@ -90,52 +97,21 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
                 {props.overview.target_count} · {props.overview.schedule}
               </small>
             </span>
-            <span class="go">›</span>
+            <span class="go" aria-hidden="true">
+              ›
+            </span>
           </button>
         </Match>
         <Match when={props.overview.first_sweep_hint}>
           {(hint) => <p class="orbit-hint">{hint()}</p>}
         </Match>
       </Switch>
-      <div class="chips">
-        <For each={props.overview.targets}>
-          {(t) => (
-            <button type="button" class="glass" onClick={() => props.actions.onTargets()}>
-              <Icon name={t.kind} />
-              <b>{t.label}</b>
-              <i aria-hidden="true">
-                <For each={chipDots(t, props.overview, sweeping() !== null)}>
-                  {(colour) => <span style={{ "--c": colour }} />}
-                </For>
-              </i>
-            </button>
-          )}
-        </For>
-      </div>
-      <div class="orbit-foot">
-        <Show
-          when={sweeping()}
-          fallback={
-            <button type="button" class="orbit-btn" onClick={() => props.actions.onSweep()}>
-              Sweep now
-            </button>
-          }
-        >
-          {(s) => (
-            <button
-              type="button"
-              class="orbit-btn"
-              disabled={s().stopping}
-              onClick={() => props.actions.onCancel()}
-            >
-              {s().stopping ? "Stopping…" : "Cancel"}
-            </button>
-          )}
-        </Show>
-        <button type="button" class="orbit-btn lit" onClick={() => props.actions.onReport()}>
-          {sweeping() ? "Open last report" : "Open report ↗"}
-        </button>
-      </div>
+      <Chips
+        targets={props.overview.targets}
+        sweeping={sweeping() !== null}
+        onOpen={props.actions.onTargets}
+      />
+      <Actions sweeping={sweeping()} actions={props.actions} />
     </section>
   );
 }
@@ -198,7 +174,9 @@ function Urgent(props: { finding: Listed; onOpen: () => void }) {
           {f().known_exploited ? "exploited in the wild" : f().severity} · {f().target}
         </small>
       </span>
-      <span class="go">›</span>
+      <span class="go" aria-hidden="true">
+        ›
+      </span>
     </button>
   );
 }
@@ -213,6 +191,7 @@ function Progress(props: { status: Sweeping; now: Date }) {
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={props.status.percent}
+        aria-valuetext={`${props.status.percent}%, ${props.status.step}`}
       >
         <i style={{ width: `${props.status.percent}%` }} />
       </div>
@@ -224,14 +203,81 @@ function Progress(props: { status: Sweeping; now: Date }) {
   );
 }
 
-/** A target chip's dots: one per open finding in its neon colour, green when it is clear, and
- * one dim dot while a sweep runs or before its first. */
-function chipDots(target: TargetLine, overview: Overview, sweeping: boolean): string[] {
+/** The most dots a chip shows; the list behind shows every finding. Arbitrary: six fit the
+ * narrowest chip on one line. */
+const CHIP_DOTS = 6;
+
+/** A target chip's dots, from the counts Rust gives it: one per open finding in its severity's
+ * colour, worst first; green when it is clear; one dim dot while a sweep runs or before its
+ * first. */
+function chipDots(target: TargetLine, sweeping: boolean): string[] {
   if (sweeping || target.swept === null) {
     return ["var(--n-dim)"];
   }
-  const lit = overview.findings.filter((f) => f.target === target.label).map(neon);
-  return lit.length > 0 ? lit : ["var(--n-green)"];
+  const lit = SEVERITIES.flatMap((s) => Array<string>(target.counts[s]).fill(NEON[s]));
+  return lit.length > 0 ? lit.slice(0, CHIP_DOTS) : ["var(--n-green)"];
+}
+
+/** What a chip's dots say, for those who cannot see them. */
+function chipStatus(target: TargetLine): string {
+  if (target.swept === null) {
+    return "not swept yet";
+  }
+  return target.open > 0 ? `${target.open} open` : "clear";
+}
+
+function Chips(props: { targets: readonly TargetLine[]; sweeping: boolean; onOpen: () => void }) {
+  return (
+    <div class="chips">
+      {/* Keyed by position, so a refetch during a sweep keeps the chips and their focus. */}
+      <Index each={props.targets}>
+        {(t) => (
+          <button type="button" class="glass" onClick={() => props.onOpen()}>
+            <Icon name={t().kind} />
+            <b>{t().label}</b>
+            <span class="sr-only">, {chipStatus(t())}</span>
+            <i aria-hidden="true">
+              <Index each={chipDots(t(), props.sweeping)}>
+                {(colour) => <span style={{ "--c": colour() }} />}
+              </Index>
+            </i>
+          </button>
+        )}
+      </Index>
+    </div>
+  );
+}
+
+function Actions(props: { sweeping: Sweeping | null; actions: OrbitActions }) {
+  return (
+    <div class="orbit-foot">
+      <Show
+        when={props.sweeping}
+        fallback={
+          <button type="button" class="orbit-btn" onClick={() => props.actions.onSweep()}>
+            Sweep now
+          </button>
+        }
+      >
+        {(s) => (
+          <button
+            type="button"
+            class="orbit-btn"
+            disabled={s().stopping}
+            onClick={() => props.actions.onCancel()}
+          >
+            {s().stopping ? "Stopping…" : "Cancel"}
+          </button>
+        )}
+      </Show>
+      <button type="button" class="orbit-btn lit" onClick={() => props.actions.onReport()}>
+        <Show when={props.sweeping} fallback="Open report">
+          Open last report
+        </Show>
+        <span aria-hidden="true"> ↗</span>
+      </button>
+    </div>
+  );
 }
 
 /** The spiral on a canvas, drawn once per state, and again when its size or the display's pixel
@@ -240,6 +286,7 @@ function Spiral(props: { scene: Scene }) {
   const [canvas, setCanvas] = createSignal<HTMLCanvasElement>();
   // Its size in CSS pixels, which changes when a banner above it takes room.
   const [box, setBox] = createSignal<Box>({ width: 0, height: 0 });
+  // It observes only the canvas, and the browser reports each element once per callback.
   const watch = new ResizeObserver(([entry]) => {
     if (entry !== undefined) {
       setBox({ width: entry.contentRect.width, height: entry.contentRect.height });
@@ -258,12 +305,16 @@ function Spiral(props: { scene: Scene }) {
 
   createEffect(() => {
     const target = canvas();
-    if (target !== undefined) {
-      watch.observe(target);
+    // Before layout the box is empty; a gradient of radius 0 throws, and nothing would show.
+    if (target !== undefined && box().width > 0 && box().height > 0) {
       paint(fit(target, box(), ratio()), vortex(props.scene, box()), box());
     }
   });
-  return <canvas ref={setCanvas} aria-hidden="true" />;
+  const mount = (target: HTMLCanvasElement) => {
+    watch.observe(target);
+    setCanvas(target);
+  };
+  return <canvas ref={mount} aria-hidden="true" />;
 }
 
 /** Sizes the canvas's pixels to its box on this display, and returns its context. */
