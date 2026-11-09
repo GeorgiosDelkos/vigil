@@ -79,9 +79,12 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // The popover closes when it loses focus, like a menu.
-            if let WindowEvent::Focused(false) = event {
-                tray::hide_on_blur(window);
+            match event {
+                // The popover closes when it loses focus, like a menu.
+                WindowEvent::Focused(false) => tray::hide_on_blur(window),
+                // The menu bar changed between light and dark: switch the icon's palette.
+                WindowEvent::ThemeChanged(_) => tray::refresh(window.app_handle()),
+                _ => {}
             }
         })
         .build(tauri::generate_context!())

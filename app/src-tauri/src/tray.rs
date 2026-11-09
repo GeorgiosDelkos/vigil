@@ -14,6 +14,7 @@ use std::time::Instant;
 use tauri::AppHandle;
 use tauri::Emitter as _;
 use tauri::Manager as _;
+use tauri::Theme;
 use tauri::Window;
 use tauri::image::Image;
 use tauri::menu::Menu;
@@ -124,15 +125,28 @@ enum Look {
     Failed,
 }
 
+/// The menu bar's appearance, which picks the coloured icons' palette: neon reads on a dark
+/// bar but not on a light one, so a light bar gets deeper colours (the owner's choice,
+/// 2026-11-09). The template icons need no palette: macOS tints them.
+#[derive(Debug, Clone, Copy)]
+enum Bar {
+    Dark,
+    Light,
+}
+
 impl Look {
-    fn png(self) -> &'static [u8] {
-        match self {
-            Self::Clean => include_bytes!("../icons/tray-clean.png"),
-            Self::Low => include_bytes!("../icons/tray-low.png"),
-            Self::Medium => include_bytes!("../icons/tray-medium.png"),
-            Self::High => include_bytes!("../icons/tray-high.png"),
-            Self::Sweeping => include_bytes!("../icons/tray-sweeping.png"),
-            Self::Failed => include_bytes!("../icons/tray-failed.png"),
+    fn png(self, bar: Bar) -> &'static [u8] {
+        match (self, bar) {
+            (Self::Clean, _) => include_bytes!("../icons/tray-clean.png"),
+            (Self::Failed, _) => include_bytes!("../icons/tray-failed.png"),
+            (Self::Low, Bar::Dark) => include_bytes!("../icons/tray-low.png"),
+            (Self::Low, Bar::Light) => include_bytes!("../icons/tray-low-light.png"),
+            (Self::Medium, Bar::Dark) => include_bytes!("../icons/tray-medium.png"),
+            (Self::Medium, Bar::Light) => include_bytes!("../icons/tray-medium-light.png"),
+            (Self::High, Bar::Dark) => include_bytes!("../icons/tray-high.png"),
+            (Self::High, Bar::Light) => include_bytes!("../icons/tray-high-light.png"),
+            (Self::Sweeping, Bar::Dark) => include_bytes!("../icons/tray-sweeping.png"),
+            (Self::Sweeping, Bar::Light) => include_bytes!("../icons/tray-sweeping-light.png"),
         }
     }
 
@@ -150,7 +164,7 @@ impl Look {
     /// Whether macOS draws the icon in the menu bar's own colour, as it does the system's.
     /// Only the looks without a colour are: nothing open, and a failure, which its missing arm
     /// tells apart. The others keep their colours (a neutral grey inside, the state's colour
-    /// outside), which read on a light and a dark bar alike.
+    /// outside), from the palette for the bar's appearance ([`Bar`]).
     fn template(self) -> bool {
         match self {
             Self::Clean | Self::Failed => true,
@@ -158,8 +172,17 @@ impl Look {
         }
     }
 
-    fn image(self) -> Image<'static> {
-        Image::from_bytes(self.png()).expect("the tray icons are valid PNGs built into the app")
+    fn image(self, bar: Bar) -> Image<'static> {
+        Image::from_bytes(self.png(bar)).expect("the tray icons are valid PNGs built into the app")
+    }
+}
+
+/// The menu bar's appearance, read from the popover window, which follows the system's as the
+/// menu bar does. A window that cannot be read counts as dark, the more common bar.
+fn bar(app: &AppHandle) -> Bar {
+    match app.get_webview_window(POPOVER).map(|window| window.theme()) {
+        Some(Ok(Theme::Light)) => Bar::Light,
+        _ => Bar::Dark,
     }
 }
 
@@ -168,10 +191,11 @@ const QUIT_ID: &str = "quit";
 
 pub(crate) fn create(app: &AppHandle) -> tauri::Result<()> {
     let look = look(app);
+    let bar = bar(app);
     let quit = MenuItem::with_id(app, QUIT_ID, "Quit Vigil", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit])?;
     TrayIconBuilder::with_id(TRAY_ID)
-        .icon(look.image())
+        .icon(look.image(bar))
         .icon_as_template(look.template())
         .tooltip(look.tooltip())
         // Tauri opens a tray menu on a left click by default; a left click toggles the
@@ -209,7 +233,7 @@ pub(crate) fn refresh(app: &AppHandle) {
     // Best effort: a stale icon is corrected by the next change.
     // One call for both, as tauri's `TrayIcon::set_icon_with_as_template` docs advise:
     // `set_icon` then `set_icon_as_template` redraws twice, flashing the untinted pixels.
-    drop(tray.set_icon_with_as_template(Some(look.image()), look.template()));
+    drop(tray.set_icon_with_as_template(Some(look.image(bar(app))), look.template()));
     drop(tray.set_tooltip(Some(look.tooltip())));
 }
 
@@ -264,4 +288,19 @@ fn toggle(app: &AppHandle) {
     // The popover asks for fresh data whenever it is shown. Only the event: refreshing the icon
     // here would read every report on the main thread, where tray clicks arrive.
     drop(app.emit("changed", ()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_light_bar_gets_its_own_coloured_icons_and_the_same_templates() {
+        for look in [Look::Low, Look::Medium, Look::High, Look::Sweeping] {
+            assert_ne!(look.png(Bar::Dark), look.png(Bar::Light), "{look:?}");
+        }
+        for look in [Look::Clean, Look::Failed] {
+            assert_eq!(look.png(Bar::Dark), look.png(Bar::Light), "{look:?}");
+        }
+    }
 }
