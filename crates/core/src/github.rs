@@ -36,7 +36,14 @@ use crate::package::Package;
 
 /// The most workflow files read from one repository. Arbitrary: real repositories have a
 /// handful; a cap keeps a repository with thousands from stalling the sweep.
+#[cfg(not(test))]
 const WORKFLOW_LIMIT: usize = 100;
+// Tests read every workflow at the limit through a fake `gh`, one process per file. On CI's
+// macOS runners a process takes about 0.35 s, so 100 made `limits_hold_at_their_edge` 70 of
+// the core suite's 75 s, paid again for every mutant. A small limit tests the same edges. It
+// stays above the 6 workflow files of the main fixture, `o/r`.
+#[cfg(test)]
+const WORKFLOW_LIMIT: usize = 8;
 
 /// The largest workflow file put in the bundle, in bytes. Arbitrary: real workflows are a few
 /// kilobytes; the cap keeps one file from filling the agent's context.
@@ -1023,7 +1030,10 @@ esac
         assert_eq!(workflows, WORKFLOW_LIMIT);
         let problems = repo.problems.join("\n");
         assert!(
-            problems.contains("workflows: 101 files, only the first 100 were read"),
+            problems.contains(&format!(
+                "workflows: {} files, only the first {WORKFLOW_LIMIT} were read",
+                WORKFLOW_LIMIT + 1
+            )),
             "{problems}"
         );
     }
