@@ -3,6 +3,7 @@ name = "vigil-core"
 description = "Sweeps a Mac, GitHub repos and servers for known vulnerabilities with a coding agent."
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
 publish = false
 
 # Every new dependency needs a strong reason: this crate holds all the app's logic, and each
