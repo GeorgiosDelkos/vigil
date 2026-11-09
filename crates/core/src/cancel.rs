@@ -277,6 +277,11 @@ fn descendants(root: u32) -> BTreeSet<u32> {
             Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
         })
         .collect();
+    tree(&pairs, root)
+}
+
+/// The pids in `pairs` (pid, parent pid) descended from `root`.
+fn tree(pairs: &[(u32, u32)], root: u32) -> BTreeSet<u32> {
     let mut found = BTreeSet::new();
     let mut frontier = vec![root];
     while let Some(parent) = frontier.pop() {
@@ -745,6 +750,14 @@ mod tests {
         assert!(tmp.path().join(RUNNING).exists());
         drop(running);
         assert!(!tmp.path().join(RUNNING).exists());
+    }
+
+    #[test]
+    fn the_tree_holds_the_root_s_descendants_and_nothing_else() {
+        // 10 started 11 and 12, and 11 started 13; 20 and its child 21 are unrelated.
+        let pairs = [(11, 10), (12, 10), (13, 11), (20, 1), (21, 20), (10, 1)];
+        assert_eq!(tree(&pairs, 10), BTreeSet::from([11, 12, 13]));
+        assert_eq!(tree(&pairs, 13), BTreeSet::new());
     }
 
     #[test]

@@ -11,8 +11,15 @@ exclude_globs = ["app/**"]
 # `replace < with <= in stop` changes `Instant::now() < deadline` in the grace loop of
 # `cancel::stop`. The two differ only at the very instant of the deadline, and both then send
 # SIGKILL, so no test can tell them apart: an equivalent mutant.
+#
+# `replace == with != in tree` makes the tree every process whose parent is not the root,
+# which is nearly every process of the user, and the cancel tests then signal all of them. On
+# CI that stopped the runner itself ("The runner has received a shutdown signal", PR #21), and
+# on a Mac it would end the user's session. It cannot be run safely, so it is excluded;
+# `the_tree_holds_the_root_s_descendants_and_nothing_else` checks what it would break.
 exclude_re = [
     "NvdAccess::has_keychain_key",
     "NvdAccess::save_to_keychain",
     "replace < with <= in stop$",
+    "replace == with != in tree$",
 ]
