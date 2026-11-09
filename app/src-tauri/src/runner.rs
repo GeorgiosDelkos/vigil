@@ -662,7 +662,7 @@ mod tests {
         else {
             panic!("still fixing");
         };
-        assert_eq!(*step, FixProgress::Agent { log });
+        assert!(matches!(step, FixProgress::Agent { log: l } if *l == log));
         assert!(
             *step_started > Timestamp::UNIX_EPOCH,
             "each step restarts the clock"
