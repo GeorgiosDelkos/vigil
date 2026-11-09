@@ -18,6 +18,10 @@ exclude_globs = ["app/**"]
 # on a Mac it would end the user's session. It cannot be run safely, so it is excluded;
 # `the_tree_holds_the_root_s_descendants_and_nothing_else` checks what it would break.
 #
+# `open_in_browser` in the CLI runs /usr/bin/open on the report, which opens the user's browser;
+# no test may do that, so `Ok(())` in its place cannot be caught. `vigil report` without
+# `--open` is tested.
+#
 # `FixPlan::target` is a plain accessor whose only caller is the menu-bar app (the place in the
 # fix's headline), and the app's tests are not run against mutants (see `test_package`).
 exclude_re = [
@@ -26,4 +30,5 @@ exclude_re = [
     "replace < with <= in stop$",
     "replace == with != in tree$",
     "FixPlan::target",
+    "open_in_browser",
 ]
