@@ -116,6 +116,7 @@ select:focus-visible {
   margin: 2px 0 0;
   font-size: 11.5px;
   color: var(--l2);
+  overflow-wrap: anywhere;
 }
 .kev-text {
   color: #ff8fa3;
