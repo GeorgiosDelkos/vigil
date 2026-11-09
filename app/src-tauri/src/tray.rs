@@ -173,7 +173,8 @@ pub(crate) fn create(app: &AppHandle) -> tauri::Result<()> {
         .icon(look.image())
         .icon_as_template(look.template())
         .tooltip(look.tooltip())
-        // A left click keeps toggling the popover; the menu opens on a right click.
+        // Tauri opens a tray menu on a left click by default; a left click toggles the
+        // popover instead, so the menu opens on a right click only.
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| {
