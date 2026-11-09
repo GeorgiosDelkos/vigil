@@ -15,6 +15,7 @@ mod tray;
 use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
 
 use jiff::Timestamp;
 use serde::Serialize;
@@ -82,8 +83,13 @@ fn main() {
             match event {
                 // The popover closes when it loses focus, like a menu.
                 WindowEvent::Focused(false) => tray::hide_on_blur(window),
-                // The menu bar changed between light and dark: switch the icon's palette.
-                WindowEvent::ThemeChanged(_) => tray::refresh(window.app_handle()),
+                // The menu bar changed between light and dark: switch the icon's palette. Off
+                // the main thread, where clicks arrive: an idle refresh reads every report.
+                // The thread reads the theme after the window has taken the new one.
+                WindowEvent::ThemeChanged(_) => {
+                    let app = window.app_handle().clone();
+                    thread::spawn(move || tray::refresh(&app));
+                }
                 _ => {}
             }
         })

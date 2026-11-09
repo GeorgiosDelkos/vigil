@@ -125,15 +125,6 @@ enum Look {
     Failed,
 }
 
-/// The menu bar's appearance, which picks the coloured icons' palette: neon reads on a dark
-/// bar but not on a light one, so a light bar gets deeper colours (the owner's choice,
-/// 2026-11-09). The template icons need no palette: macOS tints them.
-#[derive(Debug, Clone, Copy)]
-enum Bar {
-    Dark,
-    Light,
-}
-
 impl Look {
     fn png(self, bar: Bar) -> &'static [u8] {
         match (self, bar) {
@@ -177,8 +168,19 @@ impl Look {
     }
 }
 
-/// The menu bar's appearance, read from the popover window, which follows the system's as the
-/// menu bar does. A window that cannot be read counts as dark, the more common bar.
+/// The menu bar's appearance, which picks the coloured icons' palette: neon reads on a dark
+/// bar but not on a light one, so a light bar gets deeper colours (the owner's choice,
+/// 2026-11-09). The template icons need no palette: macOS tints them.
+#[derive(Debug, Clone, Copy)]
+enum Bar {
+    Dark,
+    Light,
+}
+
+/// The menu bar's appearance, read from the popover window, which follows the system's. A
+/// window that cannot be read counts as dark, the more common bar. Not detected: a menu bar
+/// that a bright or dark wallpaper tints against the system appearance; the template icons
+/// follow that tint and the coloured ones do not.
 fn bar(app: &AppHandle) -> Bar {
     match app.get_webview_window(POPOVER).map(|window| window.theme()) {
         Some(Ok(Theme::Light)) => Bar::Light,
@@ -298,6 +300,20 @@ mod tests {
     fn a_light_bar_gets_its_own_coloured_icons_and_the_same_templates() {
         for look in [Look::Low, Look::Medium, Look::High, Look::Sweeping] {
             assert_ne!(look.png(Bar::Dark), look.png(Bar::Light), "{look:?}");
+        }
+        // Every icon decodes, at the menu bar's 22 points at 2x.
+        for look in [
+            Look::Clean,
+            Look::Low,
+            Look::Medium,
+            Look::High,
+            Look::Sweeping,
+            Look::Failed,
+        ] {
+            for bar in [Bar::Dark, Bar::Light] {
+                let image = look.image(bar);
+                assert_eq!((image.width(), image.height()), (44, 44), "{look:?}");
+            }
         }
         for look in [Look::Clean, Look::Failed] {
             assert_eq!(look.png(Bar::Dark), look.png(Bar::Light), "{look:?}");
