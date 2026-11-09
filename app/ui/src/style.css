@@ -837,6 +837,9 @@ kbd {
 /* Fixes: the pull request link wraps and can be selected and copied. */
 .fixed-row .pr,
 .row .pr {
+  /* Secondary, like the summary above it: the URL is there to copy, not to read first. */
+  font: 11px/1.3 var(--mono);
+  color: var(--l3);
   overflow-wrap: anywhere;
   user-select: text;
 }
