@@ -9,6 +9,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::findings::Severity;
+use crate::lifecycle::Fixed;
 use crate::lifecycle::Latest;
 use crate::lifecycle::Open;
 
@@ -17,6 +18,9 @@ use crate::lifecycle::Open;
 pub struct PopoverView {
     /// Every open finding across targets, ranked by risk.
     pub findings: Vec<Listed>,
+    /// Confirmed fixes that finished in the last 30 days, newest first. A fix only reported
+    /// is still in `findings`, marked by its `fix_state`.
+    pub fixed: Vec<FixedListed>,
     /// How many of them need the user.
     pub needs_you: usize,
     /// How many are exploited in the wild.
@@ -51,6 +55,16 @@ pub struct Listed {
     pub target: String,
     /// Whether it needs the user now.
     pub needs_you: bool,
+}
+
+/// A fixed finding, with its target.
+#[derive(Debug, Serialize)]
+pub struct FixedListed {
+    /// The finding and its fix.
+    #[serde(flatten)]
+    pub fixed: Fixed,
+    /// Its target, as [`target_label`] shows it.
+    pub target: String,
 }
 
 /// How many open findings there are of each severity.
@@ -90,8 +104,11 @@ pub struct TargetLine {
     pub kind: TargetKind,
     /// When its newest sweep with a verdict started.
     pub swept: Option<Timestamp>,
-    /// How many components that sweep checked.
-    pub components: usize,
+    /// What that sweep checked, one phrase: "139 components checked" (or "1 component
+    /// checked"), or "no components listed" when it listed none (a repository without a
+    /// dependency graph, for one); `None` before a sweep. Components, not packages: on the Mac
+    /// the count holds the OS and toolchains too, and a package once per place it is installed.
+    pub checked: Option<String>,
     /// Its open findings by severity.
     pub counts: Counts,
     /// How many open findings it has.
@@ -113,10 +130,23 @@ pub enum TargetKind {
 }
 
 /// The popover's content for the targets' latest findings.
-pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
+pub fn popover_view(mut latest: Vec<Latest>) -> PopoverView {
     let targets: Vec<TargetLine> = latest.iter().map(target_line).collect();
     let last_swept = latest.iter().filter_map(|t| t.swept).max();
     let dismissed = latest.iter().map(|t| t.dismissed).sum();
+    let mut fixed: Vec<FixedListed> = latest
+        .iter_mut()
+        .flat_map(|t| {
+            let label = target_label(&t.target).to_owned();
+            std::mem::take(&mut t.fixed)
+                .into_iter()
+                .map(move |fixed| FixedListed {
+                    fixed,
+                    target: label.clone(),
+                })
+        })
+        .collect();
+    fixed.sort_by_key(|f| std::cmp::Reverse(f.fixed.fixed_at));
 
     let mut findings: Vec<Listed> = latest
         .into_iter()
@@ -151,6 +181,7 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
             n => format!("{n} targets"),
         },
         findings,
+        fixed,
         last_swept,
         targets,
         dismissed,
@@ -184,10 +215,18 @@ fn target_line(latest: &Latest) -> TargetLine {
         label: target_label(&latest.target).to_owned(),
         kind: target_kind(&latest.target),
         swept: latest.swept,
-        components: latest.components,
+        checked: latest.swept.map(|_| checked(latest.components)),
         counts: Counts::of(&latest.open),
         open: latest.open.len(),
         dismissed: latest.dismissed,
+    }
+}
+
+fn checked(components: usize) -> String {
+    match components {
+        0 => "no components listed".to_owned(),
+        1 => "1 component checked".to_owned(),
+        n => format!("{n} components checked"),
     }
 }
 
@@ -224,6 +263,7 @@ mod tests {
             commands: Vec::new(),
             first_seen: first_seen.map(|s| Timestamp::from_second(s).unwrap()),
             new: false,
+            fix_state: None,
         }
     }
 
@@ -233,12 +273,42 @@ mod tests {
             swept: swept.map(|s| Timestamp::from_second(s).unwrap()),
             components: 7,
             open,
+            fixed: Vec::new(),
             dismissed,
         }
     }
 
     fn keys(view: &PopoverView) -> Vec<String> {
         view.findings.iter().map(|f| f.open.title.clone()).collect()
+    }
+
+    #[test]
+    fn fixed_findings_are_listed_apart_and_counted_nowhere_else() {
+        let fixed = |key: u64, at: i64| Fixed {
+            key: format!("{key:016x}").parse().unwrap(),
+            title: format!("finding {key}"),
+            fixed_at: Timestamp::from_second(at).unwrap(),
+            summary: "upgraded".to_owned(),
+            pull_request: None,
+        };
+        let mut mac = target("mac", Some(100), Vec::new(), 0);
+        mac.fixed = vec![fixed(1, 200)];
+        let mut repo = target("github:o/r", Some(100), Vec::new(), 0);
+        repo.fixed = vec![fixed(2, 300)];
+        let view = popover_view(vec![mac, repo]);
+        let listed: Vec<(&str, &str)> = view
+            .fixed
+            .iter()
+            .map(|f| (f.fixed.title.as_str(), f.target.as_str()))
+            .collect();
+        assert_eq!(
+            listed,
+            [("finding 2", "o/r"), ("finding 1", "This Mac")],
+            "newest fix first"
+        );
+        assert!(view.findings.is_empty());
+        assert_eq!((view.needs_you, view.counts.critical), (0, 0));
+        assert!(view.all_clear, "nothing is open");
     }
 
     #[test]
@@ -311,9 +381,17 @@ mod tests {
         assert_eq!((web.label.as_str(), web.open, web.dismissed), ("web", 1, 1));
         assert!(matches!(web.kind, TargetKind::Server));
         assert_eq!(web.counts.medium, 1);
-        assert_eq!(web.components, 7);
+        assert_eq!(web.checked.as_deref(), Some("7 components checked"));
+        assert_eq!(mac.checked, None, "not swept");
         assert_eq!(view.last_swept, Some(Timestamp::from_second(5).unwrap()));
         assert!(matches!(target_kind("github:o/r"), TargetKind::Repo));
+    }
+
+    #[test]
+    fn a_target_says_how_many_components_it_checked() {
+        assert_eq!(checked(0), "no components listed");
+        assert_eq!(checked(1), "1 component checked");
+        assert_eq!(checked(139), "139 components checked");
     }
 
     #[test]

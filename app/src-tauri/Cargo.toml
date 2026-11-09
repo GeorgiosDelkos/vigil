@@ -29,3 +29,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# A real log file for the fix view's last-line test; the core uses the same version.
+tempfile = "3.27.0"

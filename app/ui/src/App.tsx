@@ -16,6 +16,8 @@ import {
 import {
   SEVERITIES,
   type FixDone,
+  type FixedItem,
+  type FixState,
   type FixPreview,
   type Listed,
   type Overview,
@@ -25,9 +27,9 @@ import {
 import { Settings } from "./Settings.tsx";
 import type { Section } from "./settings.ts";
 import { Glyph, Icon } from "./icons.tsx";
-import { since } from "./time.ts";
+import { ago, since } from "./time.ts";
 
-type Tab = "needs" | "targets" | "all";
+type Tab = "needs" | "targets" | "all" | "fixed";
 
 export function App() {
   const [overview, { refetch }] = createResource(() => invoke<Overview>("overview"));
@@ -57,6 +59,15 @@ export function App() {
   });
   const tick = setInterval(() => setNow(new Date()), 30_000);
   onCleanup(() => clearInterval(tick));
+  // A fix's agent reports nothing until it ends, so while one runs the popover asks Rust again
+  // every few seconds, for the agent's latest line and the elapsed time.
+  const poll = setInterval(() => {
+    if (overview()?.status.state === "fixing") {
+      setNow(new Date());
+      void refetch();
+    }
+  }, 4_000);
+  onCleanup(() => clearInterval(poll));
 
   const listed = () => overview()?.findings ?? [];
   const chosen = createMemo(() => listed().find((o) => o.key === selected()) ?? null);
@@ -92,6 +103,14 @@ export function App() {
                   setSettings(undefined);
                   void refetch();
                 }}
+              />
+            </Match>
+            <Match when={o().status.state === "fixing"}>
+              {/* Once a fix starts, its steps replace the confirmation, whatever is selected. */}
+              <Busy
+                status={o().status}
+                now={now()}
+                onCancel={() => run(() => invoke("cancel_sweep"))}
               />
             </Match>
             <Match when={chosen()}>
@@ -153,6 +172,9 @@ export function App() {
                     empty="Nothing is open."
                     onOpen={setSelected}
                   />
+                </Match>
+                <Match when={tab() === "fixed"}>
+                  <FixedRows items={o().fixed} now={now()} />
                 </Match>
               </Switch>
             </Match>
@@ -219,6 +241,7 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
     ["needs", "Needs you", props.overview.needs_you],
     ["targets", "Targets", props.overview.targets.length],
     ["all", "All open", props.overview.findings.length],
+    ["fixed", "Fixed", props.overview.fixed.length],
   ];
   return (
     <div class="seg" role="tablist" aria-label="View">
@@ -238,6 +261,48 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
   );
 }
 
+/** Fixes a later sweep confirmed: what was fixed, where, when, and how. */
+function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
+  return (
+    <Show
+      when={props.items.length > 0}
+      fallback={<p class="quiet">No confirmed fixes from the last 30 days.</p>}
+    >
+      <ul class="group list pane" aria-label="Fixed" tabindex="0">
+        <For each={props.items}>
+          {(item) => (
+            <li class="row fixed-row">
+              <Icon name="done" />
+              <span class="what">
+                <span class="t">{item.title}</span>
+                <span class="where">{item.target}</span>
+                <span class="fix">{item.summary}</span>
+                <Show when={item.pull_request}>
+                  {(url) => <span class="pr">Pull request: {url()}</span>}
+                </Show>
+              </span>
+              <span class="age">{ago(item.fixed_at, props.now)}</span>
+            </li>
+          )}
+        </For>
+      </ul>
+    </Show>
+  );
+}
+
+/** The badge of an open finding a fix was reported for, as its fix state says. */
+function fixLabel(state: FixState): string {
+  if (state.state === "not_held") {
+    return "Still found after a fix";
+  }
+  return state.pull_request === null ? "Fix reported" : "Pull request open";
+}
+
+/** Whether a row shows any tag: exploited, new, or what a fix came to. */
+function tagged(item: Listed): boolean {
+  return item.known_exploited || item.new || item.fix_state !== null;
+}
+
 function Rows(props: {
   items: readonly Listed[];
   now: Date;
@@ -246,7 +311,7 @@ function Rows(props: {
 }) {
   return (
     <Show when={props.items.length > 0} fallback={<p class="quiet">{props.empty}</p>}>
-      <div class="group list">
+      <div class="group list pane">
         <For each={props.items}>
           {(item) => (
             <button type="button" class="row" onClick={() => props.onOpen(item.key)}>
@@ -256,8 +321,23 @@ function Rows(props: {
                   {item.name}
                   <Show when={item.version}>{(v) => <span class="ver">{v()}</span>}</Show>
                 </span>
-                <Show when={item.advisories.length > 0}>
-                  <span class="id">{item.advisories.join(" · ")}</span>
+                <Show when={item.advisories.length > 0 || tagged(item)}>
+                  <span class="tagline">
+                    <Show when={item.advisories.length > 0}>
+                      <span class="id">{item.advisories.join(" · ")}</span>
+                    </Show>
+                    <Show when={item.known_exploited}>
+                      <span class="tag kev">Exploited</span>
+                    </Show>
+                    <Show when={item.new && !item.known_exploited}>
+                      <span class="tag new">New</span>
+                    </Show>
+                    <Show when={item.fix_state}>
+                      {(state) => (
+                        <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>
+                      )}
+                    </Show>
+                  </span>
                 </Show>
                 <span class="where">
                   {item.target}
@@ -268,16 +348,8 @@ function Rows(props: {
                   {item.fix}
                 </span>
               </span>
-              <span class="side">
-                <Show when={item.known_exploited}>
-                  <span class="tag kev">Exploited</span>
-                </Show>
-                <Show when={item.new && !item.known_exploited}>
-                  <span class="tag new">New</span>
-                </Show>
-                <Show when={item.first_seen}>
-                  {(seen) => <span class="age">{since(seen(), props.now)}</span>}
-                </Show>
+              <span class="age">
+                <Show when={item.first_seen}>{(seen) => since(seen(), props.now)}</Show>
               </span>
             </button>
           )}
@@ -289,39 +361,57 @@ function Rows(props: {
 
 function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
   return (
-    <div class="group list">
+    <div class="group list pane" role="list" aria-label="Targets" tabindex="0">
       <For each={props.targets}>
-        {(t) => {
-          const counts = () => t.counts;
-          return (
-            <div class="row static">
-              <span class="ticon">
-                <Icon name={t.kind} />
-              </span>
-              <span class="what">
-                <span class="t">{t.label}</span>
-                <span class="where">
-                  {t.swept === null
-                    ? "not swept yet"
-                    : `${t.components} checked · swept ${since(t.swept, props.now)} ago`}
-                  <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
+        {(t) => (
+          <div class="row static target" role="listitem">
+            <span class="ticon">
+              <Icon name={t.kind} />
+            </span>
+            <span class="what">
+              <span class="t">{t.label}</span>
+              <Show when={t.open > 0}>
+                <span class="legend sevs">
+                  <For each={SEVERITIES.filter((s) => t.counts[s] > 0)}>
+                    {(s) => (
+                      <span>
+                        {/* The word follows, so the glyph is not read out a second time. */}
+                        <span class="glyph" aria-hidden="true">
+                          <Glyph severity={s} />
+                        </span>
+                        <b>{t.counts[s]}</b> {s}
+                      </span>
+                    )}
+                  </For>
                 </span>
-              </span>
-              <span class="mini" aria-label={`${t.open} open`}>
-                <For each={SEVERITIES}>
-                  {(s) => (
-                    <For each={Array.from({ length: Math.min(counts()[s], 4) })}>
-                      {() => <i class={s} />}
-                    </For>
-                  )}
-                </For>
-                <Show when={t.open === 0 && t.swept !== null}>
-                  <Icon name="done" />
+              </Show>
+              <span class="where">
+                <Show when={t.swept} fallback="not swept yet">
+                  {(swept) =>
+                    [t.checked, `swept ${since(swept(), props.now)} ago`]
+                      .filter((part) => part !== null)
+                      .join(" · ")
+                  }
                 </Show>
+                <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
               </span>
-            </div>
-          );
-        }}
+            </span>
+            <span class="open">
+              <Show when={t.swept !== null}>
+                <Show
+                  when={t.open > 0}
+                  fallback={
+                    <>
+                      <Icon name="done" /> clear
+                    </>
+                  }
+                >
+                  <b>{t.open}</b> open
+                </Show>
+              </Show>
+            </span>
+          </div>
+        )}
       </For>
     </div>
   );
@@ -609,18 +699,66 @@ function Busy(props: { status: Status; now: Date; onCancel: () => void }) {
         )}
       </Match>
       <Match when={props.status.state === "fixing" ? props.status : null}>
-        {(f) => (
-          <section class="summary">
-            <div class="headline">
-              <div>
-                <h1>Fixing</h1>
-                <p class="sub">{f().title}</p>
+        {(f) => {
+          const current = () => f().steps.find((s) => s.state === "now");
+          return (
+            <section class="summary">
+              <div class="headline">
+                <div class="headline-text">
+                  <h1>Fixing</h1>
+                  <p class="sub">
+                    {f().place} · started {ago(f().started, props.now)}
+                  </p>
+                </div>
+                <span class="spin" aria-hidden="true" />
               </div>
-              <span class="spin" aria-label="Fixing" />
-            </div>
-            <p class="hint">The agent is working with full access; this shows how it ends.</p>
-          </section>
-        )}
+              <p class="fix-title">{f().title}</p>
+              <ol class="group steps" role="list" aria-label="Fix progress">
+                <For each={f().steps}>
+                  {(step) => (
+                    <li
+                      class={`step ${step.state}`}
+                      aria-current={step.state === "now" ? "step" : undefined}
+                    >
+                      <Switch>
+                        <Match when={step.state === "done"}>
+                          <Icon name="done" />
+                        </Match>
+                        <Match when={step.state === "now"}>
+                          <span class="spin" aria-hidden="true" />
+                        </Match>
+                        <Match when={step.state === "next"}>
+                          <Icon name="wait" />
+                        </Match>
+                      </Switch>
+                      <span class="step-text">
+                        <span class="step-label">{step.label}</span>
+                        <Show when={step.state === "now" && f().activity}>
+                          {(line) => <span class="step-detail activity">{line()}</span>}
+                        </Show>
+                      </span>
+                      <span class="st">
+                        {step.state === "now"
+                          ? since(f().step_started, props.now)
+                          : step.state === "done"
+                            ? "done"
+                            : "next"}
+                      </span>
+                    </li>
+                  )}
+                </For>
+              </ol>
+              {/* Announces each new step once; the list itself would repeat its ticking time. */}
+              <p class="sr-only" aria-live="polite">
+                {current()?.label}
+              </p>
+              <p class="hint">
+                The agent is working with full access. There is no Cancel: stopping a fix halfway
+                could leave a change half made. You can close this.
+              </p>
+            </section>
+          );
+        }}
       </Match>
     </Switch>
   );
@@ -640,6 +778,10 @@ function AllClear(props: { overview: Overview; now: Date }) {
         <Show when={dismissed() > 0}>; {dismissed()} dismissed</Show>.
       </p>
       <Targets targets={props.overview.targets} now={props.now} />
+      <Show when={props.overview.fixed.length > 0}>
+        <h2 class="label">Fixed in the last 30 days</h2>
+        <FixedRows items={props.overview.fixed} now={props.now} />
+      </Show>
     </section>
   );
 }

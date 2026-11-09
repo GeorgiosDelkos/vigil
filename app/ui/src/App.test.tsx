@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
 import { finding, overview, settingsView } from "./fixtures.ts";
-import type { Overview } from "./overview.ts";
+import type { Overview, Status } from "./overview.ts";
 
 const invoke = vi.hoisted(() => vi.fn());
 const handlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -101,6 +101,23 @@ function sweeping(stopping: boolean): Overview {
       step_started: new Date().toISOString(),
     },
   });
+}
+
+/** A fix whose agent is running, as Rust reports it. */
+function fixing(): Status {
+  return {
+    state: "fixing",
+    title: "other",
+    place: "This Mac",
+    activity: "upgrading openssl to 3.6.5",
+    steps: [
+      { label: "preparing the fix", state: "done" },
+      { label: "grok is applying the fix", state: "now" },
+      { label: "recording the result", state: "next" },
+    ],
+    started: new Date().toISOString(),
+    step_started: new Date(Date.now() - 2 * 60_000).toISOString(),
+  };
 }
 
 describe("the popover", () => {
@@ -203,6 +220,68 @@ describe("the popover", () => {
     expect(bar.querySelectorAll(".sweep-bar-tick")).toHaveLength(0);
   });
 
+  it("marks a reported fix, an open pull request and a fix that did not hold", async () => {
+    const at = new Date().toISOString();
+    shown = overview({
+      findings: [
+        finding("a", {
+          name: "curl",
+          fix_state: { state: "reported", at, summary: "upgraded", pull_request: null },
+        }),
+        finding("b", {
+          name: "lodash",
+          fix_state: { state: "reported", at, summary: "bumped", pull_request: "https://x/pull/9" },
+        }),
+        finding("c", { name: "zlib", fix_state: { state: "not_held", at } }),
+      ],
+      needs_you: 3,
+      headline: "3 findings need you",
+      last_swept: at,
+      first_sweep_hint: null,
+    });
+    answer();
+    render(() => <App />);
+    await screen.findByText("curl");
+    expect(within(row("curl")).getByText("Fix reported")).toBeTruthy();
+    expect(within(row("lodash")).getByText("Pull request open")).toBeTruthy();
+    expect(within(row("zlib")).getByText("Still found after a fix")).toBeTruthy();
+  });
+
+  it("lists confirmed fixes in a tab of their own and when all is clear", async () => {
+    const confirmed = {
+      key: "f",
+      title: "curl 8.0.0 is old",
+      target: "This Mac",
+      fixed_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+      summary: "upgraded curl to 8.11",
+      pull_request: "https://github.com/o/r/pull/9",
+    };
+    shown = { ...two(), fixed: [confirmed] };
+    answer();
+    render(() => <App />);
+    const tab = await screen.findByRole("tab", { name: /Fixed/ });
+    expect(within(tab).getByText("1")).toBeTruthy();
+    fireEvent.click(tab);
+    const list = await screen.findByRole("list", { name: "Fixed" });
+    expect(within(list).getByText("curl 8.0.0 is old")).toBeTruthy();
+    expect(within(list).getByText("upgraded curl to 8.11")).toBeTruthy();
+    expect(within(list).getByText("5 min ago")).toBeTruthy();
+    expect(within(list).getByText(/pull\/9/)).toBeTruthy();
+
+    cleanup();
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      all_clear: true,
+      fixed: [confirmed],
+    });
+    answer();
+    render(() => <App />);
+    expect(await screen.findByText("All clear")).toBeTruthy();
+    expect(screen.getByText("Fixed in the last 30 days")).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Fixed" })).toBeTruthy();
+  });
+
   it("cancels a running sweep, and shows it stopping", async () => {
     shown = sweeping(false);
     answer({ cancel_sweep: () => null });
@@ -257,6 +336,13 @@ describe("a finding", () => {
     expect(invoke).not.toHaveBeenCalledWith("fix", expect.anything());
     fireEvent.click(screen.getByText("Run fix"));
     expect(invoke).toHaveBeenCalledWith("fix", { key: "a", found: "2026-11-06T11:00:00Z" });
+
+    // The finding stays selected, but once the fix runs its steps replace the confirmation.
+    shown = { ...two(), busy: true, status: fixing() };
+    handlers.get("changed")?.({ payload: null });
+    expect(await screen.findByRole("list", { name: "Fix progress" })).toBeTruthy();
+    expect(screen.queryByText("Run fix")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 
   it("is dismissed with the reason given", async () => {
@@ -274,8 +360,36 @@ describe("a finding", () => {
     expect(await screen.findByText("2 findings need you")).toBeTruthy();
   });
 
+  it("shows a running fix's steps as Rust places them", async () => {
+    shown = {
+      ...two(),
+      busy: true,
+      status: fixing(),
+    };
+    answer();
+    render(() => <App />);
+    const steps = await screen.findByRole("list", { name: "Fix progress" });
+    const rows = within(steps).getAllByRole("listitem");
+    expect(rows.map((r) => r.className)).toEqual(["step done", "step now", "step next"]);
+    expect(rows[1]?.getAttribute("aria-current")).toBe("step");
+    expect(within(rows[1] as HTMLElement).getByText("grok is applying the fix")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("2 min")).toBeTruthy();
+    expect(screen.getByText("other")).toBeTruthy();
+    expect(screen.getByText("This Mac · started just now")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("upgrading openssl to 3.6.5")).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).queryByText("upgrading openssl to 3.6.5")).toBeNull();
+    expect(rows[0]?.getAttribute("aria-current")).toBeNull();
+    const live = document.querySelector("[aria-live=polite]");
+    expect(live?.textContent?.trim()).toBe("grok is applying the fix");
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
   it("cannot be fixed while a sweep runs", async () => {
-    shown = { ...two(), busy: true, status: { state: "fixing", title: "other" } };
+    shown = {
+      ...two(),
+      busy: true,
+      status: fixing(),
+    };
     answer();
     render(() => <App />);
     expect(await screen.findByText("Fixing")).toBeTruthy();
@@ -365,7 +479,7 @@ describe("the tabs", () => {
           label: "This Mac",
           kind: "mac",
           swept: "2026-11-06T11:00:00Z",
-          components: 42,
+          checked: "42 components checked",
           counts: { critical: 0, high: 6, medium: 0, low: 0 },
           open: 6,
           dismissed: 1,
@@ -374,7 +488,7 @@ describe("the tabs", () => {
           label: "web",
           kind: "server",
           swept: "2026-11-06T11:00:00Z",
-          components: 3,
+          checked: "3 components checked",
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
           dismissed: 0,
@@ -383,7 +497,7 @@ describe("the tabs", () => {
           label: "me/app",
           kind: "repo",
           swept: null,
-          components: 0,
+          checked: null,
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
           dismissed: 0,
@@ -394,14 +508,22 @@ describe("the tabs", () => {
     render(() => <App />);
     fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
     expect(
-      within(row("This Mac")).getByText(/42 checked · swept .* ago · 1 dismissed/),
+      within(row("This Mac")).getByText(/42 components checked · swept .* ago · 1 dismissed/),
     ).toBeTruthy();
-    expect(row("This Mac").querySelectorAll(".mini i")).toHaveLength(4);
-    expect(within(row("This Mac")).getByLabelText("6 open")).toBeTruthy();
+    // Only the severities it has, each named, and the open count in words.
+    expect(row("This Mac").querySelector(".sevs")?.textContent).toBe("6 high");
+    expect(row("This Mac").querySelector(".open")?.textContent).toBe("6 open");
     expect(row("web").textContent).not.toContain("dismissed");
-    expect(row("web").querySelector(".mini svg")).not.toBeNull();
+    expect(row("web").querySelector(".sevs")).toBeNull();
+    expect(row("web").querySelector(".open svg")).not.toBeNull();
+    expect(row("web").querySelector(".open")?.textContent).toBe(" clear");
+    // Glyphs beside the words are hidden from screen readers, so each severity is read once.
+    expect(within(row("This Mac")).queryByRole("img", { name: "high" })).toBeNull();
+    // Long lists scroll in their own focusable pane, under the summary and tabs.
+    expect(screen.getByRole("list", { name: "Targets" }).classList.contains("pane")).toBe(true);
+    expect(screen.getByRole("list", { name: "Targets" }).tabIndex).toBe(0);
     expect(within(row("me/app")).getByText("not swept yet")).toBeTruthy();
-    expect(row("me/app").querySelector(".mini svg")).toBeNull();
+    expect(row("me/app").querySelector(".open")?.textContent).toBe("");
   });
 });
 
@@ -422,12 +544,14 @@ describe("the rows", () => {
     expect(within(a).getByText("GHSA-a")).toBeTruthy();
     expect(within(a).getByText(/This Mac · \/Users\/me\/code/)).toBeTruthy();
     expect(within(a).getByText("Update to 1.0.1")).toBeTruthy();
-    expect(within(a).getByText("Exploited")).toBeTruthy();
+    // Tags sit on the advisories' line, so the age alone fills the right column.
+    expect(a.querySelector(".tagline")?.textContent).toBe("GHSA-aExploited");
     expect(within(a).queryByText("New")).toBeNull();
-    expect(a.querySelector(".age")).not.toBeNull();
+    expect(a.querySelector(".age")?.textContent).not.toBe("");
     const b = screen.getByText("pkg-b").closest("button") as HTMLElement;
     expect(within(b).getByText("New")).toBeTruthy();
-    expect(b.querySelector(".ver, .id, .age")).toBeNull();
+    expect(b.querySelector(".ver, .id")).toBeNull();
+    expect(b.querySelector(".age")?.textContent).toBe("");
     expect(within(b).getByText("This Mac").textContent).toBe("This Mac");
   });
 });
@@ -529,7 +653,8 @@ describe("the detail", () => {
     fireEvent.click(await screen.findByText("openssl"));
     const fix = screen.getByText("Fix…") as HTMLButtonElement;
     expect(fix.disabled).toBe(false);
-    shown = { ...two(), busy: true, status: { state: "fixing", title: "other" } };
+    // A sweep, not a fix: a running fix shows its steps instead of the finding.
+    shown = { ...two(), busy: true, status: sweeping(false).status };
     handlers.get("changed")?.({ payload: null });
     await vi.waitFor(() => expect(fix.disabled).toBe(true));
   });

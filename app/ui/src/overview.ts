@@ -8,6 +8,11 @@ export const SEVERITIES: readonly Severity[] = ["critical", "high", "medium", "l
 
 export type Counts = Readonly<Record<Severity, number>>;
 
+export type FixStep = {
+  readonly label: string;
+  readonly state: "done" | "now" | "next";
+};
+
 export type Status =
   | { readonly state: "idle" }
   | {
@@ -31,7 +36,18 @@ export type Status =
       readonly started: string;
       readonly step_started: string;
     }
-  | { readonly state: "fixing"; readonly title: string }
+  | {
+      readonly state: "fixing";
+      readonly title: string;
+      /** Its target's name: "This Mac", `owner/name`, the server. */
+      readonly place: string;
+      /** Every step of the fix in order, as Rust places them. */
+      readonly steps: readonly FixStep[];
+      /** The agent's last line of output while it runs. */
+      readonly activity: string | null;
+      readonly started: string;
+      readonly step_started: string;
+    }
   | { readonly state: "failed"; readonly error: string };
 
 export type Listed = {
@@ -48,6 +64,7 @@ export type Listed = {
   readonly commands: readonly string[];
   readonly first_seen: string | null;
   readonly new: boolean;
+  readonly fix_state: FixState | null;
   readonly target: string;
   readonly needs_you: boolean;
 };
@@ -56,16 +73,39 @@ export type TargetLine = {
   readonly label: string;
   readonly kind: "mac" | "repo" | "server";
   readonly swept: string | null;
-  readonly components: number;
+  /** What its last sweep checked ("139 components checked"); null before a sweep. */
+  readonly checked: string | null;
   readonly counts: Counts;
   readonly open: number;
   readonly dismissed: number;
+};
+
+/** What the fix history says about an open finding. */
+export type FixState =
+  | {
+      readonly state: "reported";
+      readonly at: string;
+      readonly summary: string;
+      readonly pull_request: string | null;
+    }
+  | { readonly state: "not_held"; readonly at: string };
+
+/** A fix a later sweep confirmed, from the last 30 days. */
+export type FixedItem = {
+  readonly key: string;
+  readonly title: string;
+  readonly target: string;
+  readonly fixed_at: string;
+  readonly summary: string;
+  readonly pull_request: string | null;
 };
 
 export type Overview = {
   readonly status: Status;
   readonly busy: boolean;
   readonly findings: readonly Listed[];
+  /** Fixes a later sweep confirmed that finished in the last 30 days, newest first. */
+  readonly fixed: readonly FixedItem[];
   readonly needs_you: number;
   readonly exploited: number;
   readonly counts: Counts;
