@@ -1077,7 +1077,8 @@ mod tests {
         history(
             &data_dir,
             &[
-                run(fixed, first, "fixed", Some(0)),
+                // Inside the window, near its end: listed once confirmed.
+                run_finished(fixed, first, "fixed", Some(0), CONFIRMED_DAYS - 1),
                 run(failed, first, "failed", Some(0)),
                 // The agent reported fixed, then failed: not a fix.
                 run(crashed, first, "fixed", Some(1)),

@@ -10,6 +10,7 @@
 
 mod agent;
 mod bundle;
+mod cancel;
 mod config;
 mod detect;
 mod feeds;
@@ -29,6 +30,8 @@ mod sweep;
 pub use crate::agent::AgentError;
 pub use crate::agent::AgentKind;
 pub use crate::bundle::BundleError;
+pub use crate::cancel::Cancel;
+pub use crate::cancel::clean_up_interrupted;
 pub use crate::config::Config;
 pub use crate::config::ConfigProblem;
 pub use crate::config::History;
@@ -68,8 +71,10 @@ pub use crate::findings::Subject;
 pub use crate::fix::Confirmed;
 pub use crate::fix::FixError;
 pub use crate::fix::FixPlan;
+pub use crate::fix::FixProgress;
 pub use crate::fix::FixRecord;
 pub use crate::fix::Outcome;
+pub use crate::fix::last_activity;
 pub use crate::fix::plan_fix;
 pub use crate::fix::run_fix;
 pub use crate::inventory::Component;

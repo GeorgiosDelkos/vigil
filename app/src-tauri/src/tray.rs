@@ -1,6 +1,6 @@
 //! The menu-bar icon, Vigil's mark: a spiral arm of dots. Its colour shows the worst open
-//! finding or a running sweep, an unfinished spiral shows a failure, and a left click shows or
-//! hides the popover under it.
+//! finding or a running sweep, an unfinished spiral shows a failure, a left click shows or
+//! hides the popover under it, and a right click opens a menu with Quit.
 
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -15,6 +15,8 @@ use tauri::Emitter as _;
 use tauri::Manager as _;
 use tauri::Window;
 use tauri::image::Image;
+use tauri::menu::Menu;
+use tauri::menu::MenuItem;
 use tauri::tray::MouseButton;
 use tauri::tray::MouseButtonState;
 use tauri::tray::TrayIconBuilder;
@@ -25,6 +27,7 @@ use vigil_core::Config;
 use vigil_core::Severity;
 use vigil_core::latest;
 
+use crate::runner;
 use crate::runner::Runner;
 use crate::runner::Status;
 
@@ -159,12 +162,27 @@ impl Look {
     }
 }
 
+/// The id of the tray menu's Quit item.
+const QUIT_ID: &str = "quit";
+
 pub(crate) fn create(app: &AppHandle) -> tauri::Result<()> {
     let look = look(app);
+    let quit = MenuItem::with_id(app, QUIT_ID, "Quit Vigil", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&quit])?;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(look.image())
         .icon_as_template(look.template())
         .tooltip(look.tooltip())
+        // Tauri opens a tray menu on a left click by default; a left click toggles the
+        // popover instead, so the menu opens on a right click only.
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| {
+            // The same quit as the popover's: a running sweep or fix is stopped first.
+            if event.id() == QUIT_ID {
+                runner::quit(app);
+            }
+        })
         .on_tray_icon_event(|tray, event| {
             let app = tray.app_handle();
             tauri_plugin_positioner::on_tray_event(app, &event);

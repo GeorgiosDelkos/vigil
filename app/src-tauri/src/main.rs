@@ -12,6 +12,7 @@ mod runner;
 mod settings;
 mod tray;
 
+use std::cmp::Ordering;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -20,6 +21,7 @@ use serde::Serialize;
 use tauri::ActivationPolicy;
 use tauri::AppHandle;
 use tauri::Manager as _;
+use tauri::RunEvent;
 use tauri::State;
 use tauri::WindowEvent;
 use tauri_plugin_autostart::MacosLauncher;
@@ -27,8 +29,10 @@ use vigil_core::AgentKind;
 use vigil_core::Config;
 use vigil_core::DataDir;
 use vigil_core::FindingKey;
+use vigil_core::FixProgress;
 use vigil_core::ParseFindingKeyError;
 use vigil_core::PopoverView;
+use vigil_core::last_activity;
 use vigil_core::latest;
 use vigil_core::plan_fix;
 use vigil_core::popover_view;
@@ -54,6 +58,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             overview,
             sweep_now,
+            cancel_sweep,
             open_config,
             quit,
             fix_preview,
@@ -79,8 +84,19 @@ fn main() {
                 tray::hide_on_blur(window);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("the app's context and plugins are valid");
+        .build(tauri::generate_context!())
+        .expect("the app's context and plugins are valid")
+        .run(|app, event| {
+            // An exit request while a sweep or fix runs goes through `runner::quit`, which
+            // cancels it and exits once it has ended. A quit that skips this event (logout,
+            // `kill`, a crash) is covered by the core's watchdog, which stops the programs.
+            if let RunEvent::ExitRequested { api, .. } = event
+                && runner::must_wait_to_quit(app)
+            {
+                api.prevent_exit();
+                runner::quit(app);
+            }
+        });
 }
 
 /// What the popover shows.
@@ -124,11 +140,20 @@ enum StatusView {
         ticks: Vec<f64>,
         /// Whether the current step has no known length, so the bar moves instead of filling.
         open_ended: bool,
+        /// Whether the user cancelled it, and it is stopping.
+        stopping: bool,
         started: Timestamp,
         step_started: Timestamp,
     },
     Fixing {
         title: String,
+        place: String,
+        /// Every step of the fix in order, each done, now or next.
+        steps: Vec<StepView>,
+        /// The agent's last line of output while it runs, one plain line.
+        activity: Option<String>,
+        started: Timestamp,
+        step_started: Timestamp,
     },
     Failed {
         error: String,
@@ -149,6 +174,7 @@ impl StatusView {
                 pending,
                 thousandths,
                 open_ended,
+                stopping,
                 started,
                 step_started,
             } => {
@@ -165,6 +191,7 @@ impl StatusView {
                     target_end: position * 100 / total.max(1),
                     ticks: ticks(total),
                     open_ended,
+                    stopping,
                     step_started,
                     current: current.map(|t| target_label(&t).to_owned()),
                     done: labels(done),
@@ -172,10 +199,60 @@ impl StatusView {
                     started,
                 }
             }
-            Status::Fixing { title } => Self::Fixing { title },
+            Status::Fixing {
+                title,
+                place,
+                labels,
+                step,
+                started,
+                step_started,
+            } => Self::Fixing {
+                title,
+                place,
+                activity: match &step {
+                    FixProgress::Agent { log } => last_activity(log),
+                    FixProgress::Preparing | FixProgress::Recording => None,
+                },
+                steps: fix_steps(labels, step.step()),
+                started,
+                step_started,
+            },
             Status::Failed { error } => Self::Failed { error },
         }
     }
+}
+
+/// One step of a running fix, as the popover lists it.
+#[derive(Debug, Serialize)]
+struct StepView {
+    label: String,
+    state: StepState,
+}
+
+/// Where a step is, relative to the one that runs.
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StepState {
+    Done,
+    Now,
+    Next,
+}
+
+/// The steps of a fix, `labels` in order, with the one at `at` running, those before it done
+/// and those after it next.
+fn fix_steps(labels: [String; 3], at: usize) -> Vec<StepView> {
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(i, label)| StepView {
+            label,
+            state: match i.cmp(&at) {
+                Ordering::Less => StepState::Done,
+                Ordering::Equal => StepState::Now,
+                Ordering::Greater => StepState::Next,
+            },
+        })
+        .collect()
 }
 
 /// The boundaries between `total` targets, as percentages of the bar, or none past
@@ -202,7 +279,7 @@ const MAX_MARKED_TARGETS: usize = 12;
 )]
 fn overview(runner: State<'_, Runner>) -> Overview {
     let status = runner.status();
-    let busy = matches!(status, Status::Sweeping { .. } | Status::Fixing { .. });
+    let busy = status.is_busy();
     let config_path = runner.data_dir().config_file();
     let (config, problem) = match Config::load_or_default(&config_path, runner.home()) {
         Ok(config) => (Some(config), None),
@@ -236,6 +313,16 @@ fn sweep_now(app: AppHandle) -> Result<(), String> {
     runner::start(&app).map_err(ToString::to_string)
 }
 
+/// Cancels the running sweep (see [`runner::cancel_sweep`]).
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn cancel_sweep(app: AppHandle) -> Result<(), String> {
+    runner::cancel_sweep(&app).map_err(ToString::to_string)
+}
+
 /// Opens `config.toml` in the user's text editor, creating the default one first. Async, so
 /// waiting for `open` never stalls the UI.
 #[tauri::command(async)]
@@ -266,7 +353,7 @@ fn open_config(runner: State<'_, Runner>) -> Result<(), String> {
     reason = "Tauri hands command arguments over by value"
 )]
 fn quit(app: AppHandle) {
-    app.exit(0);
+    runner::quit(&app);
 }
 
 /// What the detail view shows before the user confirms a fix.
@@ -351,6 +438,7 @@ mod tests {
             pending: pending.iter().map(|&t| t.to_owned()).collect(),
             thousandths: 500,
             open_ended: true,
+            stopping: false,
             started,
             step_started: started,
         };
@@ -414,6 +502,60 @@ mod tests {
         );
         assert_eq!(ticks, Vec::<f64>::new());
         assert!(matches!(StatusView::of(Status::Idle), StatusView::Idle));
+    }
+
+    #[test]
+    fn a_fix_lists_its_steps_done_now_and_next() {
+        use StepState::{Done, Next, Now};
+        let states = |at| -> Vec<StepState> {
+            fix_steps(FixProgress::labels(AgentKind::Grok), at)
+                .into_iter()
+                .map(|s| s.state)
+                .collect()
+        };
+        assert_eq!(states(0), [Now, Next, Next], "claimed means preparing");
+        assert_eq!(states(1), [Done, Now, Next]);
+        assert_eq!(states(2), [Done, Done, Now]);
+        let labels: Vec<String> = fix_steps(FixProgress::labels(AgentKind::Grok), 1)
+            .into_iter()
+            .map(|s| s.label)
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "preparing the fix",
+                "grok is applying the fix",
+                "recording the result"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fix_s_view_shows_the_agent_s_last_line_only_while_it_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("agent.log");
+        std::fs::write(&log, "upgrading curl\n").unwrap();
+        let at = |step: FixProgress| Status::Fixing {
+            title: "t".to_owned(),
+            place: "This Mac".to_owned(),
+            labels: FixProgress::labels(AgentKind::Grok),
+            step,
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        };
+        let activity = |status| match StatusView::of(status) {
+            StatusView::Fixing { activity, .. } => activity,
+            _ => panic!("still fixing"),
+        };
+        assert_eq!(
+            activity(at(FixProgress::Agent { log: log.clone() })).as_deref(),
+            Some("upgrading curl")
+        );
+        assert_eq!(
+            activity(at(FixProgress::Recording)),
+            None,
+            "not once the agent is done"
+        );
     }
 
     #[test]

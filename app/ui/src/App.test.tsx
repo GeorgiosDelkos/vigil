@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
 import { finding, overview, settingsView } from "./fixtures.ts";
-import type { Overview } from "./overview.ts";
+import type { Overview, Status } from "./overview.ts";
 
 const invoke = vi.hoisted(() => vi.fn());
 const handlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -80,6 +80,46 @@ beforeEach(() => {
 });
 afterEach(cleanup);
 
+/** A sweep on its only target with the agent running, stopping or not. */
+function sweeping(stopping: boolean): Overview {
+  return overview({
+    busy: true,
+    status: {
+      state: "sweeping",
+      step: "grok is judging 3 advisories",
+      current: "This Mac",
+      done: [],
+      pending: [],
+      position: 1,
+      total: 1,
+      percent: 50,
+      target_end: 100,
+      ticks: [],
+      open_ended: true,
+      stopping,
+      started: new Date().toISOString(),
+      step_started: new Date().toISOString(),
+    },
+  });
+}
+
+/** A fix whose agent is running, as Rust reports it. */
+function fixing(): Status {
+  return {
+    state: "fixing",
+    title: "other",
+    place: "This Mac",
+    activity: "upgrading openssl to 3.6.5",
+    steps: [
+      { label: "preparing the fix", state: "done" },
+      { label: "grok is applying the fix", state: "now" },
+      { label: "recording the result", state: "next" },
+    ],
+    started: new Date().toISOString(),
+    step_started: new Date(Date.now() - 2 * 60_000).toISOString(),
+  };
+}
+
 describe("the popover", () => {
   it("asks for an agent first, and opens the agent settings", async () => {
     shown = overview({ agent: null });
@@ -128,6 +168,7 @@ describe("the popover", () => {
         target_end: 66,
         ticks: [33.3, 66.6],
         open_ended: true,
+        stopping: false,
         started: new Date().toISOString(),
         step_started: new Date(Date.now() - 3 * 60_000).toISOString(),
       },
@@ -166,6 +207,7 @@ describe("the popover", () => {
         target_end: 100,
         ticks: [],
         open_ended: false,
+        stopping: false,
         started: new Date().toISOString(),
         step_started: new Date().toISOString(),
       },
@@ -240,6 +282,20 @@ describe("the popover", () => {
     expect(screen.getByRole("list", { name: "Fixed" })).toBeTruthy();
   });
 
+  it("cancels a running sweep, and shows it stopping", async () => {
+    shown = sweeping(false);
+    answer({ cancel_sweep: () => null });
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel" }));
+    expect(invoke).toHaveBeenCalledWith("cancel_sweep");
+
+    shown = sweeping(true);
+    handlers.get("changed")?.({ payload: null });
+    const stopping = await screen.findByRole("button", { name: "Stopping…" });
+    expect((stopping as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText("Stopping the agent and cleaning up…")).toBeTruthy();
+  });
+
   it("shows all clear once a sweep found nothing", async () => {
     shown = overview({
       last_swept: "2026-11-06T11:00:00Z",
@@ -280,6 +336,13 @@ describe("a finding", () => {
     expect(invoke).not.toHaveBeenCalledWith("fix", expect.anything());
     fireEvent.click(screen.getByText("Run fix"));
     expect(invoke).toHaveBeenCalledWith("fix", { key: "a", found: "2026-11-06T11:00:00Z" });
+
+    // The finding stays selected, but once the fix runs its steps replace the confirmation.
+    shown = { ...two(), busy: true, status: fixing() };
+    handlers.get("changed")?.({ payload: null });
+    expect(await screen.findByRole("list", { name: "Fix progress" })).toBeTruthy();
+    expect(screen.queryByText("Run fix")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
   });
 
   it("is dismissed with the reason given", async () => {
@@ -297,8 +360,36 @@ describe("a finding", () => {
     expect(await screen.findByText("2 findings need you")).toBeTruthy();
   });
 
+  it("shows a running fix's steps as Rust places them", async () => {
+    shown = {
+      ...two(),
+      busy: true,
+      status: fixing(),
+    };
+    answer();
+    render(() => <App />);
+    const steps = await screen.findByRole("list", { name: "Fix progress" });
+    const rows = within(steps).getAllByRole("listitem");
+    expect(rows.map((r) => r.className)).toEqual(["step done", "step now", "step next"]);
+    expect(rows[1]?.getAttribute("aria-current")).toBe("step");
+    expect(within(rows[1] as HTMLElement).getByText("grok is applying the fix")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("2 min")).toBeTruthy();
+    expect(screen.getByText("other")).toBeTruthy();
+    expect(screen.getByText("This Mac · started just now")).toBeTruthy();
+    expect(within(rows[1] as HTMLElement).getByText("upgrading openssl to 3.6.5")).toBeTruthy();
+    expect(within(rows[0] as HTMLElement).queryByText("upgrading openssl to 3.6.5")).toBeNull();
+    expect(rows[0]?.getAttribute("aria-current")).toBeNull();
+    const live = document.querySelector("[aria-live=polite]");
+    expect(live?.textContent?.trim()).toBe("grok is applying the fix");
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+  });
+
   it("cannot be fixed while a sweep runs", async () => {
-    shown = { ...two(), busy: true, status: { state: "fixing", title: "other" } };
+    shown = {
+      ...two(),
+      busy: true,
+      status: fixing(),
+    };
     answer();
     render(() => <App />);
     expect(await screen.findByText("Fixing")).toBeTruthy();
@@ -562,7 +653,8 @@ describe("the detail", () => {
     fireEvent.click(await screen.findByText("openssl"));
     const fix = screen.getByText("Fix…") as HTMLButtonElement;
     expect(fix.disabled).toBe(false);
-    shown = { ...two(), busy: true, status: { state: "fixing", title: "other" } };
+    // A sweep, not a fix: a running fix shows its steps instead of the finding.
+    shown = { ...two(), busy: true, status: sweeping(false).status };
     handlers.get("changed")?.({ payload: null });
     await vi.waitFor(() => expect(fix.disabled).toBe(true));
   });
