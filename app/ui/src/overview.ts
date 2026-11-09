@@ -8,6 +8,11 @@ export const SEVERITIES: readonly Severity[] = ["critical", "high", "medium", "l
 
 export type Counts = Readonly<Record<Severity, number>>;
 
+export type FixStep = {
+  readonly label: string;
+  readonly state: "done" | "now" | "next";
+};
+
 export type Status =
   | { readonly state: "idle" }
   | {
@@ -31,7 +36,18 @@ export type Status =
       readonly started: string;
       readonly step_started: string;
     }
-  | { readonly state: "fixing"; readonly title: string }
+  | {
+      readonly state: "fixing";
+      readonly title: string;
+      /** Its target's name: "This Mac", `owner/name`, the server. */
+      readonly place: string;
+      /** Every step of the fix in order, as Rust places them. */
+      readonly steps: readonly FixStep[];
+      /** The agent's last line of output while it runs. */
+      readonly activity: string | null;
+      readonly started: string;
+      readonly step_started: string;
+    }
   | { readonly state: "failed"; readonly error: string };
 
 export type Listed = {

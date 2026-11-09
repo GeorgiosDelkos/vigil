@@ -451,6 +451,10 @@ Built in step 9a (2026-11-06):
   whatever runs (a fix included, recorded as `unknown`: it may have made part of the change)
   and exits once it has ended, or after 10 s; a second quit changes nothing. In the CLI,
   Ctrl-C cancels the same way (exit code 130); a second Ctrl-C exits at once.
+- While a fix runs, the popover lists its steps (preparing the fix, the agent applying it,
+  recording the result) as done, now or next, as Rust reports them (`FixProgress`), with how
+  long the current one has run, where the fix runs, and no Cancel button. Almost all of a fix
+  is the agent's step, which has no known length, so there is no bar (decided 2026-11-08).
 - Every program a sweep or fix starts (the agent, `brew`, `gh`, `ssh`) runs under a small `sh`
   watchdog that leads its own process group and checks once a second that the app or CLI
   still runs. However that ends (quit, logout, `kill`, a crash, a closed terminal), the
