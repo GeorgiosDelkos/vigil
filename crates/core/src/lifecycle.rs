@@ -319,7 +319,7 @@ pub struct Latest {
     /// The findings and issues not dismissed, most severe first; each says whether a fix was
     /// reported for it.
     pub open: Vec<Open>,
-    /// Confirmed fixes that finished in the last 30 days (`CONFIRMED_DAYS`), newest first: a run
+    /// Confirmed fixes that finished in the last `CONFIRMED_DAYS` days, newest first: a run
     /// reported the finding fixed, and a later sweep no longer finds it.
     pub fixed: Vec<Fixed>,
     /// How many are dismissed.
