@@ -25,6 +25,7 @@ use serde::Serialize;
 use serde::de::IgnoredAny;
 
 use crate::config::Config;
+use crate::findings::Confidence;
 use crate::findings::Severity;
 use crate::findings::is_forging;
 use crate::fix;
@@ -384,10 +385,16 @@ pub struct Open {
     pub place: String,
     /// Exploited in the wild (CISA KEV).
     pub known_exploited: bool,
+    /// How sure the agent is that the installed version is affected; `None` for an issue.
+    pub confidence: Option<Confidence>,
+    /// What the agent checked, in its words; empty in a report saved before it was kept.
+    pub evidence: String,
     /// What it means, in the agent's words.
     pub explanation: String,
     /// One line: what the fix does.
     pub fix: String,
+    /// The fix's steps, in order.
+    pub steps: Vec<String>,
     /// The fix's exact commands.
     pub commands: Vec<String>,
     /// When a sweep first found it; `None` in a report saved before that was kept.
@@ -506,11 +513,17 @@ fn open_entry(entry: &SavedEntry, new: bool, fix_state: Option<FixState>) -> Ope
         advisories: entry.advisories.iter().map(|a| plain(a)).collect(),
         place: plain(&entry.place),
         known_exploited: entry.known_exploited,
+        confidence: entry.confidence,
+        evidence: plain(&entry.evidence),
         explanation: plain(&entry.explanation),
         fix: entry
             .fix
             .as_ref()
             .map_or(String::new(), |f| plain(&f.summary)),
+        steps: entry
+            .fix
+            .as_ref()
+            .map_or(Vec::new(), |f| f.steps.iter().map(|s| plain(s)).collect()),
         commands: entry.fix.as_ref().map_or(Vec::new(), |f| {
             f.commands.iter().map(|c| plain(c)).collect()
         }),
@@ -555,6 +568,11 @@ pub(crate) struct SavedEntry {
     advisories: Vec<String>,
     #[serde(default)]
     known_exploited: bool,
+    /// A finding's; an issue has none.
+    #[serde(default)]
+    confidence: Option<Confidence>,
+    #[serde(default)]
+    evidence: String,
     #[serde(default)]
     explanation: String,
     installed: Option<SavedInstalled>,
@@ -569,6 +587,8 @@ pub(crate) struct SavedEntry {
 #[derive(Debug, Clone, Deserialize)]
 struct SavedFix {
     summary: String,
+    #[serde(default)]
+    steps: Vec<String>,
     #[serde(default)]
     commands: Vec<String>,
 }
@@ -1026,6 +1046,35 @@ mod tests {
         );
         assert_eq!(mac.open[0].fix, "up grade", "one line");
         assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
+    }
+
+    #[test]
+    fn latest_keeps_evidence_confidence_and_steps_as_plain_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let finding = json!({"key": FindingKey(1), "severity": "high", "title": "t",
+            "confidence": "likely", "evidence": "4.1\n< 4.2\u{1b}",
+            "fix": {"summary": "s", "steps": ["stop\nit", "upgrade"], "commands": ["c"]}});
+        let issue = json!({"key": FindingKey(2), "severity": "low", "title": "i",
+            "evidence": "e", "fix": {"summary": "s", "commands": []}});
+        let report = json!({
+            "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
+            "findings": [finding], "issues": [issue],
+        });
+        save(&data_dir.sweeps_dir(), "20261105T000000Z/mac", &report);
+
+        let all = latest(&data_dir, &config).unwrap();
+        let [finding, issue] = &all[0].open[..] else {
+            panic!("one finding and one issue: {:?}", all[0].open);
+        };
+        assert!(matches!(finding.confidence, Some(Confidence::Likely)));
+        assert_eq!(finding.evidence, "4.1 < 4.2\u{fffd}");
+        assert_eq!(finding.steps, ["stop it", "upgrade"]);
+        assert!(issue.confidence.is_none(), "an issue has no confidence");
+        assert!(issue.steps.is_empty(), "saved without steps");
     }
 
     /// One `fixes.jsonl` line: a run of `key` planned from the report that started at `found`,
