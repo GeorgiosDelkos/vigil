@@ -527,15 +527,17 @@ HTML report (asked for 2026-11-09: "click on a button and get that opened on the
 with all the details", dark, not white):
 
 - `write_html_report` writes `report.html` in the data directory, replacing the last one, and
-  the app's `open_report` command (for the popover's report button) writes it and opens it
-  with `/usr/bin/open`. It renders `latest` through `popover_view`, so it shows what `vigil
+  the app's `open_report` command writes it and opens it with `/usr/bin/open`; the popover's
+  button that calls it comes with the popover's new main view, built separately. It renders `latest` through `popover_view`, so it shows what `vigil
   findings` and the popover show: the headline, the key numbers (need you, exploited, open,
   fixed in 30 days, dismissed), a callout for each finding exploited in the wild with the
   command to run first, the open findings and issues under "Needs you" (exploited, critical
-  or high) and "Lower", each expanding to its explanation, advisories, installed version,
-  place, confidence, first seen, fix status, key, the agent's evidence, the fix's summary,
+  or high) and "Lower", each expanding to its explanation, advisories (or, for an issue, its
+  subject), installed version, place, confidence, first seen, fix status, key, the agent's evidence, the fix's summary,
   steps and commands with Copy buttons; then a table of targets and one of the fixes
-  confirmed in the last 30 days, and the sources. Times are in UTC.
+  confirmed in the last 30 days, and the sources. Times are in UTC. Agent text is shown as
+  one plain line, as everywhere else (line breaks become spaces). Writers take `state/.lock`,
+  so the CLI and the app never write it at once.
 - Dark only, after the approved mockup: the night ground with faint violet and cyan light,
   glass panels, neon severity colours, system fonts.
 - One file that loads nothing: inline CSS, an inline SVG mark, and one inline script for the
@@ -559,7 +561,8 @@ asks to confirm). Same core, same files.
   `dismiss` shows at once. Titles and summaries are printed as plain lines (control and
   invisible characters replaced), since they hold agent text and names from the target.
   `--json` prints one object per target (`target`, `swept`, `components`, `open`, `fixed`,
-  `dismissed`); an open entry's `fix_state` is null or `reported` (with `summary` and
+  `dismissed`); an open entry also has its `confidence` (null for an issue), `evidence` and
+  fix `steps`, and its `fix_state` is null or `reported` (with `summary` and
   `pull_request`) or `not_held`. Each report
   entry carries that `title`, so the tray app shows the same line. `--target` matches the
   report name exactly.
