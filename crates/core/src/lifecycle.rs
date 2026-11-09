@@ -1106,7 +1106,8 @@ mod tests {
 
         // A later sweep: the fixed one is gone, the others are still found.
         let second = "2026-11-05T13:00:00Z";
-        let rest = [failed, crashed, refixed];
+        // The crashed one is gone too, but its fix did not succeed: not a confirmed fix.
+        let rest = [failed, refixed];
         save(
             &sweeps,
             "20261105T130000Z/mac",
@@ -1175,6 +1176,16 @@ mod tests {
         let runs = fix::runs(&data_dir).unwrap();
         let keys: Vec<FindingKey> = runs.iter().map(|r| r.key).collect();
         assert_eq!(keys, [FindingKey(1)]);
+    }
+
+    #[test]
+    fn a_history_that_cannot_be_read_fails_and_a_missing_one_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        assert!(fix::runs(&data_dir).unwrap().is_empty(), "no history yet");
+        // A folder where the file should be: reading it fails, and is not taken as no fixes.
+        fs::create_dir_all(data_dir.state_dir().join("fixes.jsonl")).unwrap();
+        assert!(matches!(fix::runs(&data_dir), Err(StateError::Read { .. })));
     }
 
     #[test]
