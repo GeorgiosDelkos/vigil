@@ -318,6 +318,23 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_copy_is_noted_not_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = DataDir::new(tmp.path());
+        // A folder where the copy should be: reading it fails with something other than
+        // NotFound.
+        fs::create_dir_all(data.prompts_dir().join("fix.md")).unwrap();
+
+        let mut notes = Vec::new();
+        update(&data, &mut notes);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0].starts_with("prompts/fix.md: cannot compare it"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
     fn a_missing_copy_is_left_for_first_use() {
         let tmp = tempfile::tempdir().unwrap();
         let data = DataDir::new(tmp.path());
