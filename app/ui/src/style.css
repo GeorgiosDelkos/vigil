@@ -26,8 +26,9 @@
      value. The owner asked for one scale on 2026-11-10, after elements that should line up
      sat 1 to 3 pixels apart.
 
-     The layout it gives: cards sit 12 from the window's edge; headings, labels and bars 24;
-     a row's text 60 (card 12, row padding 12, icon column 24, gap 12), in every list. */
+     The layout it gives, measured inside the popover's 1 pixel border (so one more from the
+     window's edge): cards sit at 12; headings, labels and bars at 24; a row's text at 60 (card
+     12, row padding 12, icon column 24, gap 12), in every list. */
   --space-4: 4px;
   --space-8: 8px;
   --space-12: 12px;
@@ -561,12 +562,12 @@ button.row:hover {
 /* Target rows, in the list's Targets tab and on the main view (orbit.css): the row template
    with every part in its own cell, the same in every row. Line 1 is the name and, at the right,
    its status; line 2 what was checked and when; then the counts 8 below and the bar 4 below
-   them, both across the full width. With the row padding a row is 100 high. */
+   them, both across the full width. In the list the name and line 2 wrap and the row grows;
+   the main view fixes each row at 100. */
 .trow {
   position: relative;
   display: grid;
   grid-template-columns: var(--space-24) minmax(0, 1fr) auto;
-  grid-template-rows: var(--leading-13) var(--leading-11) auto auto;
   column-gap: var(--space-12);
   align-items: center;
   width: 100%;
@@ -590,9 +591,7 @@ button.row:hover {
 .tname,
 .tsub {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .tname {
   grid-area: 1 / 2;
@@ -606,8 +605,10 @@ button.row:hover {
   font-size: var(--text-11);
   line-height: var(--leading-11);
 }
+/* Level with the name's first line when the name wraps. */
 .target .open {
   grid-area: 1 / 3;
+  align-self: start;
   display: inline-flex;
   align-items: center;
   gap: var(--space-4);
@@ -635,6 +636,8 @@ button.row:hover {
   display: grid;
   white-space: nowrap;
 }
+/* 15 pixel figures on the 16 pixel line of the 11 size: digits have no descenders, and the
+   tighter line keeps a main-view row at exactly 100, three to its 300 card. */
 .tcount b {
   font-size: var(--text-15);
   line-height: var(--leading-11);

@@ -92,7 +92,8 @@
   background: rgba(255, 255, 255, 0.08);
 }
 
-/* The edges of the list views: cards 12 from the window, the header's text and the bar 24. */
+/* The edges of the list views, inside the popover's 1 pixel border: cards at 12, the header's
+   text and the bar at 24. */
 .orbit-top {
   display: flex;
   align-items: center;
@@ -189,7 +190,7 @@
 }
 
 /* The urgent card and the target rows use the lists' row template (style.css): 12 padding, a
-   24 marker column and a 12 gap, so names start 60 from the window's edge as a list row's do,
+   24 marker column and a 12 gap, so names start at 60 inside the border as a list row's do,
    and the chevrons end where a list row's age does. */
 .orbit .urgent {
   margin: 0 var(--space-12);
@@ -278,8 +279,11 @@
   background: rgba(255, 255, 255, 0.05);
 }
 /* The target rows (style.css), as buttons in neon: the chevron takes the last column, centred
-   on the whole row, so the lines below the name stop short of it. */
+   on the whole row, so the lines below the name stop short of it. Each line keeps its line
+   height and cuts long text short, so every row is 100 high: padding 8 + 20 + 16 + counts 8 +
+   32 + bar 4 + 4 + padding 8. */
 .orbit .trow {
+  grid-template-rows: var(--leading-13) var(--leading-11) auto auto;
   border: 0;
   background: none;
   color: inherit;
@@ -304,6 +308,12 @@
 .orbit .tcounts,
 .orbit .tbar {
   grid-column: 2;
+}
+.orbit .tname,
+.orbit .tsub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .orbit .tsub {
   color: var(--n-ink2);
