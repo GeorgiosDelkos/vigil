@@ -439,7 +439,8 @@ fn describe(
     match kind {
         EventKind::Introduced => {
             // Every event after `last` is above the version, so the first fix is the nearest.
-            let fix = timeline[last + 1..]
+            // The slice starts at `last` itself, an introduced event that `find_map` skips.
+            let fix = timeline[last..]
                 .iter()
                 .find_map(|(_, kind, text)| match kind {
                     EventKind::Fixed => Some(format!(" and < fixed {text}")),
@@ -447,9 +448,11 @@ fn describe(
                     EventKind::Introduced | EventKind::Limit => None,
                 })
                 .unwrap_or_default();
-            let limit = limit
-                .map(|l| format!(" and < limit {l}"))
-                .unwrap_or_default();
+            // Not `map_or_default`, which beta clippy suggests: it is not stable yet.
+            let limit = match limit {
+                Some(l) => format!(" and < limit {l}"),
+                None => String::new(),
+            };
             Match::InRange(format!("{version} >= introduced {text}{fix}{limit}"))
         }
         EventKind::Fixed => Match::OutOfRange(format!("{version} >= fixed {text}")),
@@ -777,6 +780,14 @@ mod tests {
                 "2.0.0"
             ),
             Match::Unknown("two events at 1.0.0".to_owned())
+        );
+        assert_eq!(
+            judge(
+                "npm:x",
+                semver(json!([{"introduced": "0"}, {"fixed": "1.x"}])),
+                "2.0.0"
+            ),
+            Match::Unknown("fixed 1.x is not a SemVer version".to_owned())
         );
 
         let git = json!({"ranges": [{"type": "GIT", "repo": "r", "events": [
