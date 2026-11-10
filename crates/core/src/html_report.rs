@@ -144,13 +144,10 @@ fn exploited_callout(view: &PopoverView) -> String {
         .filter(|f| f.open.known_exploited)
         .map(|f| {
             let open = &f.open;
-            // A command reads as one, in mono; a manual fix's summary reads as prose.
+            // A command reads as code; a manual fix's summary reads as prose.
             let first = match (open.commands.first(), open.fix.is_empty()) {
                 (Some(command), _) => {
-                    format!(
-                        " Fix it first: <span class=\"mono\">{}</span>",
-                        esc(command)
-                    )
+                    format!(" Fix it first: <code>{}</code>", esc(command))
                 }
                 (None, false) => format!(" Fix it first: {}.", esc(&open.fix)),
                 (None, true) => String::new(),
@@ -291,7 +288,7 @@ fn details_list(listed: &Listed) -> String {
     if let Some(state) = &open.fix_state {
         rows.push(("Fix status", fix_status(state)));
     }
-    rows.push(("Key", format!("<span class=\"mono\">{}</span>", open.key)));
+    rows.push(("Key", format!("<code>{}</code>", open.key)));
     let rows: String = rows
         .into_iter()
         .map(|(term, value)| format!("<dt>{term}</dt><dd>{value}</dd>"))
@@ -309,7 +306,7 @@ fn fix_status(state: &FixState) -> String {
             pull_request,
         } => {
             let pull_request = pull_request.as_ref().map_or(String::new(), |url| {
-                format!("; pull request <span class=\"mono\">{}</span>", esc(url))
+                format!("; pull request <code>{}</code>", esc(url))
             });
             format!(
                 "fix reported on {}: {}{pull_request}. The next sweep checks it.",
@@ -389,7 +386,7 @@ fn fixed_table(fixed: &[FixedListed]) -> String {
         .iter()
         .map(|f| {
             let pull_request = f.fixed.pull_request.as_ref().map_or(String::new(), |url| {
-                format!("<br><span class=\"mono\">{}</span>", esc(url))
+                format!("<br><code>{}</code>", esc(url))
             });
             format!(
                 "<tr><td><b>{}</b></td><td>{}</td><td>{}{pull_request}</td><td>{}</td></tr>",
@@ -524,10 +521,10 @@ document.addEventListener("click", (event) => {
 
 /// IBM Plex Sans, the app's one typeface, as `@font-face` rules with the font files inlined:
 /// the page is opened from disk and its CSP allows no request, so the font travels inside it
-/// (about 155 kB). The same unmodified IBM files as the app's, `app/ui/src/fonts` (where their
-/// source and licence are), in the same order: Pi then Latin1 per weight, so Latin1 is tried
-/// first. Regenerate after changing those files by base64-encoding each one into a
-/// `data:font/woff2` URL; `the_report_font_is_the_app_s` checks they match.
+/// (about 155 kB). It is the `@font-face` rules of `app/ui/src/style.css` (where the files'
+/// source and licence are), one line each, with every `url()` replaced by that file's
+/// `data:font/woff2;base64,` URL. Regenerate it that way after changing the files;
+/// `the_report_font_is_the_app_s` checks each file is embedded under its weight.
 const PLEX_CSS: &str = include_str!("html_report/plex.css");
 
 /// The approved mockup's report styles, dark only: the night ground with faint violet and cyan
@@ -545,7 +542,8 @@ body { margin: 0; color: #e6e9f5; font: 15px/1.6 var(--font); min-height: 100vh;
   background-attachment: fixed; }
 main { max-width: 1060px; margin: 0 auto; padding: 40px 24px 56px; display: grid; gap: 34px; }
 p { margin: 0; }
-.mono, code { font-family: var(--font); }
+/* Commands, keys and links are <code>, in the one typeface rather than the default mono. */
+code { font-family: var(--font); }
 .rep-head { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; }
 .mark rect { fill: #12162a; }
 .mark path { stroke: #8fa2ff; }
@@ -712,10 +710,13 @@ mod tests {
     #[test]
     fn the_report_font_is_the_app_s() {
         let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/ui/src/fonts");
-        let mut at = 0;
-        for weight in ["Regular", "Medium", "SemiBold", "Bold"] {
-            // Pi before Latin1, as in the app's style.css, so Latin1 is tried first.
-            for part in ["Pi", "Latin1"] {
+        for (weight, number) in [
+            ("Regular", 400),
+            ("Medium", 500),
+            ("SemiBold", 600),
+            ("Bold", 700),
+        ] {
+            for part in ["Latin1", "Pi"] {
                 let file = fonts.join(format!("IBMPlexSans-{weight}-{part}.woff2"));
                 let out = Command::new("/usr/bin/openssl")
                     .args(["base64", "-A", "-in"])
@@ -724,11 +725,15 @@ mod tests {
                     .expect("macOS ships /usr/bin/openssl");
                 assert!(out.status.success(), "openssl base64 {}", file.display());
                 let encoded = String::from_utf8(out.stdout).unwrap();
-                let url = format!("data:font/woff2;base64,{}", encoded.trim());
-                let found = PLEX_CSS[at..]
-                    .find(&url)
-                    .unwrap_or_else(|| panic!("{} is not embedded, in order", file.display()));
-                at += found + url.len();
+                let rule = format!(
+                    "font-weight: {number}; src: url(\"data:font/woff2;base64,{}\")",
+                    encoded.trim()
+                );
+                assert!(
+                    PLEX_CSS.contains(&rule),
+                    "{} is not embedded under weight {number}",
+                    file.display()
+                );
             }
         }
         assert!(page(vec![mac(Vec::new())]).contains(PLEX_CSS));
@@ -916,12 +921,12 @@ mod tests {
         );
         assert!(item(1).contains(
             "<dt>Fix status</dt><dd>fix reported on 8 Nov 2026, 00:00 UTC: upgraded; pull \
-             request <span class=\"mono\">https://github.com/o/r/pull/7</span>. The next sweep \
+             request <code>https://github.com/o/r/pull/7</code>. The next sweep \
              checks it.</dd>"
         ));
         assert!(item(1).contains("<dt>Installed</dt><dd>pkg1 1.0.0</dd>"));
         assert!(item(1).contains("<dt>Where</dt><dd>This Mac · Homebrew</dd>"));
-        assert!(item(1).contains("<dt>Key</dt><dd><span class=\"mono\">0000000000000001"));
+        assert!(item(1).contains("<dt>Key</dt><dd><code>0000000000000001"));
         assert!(item(2).contains("<dt>First seen</dt><dd>not recorded</dd>"));
         assert!(item(2).contains(
             "<dt>Fix status</dt><dd>still found after a fix on 7 Nov 2026, 00:00 UTC</dd>"
@@ -955,7 +960,7 @@ mod tests {
              <a href=\"https://nvd.nist.gov/vuln/detail/CVE-2024-3094\" \
              referrerpolicy=\"no-referrer\">CVE-2024-3094</a>, \
              which attackers are using now. Fix it first: \
-             <span class=\"mono\">brew upgrade webp</span></p>"
+             <code>brew upgrade webp</code></p>"
         ));
         assert_eq!(html.matches("sevlbl kev").count(), 1, "only on pkg2");
 
@@ -1051,7 +1056,7 @@ mod tests {
         assert!(html.contains("<h2>Fixed in the last 30 days</h2>"));
         assert!(html.contains(
             "<tr><td><b>zlib &lt;1.3</b></td><td>This Mac</td><td>upgraded zlib<br>\
-             <span class=\"mono\">https://github.com/o/r/pull/7&quot;&gt;&lt;x&gt;</span></td>\
+             <code>https://github.com/o/r/pull/7&quot;&gt;&lt;x&gt;</code></td>\
              <td>8 Nov 2026, 10:00 UTC</td></tr>"
         ));
         assert!(html.contains("<div><b>2</b><span>dismissed</span></div>"));
