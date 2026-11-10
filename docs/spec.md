@@ -453,6 +453,10 @@ not an OSV ecosystem, so formulae go through NVD.
   measures it (`Progress::thousandths`): listing up to 5% of a target, fetching advisories up
   to 50%, the agent the rest. The agent's run has no known length, so that part of the bar
   moves instead of filling, and the step shows how long it has run (decided 2026-11-08).
+- One typeface for all text, IBM Plex Sans (chosen 2026-11-10 over Sora, Geist and Chakra
+  Petch), code and counts included: IBM's unmodified web fonts, bundled in `app/ui/src/fonts`
+  so the app and the report look the same offline. The licence ships beside them in the build
+  (`app/ui/public/fonts/OFL.txt`), and the report's font CSS opens with the copyright notice.
 - Plugins: notification, autostart, positioner (versions looked up at implementation time).
 - Scheduler: in-app interval timer; skip if a sweep is running; run once on wake if overdue.
 
@@ -569,9 +573,10 @@ with all the details", dark, not white):
   one plain line, as everywhere else (line breaks become spaces). Writers take `state/.lock`,
   so the CLI and the app never write it at once.
 - Dark only, after the approved mockup: the night ground with faint violet and cyan light,
-  glass panels, neon severity colours, system fonts.
-- One file that loads nothing: inline CSS, an inline SVG mark, and one inline script for the
-  Copy buttons. Its Content Security Policy allows no request and only that script, by hash.
+  glass panels, neon severity colours, and IBM Plex Sans, the app's one typeface.
+- One file that loads nothing: inline CSS, the font inlined as data (about 155 kB), an inline
+  SVG mark, and one inline script for the Copy buttons. Its Content Security Policy allows no
+  request, only inline fonts, and only that script, by hash.
 - Every text is HTML-escaped: it holds agent text and names from the target. Advisory ids
   link only to NVD (CVE ids) or OSV.dev (other ids), and only when the id has a strict
   shape; anything else, the agent's pull request URLs included, is plain text.

@@ -72,7 +72,7 @@ fn render(latest: Vec<Latest>, now: Timestamp) -> String {
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <meta http-equiv=\"Content-Security-Policy\" content=\"{CSP}\">\n\
-         <title>Vigil report</title>\n<style>{CSS}</style>\n</head>\n<body>\n<main>\n"
+         <title>Vigil report</title>\n<style>{PLEX_CSS}{CSS}</style>\n</head>\n<body>\n<main>\n"
     );
     out.push_str(&head(&view, components, now));
     out.push_str(&numbers(&view));
@@ -144,13 +144,10 @@ fn exploited_callout(view: &PopoverView) -> String {
         .filter(|f| f.open.known_exploited)
         .map(|f| {
             let open = &f.open;
-            // A command reads as one, in mono; a manual fix's summary reads as prose.
+            // A command reads as code; a manual fix's summary reads as prose.
             let first = match (open.commands.first(), open.fix.is_empty()) {
                 (Some(command), _) => {
-                    format!(
-                        " Fix it first: <span class=\"mono\">{}</span>",
-                        esc(command)
-                    )
+                    format!(" Fix it first: <code>{}</code>", esc(command))
                 }
                 (None, false) => format!(" Fix it first: {}.", esc(&open.fix)),
                 (None, true) => String::new(),
@@ -291,7 +288,7 @@ fn details_list(listed: &Listed) -> String {
     if let Some(state) = &open.fix_state {
         rows.push(("Fix status", fix_status(state)));
     }
-    rows.push(("Key", format!("<span class=\"mono\">{}</span>", open.key)));
+    rows.push(("Key", format!("<code>{}</code>", open.key)));
     let rows: String = rows
         .into_iter()
         .map(|(term, value)| format!("<dt>{term}</dt><dd>{value}</dd>"))
@@ -309,7 +306,7 @@ fn fix_status(state: &FixState) -> String {
             pull_request,
         } => {
             let pull_request = pull_request.as_ref().map_or(String::new(), |url| {
-                format!("; pull request <span class=\"mono\">{}</span>", esc(url))
+                format!("; pull request <code>{}</code>", esc(url))
             });
             format!(
                 "fix reported on {}: {}{pull_request}. The next sweep checks it.",
@@ -389,7 +386,7 @@ fn fixed_table(fixed: &[FixedListed]) -> String {
         .iter()
         .map(|f| {
             let pull_request = f.fixed.pull_request.as_ref().map_or(String::new(), |url| {
-                format!("<br><span class=\"mono\">{}</span>", esc(url))
+                format!("<br><code>{}</code>", esc(url))
             });
             format!(
                 "<tr><td><b>{}</b></td><td>{}</td><td>{}{pull_request}</td><td>{}</td></tr>",
@@ -492,9 +489,10 @@ fn plural(n: usize, noun: &str) -> String {
     }
 }
 
-/// No request of any kind: inline styles, an inline SVG, and only the one script whose hash is
-/// here. The hash is the base64 SHA-256 of [`COPY_SCRIPT`]; a test recomputes it.
-const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
+/// No request of any kind: inline styles, the embedded font, an inline SVG, and only the one
+/// script whose hash is here. The hash is the base64 SHA-256 of [`COPY_SCRIPT`]; a test
+/// recomputes it.
+const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; font-src data:; \
                    script-src 'sha256-2puN7X5gHhznz7AN+jqHuycIANGj9d/cqyTyUaB4TJ0='; \
                    base-uri 'none'; form-action 'none'";
 
@@ -521,36 +519,44 @@ document.addEventListener("click", (event) => {
 });
 "#;
 
+/// IBM Plex Sans, the app's one typeface, as `@font-face` rules with the font files inlined:
+/// the page is opened from disk and its CSP allows no request, so the font travels inside it
+/// (about 155 kB). The file is a licence comment on the first line (the copyright and OFL
+/// notice), then the `@font-face` rules of `app/ui/src/style.css`, one line each, with every
+/// `url()` replaced by that file's `data:font/woff2;base64,` URL. Regenerate it that way after
+/// changing the fonts; `the_report_font_is_the_app_s` checks every rule's family, weight,
+/// unicode-range and inlined file against style.css, the rule count, and the notice.
+const PLEX_CSS: &str = include_str!("html_report/plex.css");
+
 /// The approved mockup's report styles, dark only: the night ground with faint violet and cyan
-/// light, glass panels and the neon severity colours. System fonts, so the page works offline.
+/// light, glass panels and the neon severity colours, all text in IBM Plex Sans.
 const CSS: &str = r#"
 :root {
   color-scheme: dark;
-  --body: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-  --display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --font: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
 }
 * { box-sizing: border-box; }
 html { background: #08070f; }
-body { margin: 0; color: #e6e9f5; font: 15px/1.6 var(--body); min-height: 100vh; background:
+body { margin: 0; color: #e6e9f5; font: 15px/1.6 var(--font); min-height: 100vh; background:
   radial-gradient(60% 40% at 0% 0%, rgba(155,92,255,.10), transparent 70%),
   radial-gradient(50% 35% at 100% 10%, rgba(62,240,255,.07), transparent 70%), #08070f;
   background-attachment: fixed; }
 main { max-width: 1060px; margin: 0 auto; padding: 40px 24px 56px; display: grid; gap: 34px; }
 p { margin: 0; }
-.mono, code { font-family: var(--mono); }
+/* Commands, keys and links are <code>, in the one typeface rather than the default mono. */
+code { font-family: var(--font); }
 .rep-head { display: grid; grid-template-columns: auto 1fr auto; gap: 18px; align-items: center; }
 .mark rect { fill: #12162a; }
 .mark path { stroke: #8fa2ff; }
 .mark path.edge { stroke: #ff2e88; }
-.rep-head h1 { margin: 0; font: 700 30px/1.05 var(--display); letter-spacing: -.02em;
+.rep-head h1 { margin: 0; font: 700 30px/1.05 var(--font); letter-spacing: -.02em;
   color: #f4f6ff; }
 .rep-head p { color: #8e96ad; font-size: 14px; }
-.rep-head .stamp { text-align: right; font: 12px/1.5 var(--mono); color: #8e96ad; }
+.rep-head .stamp { text-align: right; font: 12px/1.5 var(--font); color: #8e96ad; }
 .rep-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px;
   background: rgba(255,255,255,.07); border-radius: 14px; overflow: hidden; }
 .rep-kpis div { background: #100f1a; padding: 16px 18px; display: grid; gap: 2px; }
-.rep-kpis b { font: 600 30px/1 var(--display); letter-spacing: -.02em; color: #f4f6ff;
+.rep-kpis b { font: 600 30px/1 var(--font); letter-spacing: -.02em; color: #f4f6ff;
   font-variant-numeric: tabular-nums; }
 .rep-kpis span { font-size: 12.5px; color: #8e96ad; }
 .rep-kpis .hot b { color: #ff2e88; text-shadow: 0 0 16px rgba(255,46,136,.55); }
@@ -560,12 +566,12 @@ p { margin: 0; }
 .rep-alert div { display: grid; gap: 6px; }
 .rep-alert b { font-weight: 600; }
 .rep-alert a { color: #ffd3e2; }
-.kevpill { font: 700 9.5px/1 var(--body); letter-spacing: .08em; text-transform: uppercase;
+.kevpill { font: 700 9.5px/1 var(--font); letter-spacing: .08em; text-transform: uppercase;
   color: #fff; background: #ff4d6d; border-radius: 5px; padding: 4px 6px; margin-top: 3px;
   box-shadow: 0 0 14px -2px rgba(255,77,109,.8); }
 .rep-clear p { border-radius: 14px; padding: 16px 20px; color: #c9f5dc;
   background: rgba(79,209,139,.08); box-shadow: inset 0 0 0 1px rgba(79,209,139,.35); }
-h2 { margin: 0 0 12px; font: 600 13px var(--mono); letter-spacing: .1em; text-transform: uppercase;
+h2 { margin: 0 0 12px; font: 600 13px var(--font); letter-spacing: .1em; text-transform: uppercase;
   color: #7f88a3; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .dot.critical { background: #ff3b5c; box-shadow: 0 0 8px #ff3b5c; }
@@ -579,7 +585,7 @@ h2 { margin: 0 0 12px; font: 600 13px var(--mono); letter-spacing: .1em; text-tr
   padding: 14px 18px; }
 .f summary::-webkit-details-marker { display: none; }
 .f summary .t { font-weight: 600; }
-.f summary .t span { font: 13px var(--mono); color: #8e96ad; margin-left: 6px; font-weight: 400; }
+.f summary .t span { font: 13px var(--font); color: #8e96ad; margin-left: 6px; font-weight: 400; }
 .f summary .w { color: #8e96ad; font-size: 13px; overflow-wrap: anywhere; }
 .f summary .tags { display: flex; gap: 8px; align-items: center; }
 .f summary .chev { color: #5d6579; transition: transform .2s; }
@@ -591,19 +597,19 @@ h2 { margin: 0 0 12px; font: 600 13px var(--mono); letter-spacing: .1em; text-tr
 .f .body dd { margin: 0; overflow-wrap: anywhere; }
 .f .body a { color: #3ef0ff; text-decoration: none; border-bottom: 1px solid rgba(62,240,255,.35); }
 .f .why { max-width: 72ch; color: #cdd3e4; }
-.f .ev { font: 12.5px/1.55 var(--mono); border-radius: 10px; padding: 12px 14px; color: #b5bdd3;
+.f .ev { font: 12.5px/1.55 var(--font); border-radius: 10px; padding: 12px 14px; color: #b5bdd3;
   background: rgba(0,0,0,.35); box-shadow: inset 0 0 0 1px rgba(255,255,255,.06);
   overflow-wrap: anywhere; }
 .f .fixsum { color: #cdd3e4; }
 .f .steps { margin: 0; padding-left: 20px; color: #cdd3e4; }
-.f .cmdl { display: flex; gap: 10px; align-items: center; font: 13px var(--mono);
+.f .cmdl { display: flex; gap: 10px; align-items: center; font: 13px var(--font);
   border-radius: 10px; padding: 10px 14px; background: #050409; color: #dfe6ff;
   box-shadow: inset 0 0 0 1px rgba(62,240,255,.25); }
 .f .cmdl::before { content: "$"; color: #6b7389; }
 .f .cmdl code { overflow-wrap: anywhere; }
-.f .cmdl button { margin-left: auto; font: 500 12px var(--body); border: 0; border-radius: 6px;
+.f .cmdl button { margin-left: auto; font: 500 12px var(--font); border: 0; border-radius: 6px;
   padding: 4px 9px; cursor: pointer; background: rgba(62,240,255,.12); color: #8ff6ff; }
-.sevlbl { font: 600 11px var(--body); letter-spacing: .06em; text-transform: uppercase;
+.sevlbl { font: 600 11px var(--font); letter-spacing: .06em; text-transform: uppercase;
   padding: 3px 8px; border-radius: 6px; }
 .sevlbl.critical { background: rgba(255,59,92,.16); color: #ff8098; }
 .sevlbl.high { background: rgba(255,138,31,.14); color: #ffae66; }
@@ -617,7 +623,7 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; border-radius: 
   box-shadow: inset 0 0 0 1px rgba(255,255,255,.08); }
 th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid rgba(255,255,255,.06);
   vertical-align: top; }
-th { font: 600 12px var(--body); color: #8e96ad; background: rgba(255,255,255,.04); }
+th { font: 600 12px var(--font); color: #8e96ad; background: rgba(255,255,255,.04); }
 td.num { font-variant-numeric: tabular-nums; }
 .rep-foot { font-size: 13px; color: #7f88a3; display: grid; gap: 4px; }
 @media (max-width: 640px) {
@@ -632,6 +638,7 @@ td.num { font-variant-numeric: tabular-nums; }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::process::Command;
     use std::process::Stdio;
 
@@ -699,6 +706,52 @@ mod tests {
         bare.fix = String::new();
         let without = page(vec![mac(vec![bare])]);
         assert!(!without.contains("<b>Fix:</b>"));
+    }
+
+    #[test]
+    fn the_report_font_is_the_app_s() {
+        // Every @font-face rule of the app's style.css, with the same weight and unicode-range
+        // and its file inlined, so the two cannot drift apart.
+        let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/ui/src");
+        let style = std::fs::read_to_string(ui.join("style.css")).unwrap();
+        let faces: Vec<&str> = style.split("@font-face {").skip(1).collect();
+        assert_eq!(faces.len(), 8, "four weights, Latin1 and Pi");
+        assert_eq!(
+            PLEX_CSS.matches("@font-face").count(),
+            faces.len(),
+            "plex.css has a rule style.css lacks"
+        );
+        for face in faces {
+            let face = &face[..face.find('}').unwrap()];
+            let value = |name: &str| {
+                let start = face.find(name).unwrap() + name.len();
+                let end = start + face[start..].find(';').unwrap();
+                face[start..end]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let file = value("src: url(\"./");
+            let file = &file[..file.find('"').unwrap()];
+            let out = Command::new("/usr/bin/openssl")
+                .args(["base64", "-A", "-in"])
+                .arg(ui.join(file))
+                .output()
+                .expect("macOS ships /usr/bin/openssl");
+            assert!(out.status.success(), "openssl base64 {file}");
+            let encoded = String::from_utf8(out.stdout).unwrap();
+            let rule = format!(
+                "font-family: {}; font-weight: {}; \
+                 src: url(\"data:font/woff2;base64,{}\") format(\"woff2\"); unicode-range: {};",
+                value("font-family: "),
+                value("font-weight: "),
+                encoded.trim(),
+                value("unicode-range:")
+            );
+            assert!(PLEX_CSS.contains(&rule), "{file} differs from style.css");
+        }
+        assert!(PLEX_CSS.starts_with("/* IBM Plex Sans: Copyright"));
+        assert!(page(vec![mac(Vec::new())]).contains(PLEX_CSS));
     }
 
     #[test]
@@ -883,12 +936,12 @@ mod tests {
         );
         assert!(item(1).contains(
             "<dt>Fix status</dt><dd>fix reported on 8 Nov 2026, 00:00 UTC: upgraded; pull \
-             request <span class=\"mono\">https://github.com/o/r/pull/7</span>. The next sweep \
+             request <code>https://github.com/o/r/pull/7</code>. The next sweep \
              checks it.</dd>"
         ));
         assert!(item(1).contains("<dt>Installed</dt><dd>pkg1 1.0.0</dd>"));
         assert!(item(1).contains("<dt>Where</dt><dd>This Mac · Homebrew</dd>"));
-        assert!(item(1).contains("<dt>Key</dt><dd><span class=\"mono\">0000000000000001"));
+        assert!(item(1).contains("<dt>Key</dt><dd><code>0000000000000001"));
         assert!(item(2).contains("<dt>First seen</dt><dd>not recorded</dd>"));
         assert!(item(2).contains(
             "<dt>Fix status</dt><dd>still found after a fix on 7 Nov 2026, 00:00 UTC</dd>"
@@ -922,7 +975,7 @@ mod tests {
              <a href=\"https://nvd.nist.gov/vuln/detail/CVE-2024-3094\" \
              referrerpolicy=\"no-referrer\">CVE-2024-3094</a>, \
              which attackers are using now. Fix it first: \
-             <span class=\"mono\">brew upgrade webp</span></p>"
+             <code>brew upgrade webp</code></p>"
         ));
         assert_eq!(html.matches("sevlbl kev").count(), 1, "only on pkg2");
 
@@ -1018,7 +1071,7 @@ mod tests {
         assert!(html.contains("<h2>Fixed in the last 30 days</h2>"));
         assert!(html.contains(
             "<tr><td><b>zlib &lt;1.3</b></td><td>This Mac</td><td>upgraded zlib<br>\
-             <span class=\"mono\">https://github.com/o/r/pull/7&quot;&gt;&lt;x&gt;</span></td>\
+             <code>https://github.com/o/r/pull/7&quot;&gt;&lt;x&gt;</code></td>\
              <td>8 Nov 2026, 10:00 UTC</td></tr>"
         ));
         assert!(html.contains("<div><b>2</b><span>dismissed</span></div>"));
@@ -1029,8 +1082,14 @@ mod tests {
     #[test]
     fn the_page_loads_nothing_and_allows_only_its_own_script() {
         let html = page(vec![mac(vec![open(1, Severity::High, true)])]);
+        // The font is the one thing with a URL, and every one of its URLs is inline data.
+        assert_eq!(
+            PLEX_CSS.matches("url(").count(),
+            PLEX_CSS.matches("url(\"data:font/woff2;base64,").count()
+        );
+        let rest = html.replace(PLEX_CSS, "");
         for needle in ["src=", "<link", "@import", "url(", "http://"] {
-            assert!(!html.contains(needle), "{needle}");
+            assert!(!rest.contains(needle), "{needle}");
         }
         let hrefs: Vec<&str> = html.split("href=\"").skip(1).collect();
         assert_eq!(
