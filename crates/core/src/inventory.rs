@@ -157,7 +157,7 @@ pub enum FoundIn {
     /// (`~/.nvm/versions/node/v22.1.0`).
     VersionManager {
         /// The version manager.
-        manager: Manager,
+        manager: VersionManager,
         /// The version's folder.
         path: PathBuf,
     },
@@ -206,7 +206,7 @@ impl std::fmt::Display for FoundIn {
 /// A version manager that keeps several versions of a runtime side by side.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Manager {
+pub enum VersionManager {
     /// nvm, for Node.js.
     Nvm,
     /// fnm, for Node.js.
@@ -219,7 +219,7 @@ pub enum Manager {
     Pyenv,
 }
 
-impl Manager {
+impl VersionManager {
     /// The manager's command name, as in `nvm uninstall`.
     pub fn name(self) -> &'static str {
         match self {
@@ -372,7 +372,7 @@ mod tests {
             (FoundIn::Pipx, "pipx"),
             (
                 FoundIn::VersionManager {
-                    manager: Manager::Nvm,
+                    manager: VersionManager::Nvm,
                     path: "/Users/me/.nvm/versions/node/v22.22.2".into(),
                 },
                 "nvm /Users/me/.nvm/versions/node/v22.22.2",
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn version_manager_is_serialized_by_name_and_folder() {
         let found_in = FoundIn::VersionManager {
-            manager: Manager::Pyenv,
+            manager: VersionManager::Pyenv,
             path: "/Users/me/.pyenv/versions/3.13.1".into(),
         };
         let json = r#"{"kind":"version_manager","manager":"pyenv","#.to_owned()

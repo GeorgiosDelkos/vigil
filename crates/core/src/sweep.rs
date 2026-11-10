@@ -1606,7 +1606,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::inventory::Manager;
+    use crate::inventory::VersionManager;
 
     #[test]
     fn no_agent_is_found_until_one_is_chosen() {
@@ -1862,7 +1862,7 @@ mod tests {
 
         let nvm = |version: &str| Component {
             found_in: FoundIn::VersionManager {
-                manager: Manager::Nvm,
+                manager: VersionManager::Nvm,
                 path: PathBuf::from(format!("/Users/me/.nvm/versions/node/v{version}")),
             },
             ..component("node.js", version)

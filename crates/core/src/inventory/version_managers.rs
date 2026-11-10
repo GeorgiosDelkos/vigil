@@ -17,7 +17,7 @@ use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::InventoryError;
 use crate::inventory::Lookup;
-use crate::inventory::Manager;
+use crate::inventory::VersionManager;
 use crate::inventory::toolchains::product;
 
 /// Adds every version the managers in this user's home folder installed.
@@ -43,23 +43,24 @@ pub(super) fn collect(inventory: &mut Inventory) {
 /// [`version_prefix`] says.
 #[derive(Debug)]
 struct Layout {
-    manager: Manager,
+    manager: VersionManager,
     dir: PathBuf,
     product: &'static str,
 }
 
 /// What comes before the version in the name of a manager's version folder.
-fn version_prefix(manager: Manager) -> &'static str {
+fn version_prefix(manager: VersionManager) -> &'static str {
     match manager {
-        Manager::Nvm | Manager::Fnm => "v",
-        Manager::Volta | Manager::Asdf | Manager::Pyenv => "",
+        VersionManager::Nvm | VersionManager::Fnm => "v",
+        VersionManager::Volta | VersionManager::Asdf | VersionManager::Pyenv => "",
     }
 }
 
 /// Each manager's folders, found as the manager finds them. `env` reads an environment
 /// variable.
 fn layouts(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<Layout> {
-    // An empty or relative value is not a folder any of the managers would use.
+    // An empty value means unset to the managers. A relative one is resolved against the
+    // shell's working folder, which Vigil does not know, so both fall back to the defaults.
     let env = |name: &str| env(name).filter(|p| p.is_absolute());
     let layout = |manager, dir: PathBuf, product| Layout {
         manager,
@@ -98,16 +99,24 @@ fn layouts(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<Layout> {
 
     let nvm = nvm
         .into_iter()
-        .map(|dir| layout(Manager::Nvm, dir.join("versions/node"), "node.js"));
+        .map(|dir| layout(VersionManager::Nvm, dir.join("versions/node"), "node.js"));
     let fnm = fnm_dirs(home, &env)
         .into_iter()
-        .map(|dir| layout(Manager::Fnm, dir, "node.js"));
+        .map(|dir| layout(VersionManager::Fnm, dir, "node.js"));
     let mut layouts: Vec<Layout> = nvm.chain(fnm).collect();
     layouts.extend([
-        layout(Manager::Volta, volta.join("tools/image/node"), "node.js"),
-        layout(Manager::Asdf, asdf.join("installs/nodejs"), "node.js"),
-        layout(Manager::Asdf, asdf.join("installs/python"), "python"),
-        layout(Manager::Pyenv, pyenv.join("versions"), "python"),
+        layout(
+            VersionManager::Volta,
+            volta.join("tools/image/node"),
+            "node.js",
+        ),
+        layout(
+            VersionManager::Asdf,
+            asdf.join("installs/nodejs"),
+            "node.js",
+        ),
+        layout(VersionManager::Asdf, asdf.join("installs/python"), "python"),
+        layout(VersionManager::Pyenv, pyenv.join("versions"), "python"),
     ]);
     layouts
 }
@@ -444,7 +453,7 @@ mod tests {
         let file = home.path().join(".pyenv");
         fs::write(&file, "").unwrap();
         let layout = Layout {
-            manager: Manager::Pyenv,
+            manager: VersionManager::Pyenv,
             dir: file.join("versions"),
             product: "python",
         };
@@ -464,7 +473,7 @@ mod tests {
         };
         let managed = |product_name: &str, version: &str| {
             let found_in = FoundIn::VersionManager {
-                manager: Manager::Asdf,
+                manager: VersionManager::Asdf,
                 path: PathBuf::from(format!("/m/{version}")),
             };
             at(product_name, version, found_in)
