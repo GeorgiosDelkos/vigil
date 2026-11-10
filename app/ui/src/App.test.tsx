@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, within } from "@solidjs/testing-lib
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
-import { finding, overview, settingsView } from "./fixtures.ts";
+import { advisory, component, finding, overview, settingsView } from "./fixtures.ts";
 import type { Overview, Status } from "./overview.ts";
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -58,7 +58,7 @@ function answer(extra: Record<string, (args?: unknown) => unknown> = {}) {
 
 const two = () =>
   overview({
-    findings: [
+    items: [
       finding("a", { name: "openssl", known_exploited: true, severity: "medium" }),
       finding("b", { name: "lodash", target: "me/app" }),
       finding("c", { name: "zlib", severity: "low", needs_you: false }),
@@ -302,7 +302,7 @@ describe("the popover", () => {
   it("marks a reported fix, an open pull request and a fix that did not hold", async () => {
     const at = new Date().toISOString();
     shown = overview({
-      findings: [
+      items: [
         finding("a", {
           name: "curl",
           fix_state: { state: "reported", at, summary: "upgraded", pull_request: null },
@@ -475,6 +475,199 @@ describe("a finding", () => {
   });
 });
 
+/** ffmpeg 8.1.2 with three advisories, `f2` exploited and so the lead, as Rust ranks them. */
+function ffmpeg(keys: readonly string[] = ["f2", "f1", "f3"]): Overview["items"][number] {
+  const all = {
+    f1: {
+      severity: "critical",
+      explanation: "Overflow in the demuxer.",
+      evidence: "8.1.2 < 8.1.3",
+    },
+    f2: { severity: "medium", explanation: "Crash on a crafted file.", known_exploited: true },
+    f3: { severity: "low", explanation: "Leaks a little memory.", evidence: "only with -i" },
+  } as const;
+  const found = keys.map((key) =>
+    advisory(key, {
+      ...all[key as keyof typeof all],
+      name: "ffmpeg",
+      version: "8.1.2",
+      place: "Homebrew formula ffmpeg",
+      advisories: [`CVE-2026-${key}`],
+      fix: "Upgrade ffmpeg.",
+      commands: ["brew upgrade ffmpeg"],
+    }),
+  );
+  const [lead, ...others] = found;
+  if (lead === undefined) {
+    throw new Error("a component has at least one finding");
+  }
+  return component("c-ffmpeg", [lead, ...others], {
+    severity: "critical",
+    known_exploited: keys.includes("f2"),
+  });
+}
+
+const grouped = (item = ffmpeg()) =>
+  overview({
+    items: [
+      item,
+      finding("i", {
+        name: "default_branch_protection",
+        version: null,
+        advisories: [],
+        place: "",
+        severity: "low",
+        needs_you: false,
+        target: "me/app",
+      }),
+    ],
+    needs_you: 1,
+    exploited: 1,
+    counts: { critical: 1, high: 0, medium: 0, low: 1 },
+    headline: "1 finding needs you",
+    last_swept: "2026-11-06T11:00:00Z",
+    first_sweep_hint: null,
+  });
+
+describe("a component", () => {
+  it("is one row with its worst severity, how many advisories and one fix", async () => {
+    shown = grouped();
+    answer();
+    await openList();
+    await screen.findByText("ffmpeg");
+    expect(names()).toEqual(["ffmpeg"]);
+    const ffmpegRow = screen.getByText("ffmpeg").closest("button") as HTMLElement;
+    expect(within(ffmpegRow).getByRole("img", { name: "critical" })).toBeTruthy();
+    expect(within(ffmpegRow).getByText("3 advisories")).toBeTruthy();
+    expect(within(ffmpegRow).getByText("Exploited")).toBeTruthy();
+    expect(within(ffmpegRow).getByText("Upgrade ffmpeg.")).toBeTruthy();
+    expect(within(ffmpegRow).queryByText(/CVE-2026/)).toBeNull();
+    expect(within(screen.getByRole("tab", { name: /All open/ })).getByText("2")).toBeTruthy();
+    expect(within(screen.getByRole("tab", { name: /Needs you/ })).getByText("1")).toBeTruthy();
+    expect(screen.getByRole("img", { name: "1 critical, 0 high, 0 medium, 1 low" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /All open/ }));
+    expect(names()).toEqual(["ffmpeg", "default_branch_protection"]);
+  });
+
+  it("goes by the name Rust gives it, a formula's over its product's", async () => {
+    const curl = component("c-curl", [
+      advisory("l", { name: "libcurl", version: "8.11.0" }),
+      advisory("c", { name: "curl", version: "8.11.0" }),
+    ]);
+    shown = { ...grouped({ ...curl, name: "curl" }) };
+    answer();
+    await openList();
+    expect(await screen.findByText("curl")).toBeTruthy();
+    expect(screen.queryByText("libcurl")).toBeNull();
+    fireEvent.click(screen.getByText("curl"));
+    expect((await screen.findByRole("heading")).textContent).toBe("curl 8.11.0");
+  });
+
+  it("is what the main view counts and names first", async () => {
+    shown = grouped();
+    answer();
+    render(() => <App />);
+    const count = await screen.findByTitle("Show details");
+    expect(count.textContent).toBe("1need you1 exploitedShow details");
+    const urgent = screen.getByText("ffmpeg 8.1.2").closest("button") as HTMLElement;
+    expect(
+      within(urgent).getByText("exploited in the wild · 3 advisories · This Mac"),
+    ).toBeTruthy();
+    fireEvent.click(urgent);
+    expect(await screen.findByRole("list", { name: "Advisories" })).toBeTruthy();
+  });
+
+  it("lists each advisory with its own severity, explanation and evidence", async () => {
+    shown = grouped();
+    answer();
+    await openList();
+    fireEvent.click(await screen.findByText("ffmpeg"));
+    const list = await screen.findByRole("list", { name: "Advisories" });
+    const advisories = within(list).getAllByRole("listitem");
+    expect(advisories.map((a) => a.querySelector("summary")?.textContent)).toEqual([
+      "CVE-2026-f2Exploitedmedium",
+      "CVE-2026-f1critical",
+      "CVE-2026-f3low",
+    ]);
+    const [, f1] = advisories;
+    expect(within(f1 as HTMLElement).getByText("Overflow in the demuxer.")).toBeTruthy();
+    expect(within(f1 as HTMLElement).getByText("8.1.2 < 8.1.3")).toBeTruthy();
+    expect(within(f1 as HTMLElement).getByText("f1")).toBeTruthy();
+    // One fix for the component, its commands once; dismissing is per advisory.
+    expect(screen.getAllByText("brew upgrade ffmpeg")).toHaveLength(1);
+    expect(screen.getByText("3 advisories")).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Dismiss…" })).toHaveLength(3);
+  });
+
+  it("runs the lead's fix, saying it is for the component", async () => {
+    shown = grouped();
+    answer({
+      fix_preview: () => ({
+        destination: "this Mac",
+        found: "2026-11-06T11:00:00Z",
+        summary: "Upgrade ffmpeg.",
+        steps: [],
+        commands: ["brew upgrade ffmpeg"],
+        agent: "claude",
+      }),
+      fix: () => null,
+    });
+    await openList();
+    fireEvent.click(await screen.findByText("ffmpeg"));
+    fireEvent.click(screen.getByText("Fix…"));
+    expect(await screen.findByText(/which all 3 advisories are in; the next sweep/)).toBeTruthy();
+    expect(invoke).toHaveBeenCalledWith("fix_preview", { key: "f2" });
+    // The lead dismissed elsewhere while the preview shows: Run fix still runs the fix shown.
+    shown = grouped(ffmpeg(["f1", "f3"]));
+    handlers.get("changed")?.({ payload: null });
+    await vi.waitFor(() => expect(screen.getByText("2 advisories")).toBeTruthy());
+    fireEvent.click(screen.getByText("Run fix"));
+    expect(invoke).toHaveBeenCalledWith("fix", { key: "f2", found: "2026-11-06T11:00:00Z" });
+  });
+
+  it("marks an advisory whose fix did not hold, not only the lead", async () => {
+    const item = ffmpeg();
+    const [f1, f3] = item.others;
+    if (f1 === undefined || f3 === undefined) {
+      throw new Error("ffmpeg has three findings");
+    }
+    const at = "2026-11-06T10:00:00Z";
+    shown = grouped({ ...item, others: [{ ...f1, fix_state: { state: "not_held", at } }, f3] });
+    answer();
+    await openList();
+    fireEvent.click(await screen.findByText("ffmpeg"));
+    const list = await screen.findByRole("list", { name: "Advisories" });
+    const [, held] = within(list).getAllByRole("listitem");
+    expect(within(held as HTMLElement).getByText("Still found after a fix")).toBeTruthy();
+  });
+
+  it("dismisses one advisory and keeps showing the rest", async () => {
+    shown = grouped();
+    answer({ dismiss: () => null });
+    await openList();
+    fireEvent.click(await screen.findByText("ffmpeg"));
+    const list = await screen.findByRole("list", { name: "Advisories" });
+    const f1 = within(list).getAllByRole("listitem")[1] as HTMLElement;
+    fireEvent.click(within(f1).getByRole("button", { name: "Dismiss…" }));
+    const reason = within(f1).getByLabelText("Why does this not apply?");
+    fireEvent.input(reason, { target: { value: "no demuxer" } });
+    fireEvent.submit((reason as HTMLInputElement).form as HTMLFormElement);
+    await vi.waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("dismiss", { key: "f1", reason: "no demuxer" }),
+    );
+
+    shown = grouped(ffmpeg(["f2", "f3"]));
+    handlers.get("changed")?.({ payload: null });
+    await vi.waitFor(() => expect(screen.getByText("2 advisories")).toBeTruthy());
+    expect(screen.getByRole("list", { name: "Advisories" })).toBeTruthy();
+
+    // With every advisory dismissed the item is gone, and so is its detail.
+    shown = { ...grouped(), items: [] };
+    handlers.get("changed")?.({ payload: null });
+    await vi.waitFor(() => expect(screen.queryByText("ffmpeg")).toBeNull());
+  });
+});
+
 describe("the summary", () => {
   it("says when nothing was swept yet, and sweeps on demand", async () => {
     shown = overview({ headline: "Not swept yet", first_sweep_hint: "Rust's first-sweep line" });
@@ -533,7 +726,7 @@ describe("the summary", () => {
 describe("the tabs", () => {
   it("show Rust's counts, mark the open one, and say when one is empty", async () => {
     shown = overview({
-      findings: [finding("c", { severity: "low", needs_you: false })],
+      items: [finding("c", { severity: "low", needs_you: false })],
       counts: { critical: 0, high: 0, medium: 0, low: 1 },
       headline: "1 open, none urgent",
     });
@@ -609,7 +802,7 @@ describe("the tabs", () => {
 describe("the rows", () => {
   it("show the version, advisories, place, fix and tags Rust gave", async () => {
     shown = overview({
-      findings: [
+      items: [
         finding("a", { known_exploited: true, new: true }),
         finding("b", { new: true, version: null, advisories: [], place: "", first_seen: null }),
       ],
@@ -657,7 +850,7 @@ describe("the detail", () => {
 
   it("leaves out the parts a finding does not have", async () => {
     shown = overview({
-      findings: [
+      items: [
         finding("x", {
           version: null,
           advisories: [],
@@ -910,7 +1103,7 @@ describe("the main view", () => {
 
   it("counts what is open when nothing needs you", async () => {
     shown = overview({
-      findings: [finding("c", { name: "zlib", severity: "low", needs_you: false })],
+      items: [finding("c", { name: "zlib", severity: "low", needs_you: false })],
       counts: { critical: 0, high: 0, medium: 0, low: 1 },
       headline: "1 open, none urgent",
       last_swept: "2026-11-06T11:00:00Z",

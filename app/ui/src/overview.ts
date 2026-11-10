@@ -50,7 +50,8 @@ export type Status =
     }
   | { readonly state: "failed"; readonly error: string };
 
-export type Listed = {
+/** One open finding or issue (the core's `Open`). */
+export type Finding = {
   readonly key: string;
   readonly severity: Severity;
   readonly title: string;
@@ -59,14 +60,39 @@ export type Listed = {
   readonly advisories: readonly string[];
   readonly place: string;
   readonly known_exploited: boolean;
+  readonly evidence: string;
   readonly explanation: string;
   readonly fix: string;
   readonly commands: readonly string[];
   readonly first_seen: string | null;
   readonly new: boolean;
   readonly fix_state: FixState | null;
+};
+
+/** One item of the list: an installed component with its open findings, or an issue. The
+ * lead's version, place and fix are the item's, and Fix runs the lead's key. */
+export type Listed = {
+  /** Its id in the list; it stays while findings in it are dismissed. */
+  readonly id: string;
   readonly target: string;
+  /** The component's name (a Homebrew formula's own, which can hold several products), or the
+   * issue's subject. */
+  readonly name: string;
+  readonly lead: Finding;
+  /** The other findings in the same component, ranked; empty for an issue. */
+  readonly others: readonly Finding[];
+  /** The worst severity of its findings. */
+  readonly severity: Severity;
+  /** Whether any of its findings is exploited in the wild. */
+  readonly known_exploited: boolean;
   readonly needs_you: boolean;
+  /** When any of its findings was first found. */
+  readonly first_seen: string | null;
+  readonly new: boolean;
+  /** "33 advisories" when it holds more than one finding. */
+  readonly advisory_count: string | null;
+  /** What the Fix confirmation adds when it holds more than one finding. */
+  readonly fix_scope: string | null;
 };
 
 export type TargetLine = {
@@ -103,7 +129,8 @@ export type FixedItem = {
 export type Overview = {
   readonly status: Status;
   readonly busy: boolean;
-  readonly findings: readonly Listed[];
+  /** The open items, ranked by risk. */
+  readonly items: readonly Listed[];
   /** Fixes a later sweep confirmed that finished in the last 30 days, newest first. */
   readonly fixed: readonly FixedItem[];
   readonly needs_you: number;

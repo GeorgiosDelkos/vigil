@@ -61,6 +61,7 @@ use crate::inventory::Inventory;
 use crate::inventory::Lookup;
 use crate::lifecycle;
 use crate::lifecycle::Changes;
+use crate::lifecycle::ComponentKey;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
@@ -429,10 +430,12 @@ pub fn sweep(
     }
 }
 
-/// What a sweep should raise a notification for: each finding and issue that is critical or
-/// high, not dismissed, and new since its target's last sweep with a verdict, as
-/// `target: title`. On a target's first sweep with a verdict, every such one is new; when the
-/// last report could not be read, none is.
+/// What a sweep should raise a notification for: the findings and issues that are critical
+/// or high, not dismissed, and new since their target's last sweep with a verdict, one line
+/// per component (as the popover counts them) and per issue. A component with one such finding
+/// reads `target: title`, one with more `target: component version, place: N advisories`. On a
+/// target's first sweep with a verdict, every such one is new; when the last report could not
+/// be read, none is.
 pub fn alerts(reports: &[Report]) -> Vec<String> {
     let mut alerts = Vec::new();
     for report in reports.iter().filter(|r| r.failure.is_none()) {
@@ -441,18 +444,33 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             None => report.first_verdict,
         };
         let serious = |severity: Severity| severity <= Severity::High;
-        let findings = report
+        let findings: Vec<&ReportFinding> = report
             .findings
             .iter()
             .filter(|f| f.dismissed.is_none() && serious(f.finding.severity) && new(f.key))
-            .map(|f| &f.title);
+            .collect();
+        let components = by_component(&report.target, &findings)
+            .into_iter()
+            .map(|group| {
+                let installed = &group[0].installed;
+                if group.len() == 1 {
+                    return group[0].title.clone();
+                }
+                plain(&format!(
+                    "{} {}, {}: {} advisories",
+                    group_name(installed),
+                    installed.version,
+                    installed.found_in,
+                    group.len()
+                ))
+            });
         let issues = report
             .issues
             .iter()
             .filter(|i| i.dismissed.is_none() && serious(i.issue.severity) && new(i.key))
-            .map(|i| &i.title);
+            .map(|i| i.title.clone());
         alerts.extend(
-            findings
+            components
                 .chain(issues)
                 .map(|t| format!("{}: {t}", report.target)),
         );
@@ -1284,7 +1302,7 @@ pub fn report_markdown(report: &Report) -> String {
         report.findings.iter().partition(|f| f.dismissed.is_none());
     let (issues, dismissed_issues): (Vec<&ReportIssue>, Vec<&ReportIssue>) =
         report.issues.iter().partition(|i| i.dismissed.is_none());
-    for group in by_component(&findings) {
+    for group in by_component(&report.target, &findings) {
         let first = group[0];
         let advisories = if group.len() == 1 {
             "1 advisory".to_owned()
@@ -1294,7 +1312,7 @@ pub fn report_markdown(report: &Report) -> String {
         out.push_str(&format!(
             "## {} {} {}\n\nFound in {}. {advisories}.\n\n",
             first.finding.severity.to_string().to_uppercase(),
-            escape(&component_name(&first.installed)),
+            escape(&group_name(&first.installed)),
             escape(&first.installed.version),
             escape(&first.installed.found_in.to_string()),
         ));
@@ -1365,31 +1383,39 @@ fn headline(report: &Report) -> String {
     }
 }
 
-/// Groups findings by component (same lookup, version and place found), in the order of each
-/// group's first finding. Findings are sorted most severe first, so each group starts with its
-/// worst finding and the groups come worst first.
-fn by_component<'a>(findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
-    let mut groups: Vec<Vec<&ReportFinding>> = Vec::new();
+/// Groups the findings of `target` by component, by the rule the popover uses
+/// ([`lifecycle::component_key`]), in the order of each group's first finding. Findings are
+/// sorted most severe first, so each group starts with its worst finding and the groups come
+/// worst first.
+fn by_component<'a>(target: &str, findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
+    let key = |f: &ReportFinding| {
+        let installed = &f.installed;
+        let serialized = "a component serializes to JSON, as its report does";
+        lifecycle::component_key(
+            target,
+            &serde_json::to_value(&installed.lookup).expect(serialized),
+            &installed.version,
+            &serde_json::to_value(&installed.found_in).expect(serialized),
+        )
+    };
+    let mut groups: Vec<(ComponentKey, Vec<&ReportFinding>)> = Vec::new();
     for &f in findings {
-        let key = component_key(&f.installed);
-        match groups
-            .iter_mut()
-            .find(|g| component_key(&g[0].installed) == key)
-        {
-            Some(group) => group.push(f),
-            None => groups.push(vec![f]),
+        let key = key(f);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group)) => group.push(f),
+            None => groups.push((key, vec![f])),
         }
     }
-    groups
+    groups.into_iter().map(|(_, group)| group).collect()
 }
 
-fn component_key(component: &Component) -> String {
-    format!(
-        "{}|{}|{}",
-        component_name(component),
-        component.version,
-        component.found_in
-    )
+/// A group's name: the place's own (a Homebrew formula, which can hold several products), or
+/// the component's.
+fn group_name(component: &Component) -> String {
+    component
+        .found_in
+        .install_name()
+        .map_or_else(|| component_name(component), str::to_owned)
 }
 
 fn finding_markdown(key: FindingKey, finding: &Finding) -> String {
@@ -2110,6 +2136,53 @@ mod tests {
         assert_eq!(
             alerts(&[first, failed]),
             ["mac: GHSA-3 in npm:c", "mac: file f"]
+        );
+    }
+
+    #[test]
+    fn alerts_name_a_component_once_with_how_many_advisories() {
+        let first = Report {
+            first_verdict: true,
+            ..report(
+                vec![
+                    report_finding("GHSA-1", "critical", false, "npm:a"),
+                    report_finding("GHSA-2", "high", false, "npm:a"),
+                    report_finding("GHSA-3", "low", false, "npm:a"),
+                    report_finding("GHSA-4", "high", false, "npm:b"),
+                ],
+                &[],
+            )
+        };
+        let name = component_name(&first.findings[0].installed);
+        assert_eq!(
+            alerts(&[first]),
+            [
+                format!("mac: {name} 1.0, macOS: 2 advisories"),
+                "mac: GHSA-4 in npm:b".to_owned()
+            ],
+            "the low one is not counted"
+        );
+
+        // One Homebrew formula mapped to two NVD products is one upgrade: one line, under
+        // the formula's name.
+        let mut first = Report {
+            first_verdict: true,
+            ..report(
+                vec![
+                    report_finding("CVE-1", "high", false, "curl"),
+                    report_finding("CVE-2", "high", false, "libcurl"),
+                ],
+                &[],
+            )
+        };
+        for f in &mut first.findings {
+            f.installed.found_in = FoundIn::HomebrewFormula {
+                name: "curl".to_owned(),
+            };
+        }
+        assert_eq!(
+            alerts(&[first]),
+            ["mac: curl 1.0, Homebrew formula curl: 2 advisories"]
         );
     }
 

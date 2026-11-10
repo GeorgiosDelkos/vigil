@@ -1,6 +1,6 @@
 // Command results for the component tests, shaped as the Rust commands return them.
 
-import type { Listed, Overview } from "./overview.ts";
+import type { Finding, Listed, Overview } from "./overview.ts";
 import type { SettingsView } from "./settings.ts";
 
 export function settingsView(changes: Partial<SettingsView> = {}): SettingsView {
@@ -58,7 +58,8 @@ export function settingsView(changes: Partial<SettingsView> = {}): SettingsView 
   };
 }
 
-export function finding(key: string, changes: Partial<Listed> = {}): Listed {
+/** One open finding, as Rust's `Open` serializes it. */
+export function advisory(key: string, changes: Partial<Finding> = {}): Finding {
   return {
     key,
     severity: "high",
@@ -68,23 +69,59 @@ export function finding(key: string, changes: Partial<Listed> = {}): Listed {
     advisories: [`GHSA-${key}`],
     place: "/Users/me/code/app/package-lock.json",
     known_exploited: false,
+    evidence: "1.0.0 is in the affected range.",
     explanation: "Reachable from the app.",
     fix: "Update to 1.0.1",
     commands: ["npm install pkg@1.0.1"],
     first_seen: "2026-11-06T10:00:00Z",
     new: false,
     fix_state: null,
-    target: "This Mac",
-    needs_you: true,
     ...changes,
   };
+}
+
+/** An item: a component holding `findings`, the first its lead. Its own values default to the
+ * lead's; a test that ranks or counts sets them, as Rust would work them out. */
+export function component(
+  id: string,
+  findings: readonly [Finding, ...Finding[]],
+  changes: Partial<Listed> = {},
+): Listed {
+  const [lead, ...others] = findings;
+  const grouped = others.length > 0;
+  return {
+    id,
+    target: "This Mac",
+    name: lead.name,
+    lead,
+    others,
+    severity: lead.severity,
+    known_exploited: lead.known_exploited,
+    needs_you: true,
+    first_seen: lead.first_seen,
+    new: lead.new,
+    advisory_count: grouped ? `${findings.length} advisories` : null,
+    fix_scope: grouped
+      ? `This fix is for the component, ${changes.name ?? lead.name} ${lead.version ?? ""}, which all ${findings.length} advisories are in; the next sweep checks each of them again.`
+      : null,
+    ...changes,
+  };
+}
+
+/** An item of one finding, `key`, with the finding's and the item's own changes. */
+export function finding(
+  key: string,
+  changes: Partial<Finding> & Partial<Pick<Listed, "target" | "needs_you">> = {},
+): Listed {
+  const { target = "This Mac", needs_you = true, ...rest } = changes;
+  return component(key, [advisory(key, rest)], { target, needs_you });
 }
 
 export function overview(changes: Partial<Overview> = {}): Overview {
   return {
     status: { state: "idle" },
     busy: false,
-    findings: [],
+    items: [],
     needs_you: 0,
     exploited: 0,
     counts: { critical: 0, high: 0, medium: 0, low: 0 },
