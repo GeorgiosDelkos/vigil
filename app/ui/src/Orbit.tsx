@@ -207,7 +207,7 @@ function Progress(props: { status: Sweeping; now: Date }) {
 
 /** A target's open findings per severity, worst first, as bar segments: only the severities it
  * has. Empty before its first sweep and when it is clear. */
-export function mix(target: TargetLine): { severity: Severity; count: number }[] {
+function mix(target: TargetLine): { severity: Severity; count: number }[] {
   if (target.swept === null) {
     return [];
   }
@@ -217,14 +217,22 @@ export function mix(target: TargetLine): { severity: Severity; count: number }[]
   }));
 }
 
-/** What a row's counts and bar say, for those who cannot see them. */
-function rowStatus(target: TargetLine): string {
+/** What a target's counts and bar say, for those who cannot see them. */
+function figuresText(target: TargetLine): string {
   if (target.swept === null) {
     return "not swept yet";
   }
+  if (target.open === 0) {
+    return "clear";
+  }
   const parts = mix(target).map((m) => `${m.count} ${m.severity}`);
-  const open = target.open > 0 ? `${target.open} open: ${parts.join(", ")}` : "clear";
-  return target.checked === null ? open : `${open}, ${target.checked}`;
+  return `${target.open} open: ${parts.join(", ")}`;
+}
+
+/** A main-view target row's name for screen readers: its counts, then what was checked. */
+function rowStatus(target: TargetLine): string {
+  const figures = figuresText(target);
+  return target.checked === null ? figures : `${figures}, ${target.checked}`;
 }
 
 /** One row per target, every row the same shape: the name, what was checked, a count for each
@@ -244,20 +252,18 @@ function TargetRows(props: {
       {/* Keyed by position, so a refetch during a sweep keeps the rows and their focus. */}
       <Index each={props.targets}>
         {(t) => (
-          <button type="button" class="trow" onClick={() => props.onOpen()}>
+          <button
+            type="button"
+            class="trow"
+            aria-label={`${t().label}, ${rowStatus(t())}`}
+            onClick={() => props.onOpen()}
+          >
             <Icon name={t().kind} />
-            <b class="tname" aria-hidden="true">
-              {t().label}
-            </b>
-            <span class="sr-only">
-              {t().label}, {rowStatus(t())}
-            </span>
+            <b class="tname">{t().label}</b>
             <span class="go" aria-hidden="true">
               ›
             </span>
-            <small class="tsub" aria-hidden="true">
-              {t().checked ?? "not swept yet"}
-            </small>
+            <small class="tsub">{t().checked ?? "not swept yet"}</small>
             <TargetFigures target={t()} colours={NEON} />
           </button>
         )}
@@ -268,7 +274,9 @@ function TargetRows(props: {
 
 /** A target row's last two lines, here and in the list's Targets tab: a count for each severity
  * in fixed columns, number over word (a zero dimmed, a dash before the first sweep), and the bar
- * split by severity. Hidden from screen readers; each row says the same in words. */
+ * split by severity. Screen readers get one sentence instead, in the words of the main view's
+ * row names. The colours come from the caller: the main view's neon ones live in orbit.ts,
+ * which also paints them on the canvas, so a CSS class per severity would copy them. */
 export function TargetFigures(props: {
   target: TargetLine;
   colours: Readonly<Record<Severity, string>>;
@@ -299,6 +307,7 @@ export function TargetFigures(props: {
           {(m) => <i style={{ "flex-grow": m().count, "--c": props.colours[m().severity] }} />}
         </Index>
       </span>
+      <span class="sr-only">{figuresText(t())}</span>
     </>
   );
 }

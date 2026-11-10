@@ -386,16 +386,26 @@ describe("the popover", () => {
   });
 
   it("shows all clear once a sweep found nothing", async () => {
+    const empty = overview();
     shown = overview({
       last_swept: "2026-11-06T11:00:00Z",
       first_sweep_hint: null,
       dismissed: 2,
       all_clear: true,
+      targets: empty.targets.map((t) => ({ ...t, swept: "2026-11-06T11:00:00Z" })),
     });
     answer();
     await openList();
     expect(await screen.findByText("All clear")).toBeTruthy();
     expect(screen.getByText(/2 dismissed/)).toBeTruthy();
+    // Its targets are the shared target rows: four dimmed zeros and the green bar.
+    expect(counts(listTarget("This Mac"))).toEqual([
+      "(0 critical)",
+      "(0 high)",
+      "(0 medium)",
+      "(0 low)",
+    ]);
+    expect(listTarget("This Mac").querySelector(".tbar.ok")).not.toBeNull();
   });
 });
 
@@ -784,11 +794,24 @@ describe("the tabs", () => {
           open: 0,
           dismissed: 0,
         },
+        {
+          label: "db",
+          kind: "server",
+          swept: "2026-11-06T11:00:00Z",
+          checked: "9 components checked",
+          counts: { critical: 1, high: 0, medium: 2, low: 0 },
+          open: 3,
+          dismissed: 0,
+        },
       ],
     };
     answer();
     await openList();
     fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
+    // Several severities are named worst first, in the main view's words.
+    expect(listTarget("db").querySelector(".sr-only")?.textContent).toBe(
+      "3 open: 1 critical, 2 medium",
+    );
     expect(
       within(listTarget("This Mac")).getByText(
         /42 components checked · swept .* ago · 1 dismissed/,
@@ -801,13 +824,13 @@ describe("the tabs", () => {
       "(0 medium)",
       "(0 low)",
     ]);
-    expect(listTarget("This Mac").querySelector(".sr-only")?.textContent).toBe("6 high");
+    expect(listTarget("This Mac").querySelector(".sr-only")?.textContent).toBe("6 open: 6 high");
     expect(listTarget("This Mac").querySelector(".tbar i")?.getAttribute("style")).toContain(
       "--high",
     );
     expect(listTarget("This Mac").querySelector(".open")?.textContent).toBe("6 open");
     expect(listTarget("web").textContent).not.toContain("dismissed");
-    expect(listTarget("web").querySelector(".sr-only")).toBeNull();
+    expect(listTarget("web").querySelector(".sr-only")?.textContent).toBe("clear");
     expect(listTarget("web").querySelector(".tbar.ok")).not.toBeNull();
     expect(listTarget("web").querySelector(".open svg")).not.toBeNull();
     expect(listTarget("web").querySelector(".open")?.textContent).toBe(" clear");
@@ -818,14 +841,19 @@ describe("the tabs", () => {
     // Long lists scroll in their own focusable pane, under the summary and tabs.
     expect(screen.getByRole("list", { name: "Targets" }).classList.contains("pane")).toBe(true);
     expect(screen.getByRole("list", { name: "Targets" }).tabIndex).toBe(0);
-    expect(within(listTarget("me/app")).getByText("not swept yet")).toBeTruthy();
+    expect(
+      within(listTarget("me/app")).getByText("not swept yet", { selector: ".tsub" }),
+    ).toBeTruthy();
     expect(counts(listTarget("me/app"))).toEqual([
       "(– critical)",
       "(– high)",
       "(– medium)",
       "(– low)",
     ]);
+    expect(listTarget("me/app").querySelector(".sr-only")?.textContent).toBe("not swept yet");
     expect(listTarget("me/app").querySelector(".open")?.textContent).toBe("");
+    // The status is in the sentence, so the drawn one is not read a second time.
+    expect(listTarget("This Mac").querySelector(".open")?.getAttribute("aria-hidden")).toBe("true");
   });
 });
 

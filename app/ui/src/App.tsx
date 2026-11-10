@@ -26,7 +26,7 @@ import {
   type TargetLine,
 } from "./overview.ts";
 import { Menu } from "./Menu.tsx";
-import { Orbit, TargetFigures, mix } from "./Orbit.tsx";
+import { Orbit, TargetFigures } from "./Orbit.tsx";
 import { Settings } from "./Settings.tsx";
 import type { Section } from "./settings.ts";
 import { Glyph, Icon } from "./icons.tsx";
@@ -473,16 +473,9 @@ function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
               </Show>
               <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
             </span>
-            {/* The counts are drawn for the eye; this names the ones it has, in words. */}
-            <Show when={t.open > 0}>
-              <span class="sr-only">
-                {mix(t)
-                  .map((m) => `${m.count} ${m.severity}`)
-                  .join(", ")}
-              </span>
-            </Show>
             <TargetFigures target={t} colours={SEVERITY_COLOURS} />
-            <span class="open">
+            {/* TargetFigures says the open count in its sentence, so it is not read twice. */}
+            <span class="open" aria-hidden="true">
               <Show when={t.swept !== null}>
                 <Show
                   when={t.open > 0}
