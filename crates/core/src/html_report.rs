@@ -20,6 +20,7 @@ use jiff::Timestamp;
 use crate::config::Config;
 use crate::lifecycle::FixState;
 use crate::lifecycle::Latest;
+use crate::lifecycle::Open;
 use crate::lifecycle::StateError;
 use crate::lifecycle::latest;
 use crate::lifecycle::locked;
@@ -129,37 +130,40 @@ fn numbers(view: &PopoverView) -> String {
         "<section class=\"rep-kpis\">{}{}{}{}{}</section>\n",
         cell(view.needs_you, "need you", true),
         cell(view.exploited, "exploited in the wild", true),
-        cell(view.findings.len(), "open in all", false),
+        cell(view.items.len(), "open in all", false),
         cell(view.fixed.len(), "fixed in 30 days", false),
         cell(view.dismissed, "dismissed", false),
     )
 }
 
-/// One line per finding exploited in the wild, saying what to run first; nothing when none
-/// is.
+/// One line per item with a finding exploited in the wild, naming those advisories and saying
+/// what to run first; nothing when none is. An exploited finding ranks first in its item, so
+/// the lead's fix is the one to run.
 fn exploited_callout(view: &PopoverView) -> String {
     let lines: Vec<String> = view
-        .findings
+        .items
         .iter()
-        .filter(|f| f.open.known_exploited)
-        .map(|f| {
-            let open = &f.open;
+        .filter(|item| item.known_exploited)
+        .map(|item| {
+            let lead = &item.lead;
             // A command reads as code; a manual fix's summary reads as prose.
-            let first = match (open.commands.first(), open.fix.is_empty()) {
+            let first = match (lead.commands.first(), lead.fix.is_empty()) {
                 (Some(command), _) => {
                     format!(" Fix it first: <code>{}</code>", esc(command))
                 }
-                (None, false) => format!(" Fix it first: {}.", esc(&open.fix)),
+                (None, false) => format!(" Fix it first: {}.", esc(&lead.fix)),
                 (None, true) => String::new(),
             };
+            let exploited: Vec<String> = item
+                .findings()
+                .filter(|f| f.known_exploited)
+                .flat_map(|f| f.advisories.iter().cloned())
+                .collect();
             format!(
-                "<p><b>{}{} on {}</b> is affected by {}, which attackers are using now.{first}</p>",
-                esc(&open.name),
-                open.version
-                    .as_ref()
-                    .map_or(String::new(), |v| format!(" {}", esc(v))),
-                esc(&f.target),
-                advisory_links(&open.advisories),
+                "<p><b>{} on {}</b> is affected by {}, which attackers are using now.{first}</p>",
+                component(lead),
+                esc(&item.target),
+                advisory_links(&exploited),
             )
         })
         .collect();
@@ -175,7 +179,7 @@ fn exploited_callout(view: &PopoverView) -> String {
 
 /// "Needs you", then "Lower"; or one line saying nothing is open.
 fn findings(view: &PopoverView) -> String {
-    if view.findings.is_empty() {
+    if view.items.is_empty() {
         let unswept = view.targets.iter().filter(|t| t.swept.is_none()).count();
         let text = match (view.all_clear, unswept) {
             (false, _) => {
@@ -192,7 +196,7 @@ fn findings(view: &PopoverView) -> String {
         return format!("<section class=\"rep-clear\"><p>{text}</p></section>\n");
     }
     let (need, lower): (Vec<&Listed>, Vec<&Listed>) =
-        view.findings.iter().partition(|f| f.needs_you);
+        view.items.iter().partition(|item| item.needs_you);
     let mut out = String::new();
     for (title, group) in [("Needs you", need), ("Lower", lower)] {
         if group.is_empty() {
@@ -200,7 +204,7 @@ fn findings(view: &PopoverView) -> String {
         }
         out.push_str(&format!("<section><h2>{title}</h2>\n"));
         for (i, listed) in group.into_iter().enumerate() {
-            // The worst finding that needs the user starts expanded, as in the mockup.
+            // The worst item that needs the user starts expanded, as in the mockup.
             out.push_str(&item(listed, listed.needs_you && i == 0));
         }
         out.push_str("</section>\n");
@@ -208,87 +212,174 @@ fn findings(view: &PopoverView) -> String {
     out
 }
 
-/// One finding or issue: a summary line that expands to everything its report keeps.
+const KEV_LABEL: &str = "<span class=\"sevlbl kev\">Exploited</span>";
+
+/// One item: a summary line that expands to everything its report keeps. A component with
+/// several findings shows its one fix, then each advisory, collapsed.
 fn item(listed: &Listed, expanded: bool) -> String {
-    let open = &listed.open;
-    let severity = open.severity.to_string();
-    let version = open
+    let lead = &listed.lead;
+    let severity = listed.severity.to_string();
+    let version = lead
         .version
         .as_ref()
         .map_or(String::new(), |v| format!("<span>{}</span>", esc(v)));
-    let exploited = if open.known_exploited {
-        "<span class=\"sevlbl kev\">Exploited</span>"
+    let count = listed.advisory_count.as_ref().map_or(String::new(), |n| {
+        format!("<span class=\"cnt\">{}</span>", esc(n))
+    });
+    let exploited = if listed.known_exploited {
+        KEV_LABEL
     } else {
         ""
     };
+    let body = if listed.others.is_empty() {
+        let mut rows = subject_rows(lead);
+        rows.extend(component_rows(lead, &listed.target));
+        rows.extend(state_rows(lead));
+        format!("{}{}", finding_part(lead, rows), fix_part(lead))
+    } else {
+        component_part(listed)
+    };
+    format!(
+        "<details class=\"f\"{}><summary><span class=\"dot {severity}\"></span>\
+         <span class=\"t\">{}{version}</span><span class=\"w\">{}</span>\
+         <span class=\"tags\">{count}{exploited}<span class=\"sevlbl {severity}\">{severity}\
+         </span><span class=\"chev\">›</span></span></summary><div class=\"body\">{body}</div>\
+         </details>\n",
+        if expanded { " open" } else { "" },
+        esc(&lead.name),
+        place(lead, &listed.target),
+    )
+}
+
+/// A component with several findings: what is installed where, its one fix (the lead's) with
+/// what that fix covers, then each advisory with its own severity, explanation and evidence.
+fn component_part(listed: &Listed) -> String {
+    let lead = &listed.lead;
+    let mut rows = component_rows(lead, &listed.target);
+    rows.push(("First seen", seen(listed.first_seen, listed.new)));
+    let mut out = definitions(rows);
+    out.push_str(&fix_part(lead));
+    if let Some(scope) = &listed.fix_scope {
+        out.push_str(&format!("<p class=\"scope\">{}</p>", esc(scope)));
+    }
+    out.push_str("<div class=\"advs\">");
+    for finding in listed.findings() {
+        out.push_str(&advisory(finding, lead));
+    }
+    out.push_str("</div>");
+    out
+}
+
+/// One advisory inside a component, collapsed. Its fix shows only when it differs from the
+/// lead's, which the component shows once.
+fn advisory(finding: &Open, lead: &Open) -> String {
+    let severity = finding.severity.to_string();
+    let exploited = if finding.known_exploited {
+        KEV_LABEL
+    } else {
+        ""
+    };
+    let mut rows = subject_rows(finding);
+    rows.extend(state_rows(finding));
+    let mut body = finding_part(finding, rows);
+    if finding.fix != lead.fix && !finding.fix.is_empty() {
+        body.push_str(&format!(
+            "<p class=\"fixsum\"><b>Its own fix:</b> {}</p>",
+            esc(&finding.fix)
+        ));
+    }
+    // Plain ids in the summary line: a link there would open instead of expanding it.
+    format!(
+        "<details class=\"adv\"><summary><span class=\"dot {severity}\"></span>\
+         <span class=\"t\">{}</span><span class=\"tags\">{exploited}\
+         <span class=\"sevlbl {severity}\">{severity}</span><span class=\"chev\">›</span>\
+         </span></summary><div class=\"body\">{body}</div></details>",
+        esc(&finding.advisories.join(", ")),
+    )
+}
+
+/// A finding's explanation, `rows` and evidence.
+fn finding_part(open: &Open, rows: Vec<(&'static str, String)>) -> String {
     let kev_note = if open.known_exploited {
         " CISA lists it in its Known Exploited Vulnerabilities catalog."
     } else {
         ""
     };
-    let mut body = format!(
+    let mut out = format!(
         "<p class=\"why\">{}{kev_note}</p>{}",
         esc(&open.explanation),
-        details_list(listed)
+        definitions(rows)
     );
     if !open.evidence.is_empty() {
-        body.push_str(&format!("<div class=\"ev\">{}</div>", esc(&open.evidence)));
+        out.push_str(&format!("<div class=\"ev\">{}</div>", esc(&open.evidence)));
     }
-    body.push_str(&fix_part(listed));
-    format!(
-        "<details class=\"f\"{}><summary><span class=\"dot {severity}\"></span>\
-         <span class=\"t\">{}{version}</span><span class=\"w\">{}</span>\
-         <span class=\"tags\">{exploited}<span class=\"sevlbl {severity}\">{severity}</span>\
-         <span class=\"chev\">›</span></span></summary><div class=\"body\">{body}</div>\
-         </details>\n",
-        if expanded { " open" } else { "" },
-        esc(&open.name),
-        place(listed),
-    )
+    out
+}
+
+/// "ffmpeg 8.1.2", or the name alone for an issue; escaped.
+fn component(open: &Open) -> String {
+    match &open.version {
+        Some(version) => format!("{} {}", esc(&open.name), esc(version)),
+        None => esc(&open.name),
+    }
 }
 
 /// "This Mac · lockfile ~/code/shop/package-lock.json", or the target alone for an issue.
-fn place(listed: &Listed) -> String {
-    if listed.open.place.is_empty() {
-        esc(&listed.target)
+fn place(open: &Open, target: &str) -> String {
+    if open.place.is_empty() {
+        esc(target)
     } else {
-        format!("{} · {}", esc(&listed.target), esc(&listed.open.place))
+        format!("{} · {}", esc(target), esc(&open.place))
     }
 }
 
-/// The definition list under a finding's explanation.
-fn details_list(listed: &Listed) -> String {
-    let open = &listed.open;
-    let mut rows: Vec<(&str, String)> = Vec::new();
+/// What a finding is about: its advisories, or an issue's subject.
+fn subject_rows(open: &Open) -> Vec<(&'static str, String)> {
     if open.advisories.is_empty() {
         // An issue: no advisory, and its title is its subject ("setting x", "file y").
-        rows.push(("Subject", esc(&open.title)));
+        return vec![("Subject", esc(&open.title))];
+    }
+    let label = if open.advisories.len() == 1 {
+        "Advisory"
     } else {
-        let label = if open.advisories.len() == 1 {
-            "Advisory"
-        } else {
-            "Advisories"
-        };
-        rows.push((label, advisory_links(&open.advisories)));
+        "Advisories"
+    };
+    vec![(label, advisory_links(&open.advisories))]
+}
+
+/// What is installed (nothing for an issue) and where.
+fn component_rows(open: &Open, target: &str) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if open.version.is_some() {
+        rows.push(("Installed", component(open)));
     }
-    if let Some(version) = &open.version {
-        rows.push(("Installed", format!("{} {}", esc(&open.name), esc(version))));
-    }
-    rows.push(("Where", place(listed)));
+    rows.push(("Where", place(open, target)));
+    rows
+}
+
+/// How sure the agent is, when it was first seen, what a fix came to, and its key.
+fn state_rows(open: &Open) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
     if let Some(confidence) = open.confidence {
         rows.push(("Confidence", confidence.to_string()));
     }
-    let seen = open.first_seen.map_or("not recorded".to_owned(), when);
-    let new = if open.new {
-        " (new in the last sweep)"
-    } else {
-        ""
-    };
-    rows.push(("First seen", format!("{seen}{new}")));
+    rows.push(("First seen", seen(open.first_seen, open.new)));
     if let Some(state) = &open.fix_state {
         rows.push(("Fix status", fix_status(state)));
     }
     rows.push(("Key", format!("<code>{}</code>", open.key)));
+    rows
+}
+
+/// "1 Nov 2026, 00:00 UTC (new in the last sweep)", or "not recorded".
+fn seen(first_seen: Option<Timestamp>, new: bool) -> String {
+    let seen = first_seen.map_or("not recorded".to_owned(), when);
+    let new = if new { " (new in the last sweep)" } else { "" };
+    format!("{seen}{new}")
+}
+
+/// `rows` as a definition list; each value is HTML already.
+fn definitions(rows: Vec<(&'static str, String)>) -> String {
     let rows: String = rows
         .into_iter()
         .map(|(term, value)| format!("<dt>{term}</dt><dd>{value}</dd>"))
@@ -296,7 +387,6 @@ fn details_list(listed: &Listed) -> String {
         .concat();
     format!("<dl>{rows}</dl>")
 }
-
 /// What the fix history says, one line; the pull request URL is the agent's, so plain text.
 fn fix_status(state: &FixState) -> String {
     match state {
@@ -319,8 +409,7 @@ fn fix_status(state: &FixState) -> String {
 }
 
 /// The fix: its summary, its steps, and each command with a Copy button.
-fn fix_part(listed: &Listed) -> String {
-    let open = &listed.open;
+fn fix_part(open: &Open) -> String {
     let mut out = String::new();
     if !open.fix.is_empty() {
         out.push_str(&format!(
@@ -345,7 +434,6 @@ fn fix_part(listed: &Listed) -> String {
     }
     out
 }
-
 /// One row per target.
 fn targets_table(view: &PopoverView) -> String {
     let rows: String = view
@@ -589,7 +677,17 @@ h2 { margin: 0 0 12px; font: 600 13px var(--font); letter-spacing: .1em; text-tr
 .f summary .w { color: #8e96ad; font-size: 13px; overflow-wrap: anywhere; }
 .f summary .tags { display: flex; gap: 8px; align-items: center; }
 .f summary .chev { color: #5d6579; transition: transform .2s; }
-.f[open] summary .chev { transform: rotate(90deg); }
+.f[open] > summary .chev, .adv[open] > summary .chev { transform: rotate(90deg); }
+.cnt { font: 600 11px var(--font); letter-spacing: .04em; padding: 3px 8px; border-radius: 6px;
+  color: #cdd3e4; background: rgba(255,255,255,.07); white-space: nowrap; }
+/* A component's advisories, each collapsed inside its card. */
+.f .scope { max-width: 72ch; color: #8e96ad; font-size: 13.5px; }
+.f .advs { display: grid; gap: 8px; }
+.f .adv { border-radius: 10px; background: rgba(0,0,0,.22);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.06); }
+.f .adv summary { grid-template-columns: 12px 1fr auto; gap: 12px; padding: 10px 14px; }
+.f .adv summary .t { font: 500 13.5px var(--font); overflow-wrap: anywhere; }
+.f .adv .body { padding: 0 14px 14px 38px; }
 .f .body { padding: 0 18px 18px 44px; display: grid; gap: 14px; }
 .f .body dl { display: grid; grid-template-columns: 120px 1fr; gap: 6px 16px; margin: 0;
   font-size: 14px; }
@@ -631,7 +729,7 @@ td.num { font-variant-numeric: tabular-nums; }
   .rep-head .stamp { grid-column: 1 / -1; text-align: left; }
   .f summary { grid-template-columns: 12px 1fr auto; }
   .f summary .w { grid-column: 2 / -1; grid-row: 2; }
-  .f .body { padding-left: 18px; }
+  .f .body, .f .adv .body { padding-left: 14px; }
   .f .body dl { grid-template-columns: 1fr; }
 }
 "#;
@@ -647,13 +745,15 @@ mod tests {
     use super::*;
     use crate::findings::Confidence;
     use crate::findings::Severity;
+    use crate::lifecycle::ComponentKey;
+    use crate::lifecycle::FindingKey;
     use crate::lifecycle::Fixed;
-    use crate::lifecycle::Open;
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
     }
 
+    /// A finding in a component of its own, `pkg{key}` 1.0.0.
     fn open(key: u64, severity: Severity, exploited: bool) -> Open {
         Open {
             key: format!("{key:016x}").parse().unwrap(),
@@ -661,6 +761,7 @@ mod tests {
             title: format!("finding {key}"),
             name: format!("pkg{key}"),
             version: Some("1.0.0".to_owned()),
+            component: Some(ComponentKey(FindingKey::new(&[&format!("pkg{key}")]))),
             advisories: vec!["CVE-2024-3094".to_owned()],
             place: "Homebrew".to_owned(),
             known_exploited: exploited,
@@ -877,6 +978,7 @@ mod tests {
             ..open(1, Severity::High, true)
         };
         let issue = Open {
+            component: None,
             title: evil.to_owned(),
             advisories: Vec::new(),
             place: String::new(),
@@ -917,6 +1019,7 @@ mod tests {
             at: at("2026-11-07T00:00:00Z"),
         });
         let issue = Open {
+            component: None,
             version: None,
             advisories: Vec::new(),
             place: String::new(),
@@ -961,6 +1064,75 @@ mod tests {
     }
 
     #[test]
+    fn a_component_is_one_card_with_its_fix_once_and_each_advisory_inside() {
+        let ffmpeg = |key: u64, severity, exploited| Open {
+            name: "ffmpeg".to_owned(),
+            version: Some("8.1.2".to_owned()),
+            component: Some(ComponentKey(FindingKey::new(&["ffmpeg"]))),
+            advisories: vec![format!("CVE-2026-{key:04}")],
+            explanation: format!("Why {key}."),
+            evidence: format!("Evidence {key}."),
+            fix: "Upgrade ffmpeg.".to_owned(),
+            commands: vec!["brew upgrade ffmpeg".to_owned()],
+            ..open(key, severity, exploited)
+        };
+        let mut own_fix = ffmpeg(3, Severity::Low, false);
+        own_fix.fix = "Upgrade ffmpeg to 9.".to_owned();
+        let html = page(vec![mac(vec![
+            ffmpeg(1, Severity::Critical, false),
+            ffmpeg(2, Severity::Medium, true),
+            own_fix,
+            open(4, Severity::Low, false),
+        ])]);
+        assert_eq!(
+            html.matches("<details class=\"f\"").count(),
+            2,
+            "ffmpeg, pkg4"
+        );
+        assert_eq!(html.matches("<details class=\"adv\">").count(), 3);
+        assert!(html.contains(
+            "<span class=\"dot critical\"></span><span class=\"t\">ffmpeg<span>8.1.2</span>"
+        ));
+        assert!(html.contains(
+            "<span class=\"cnt\">3 advisories</span><span class=\"sevlbl kev\">Exploited</span>\
+             <span class=\"sevlbl critical\">"
+        ));
+        assert_eq!(
+            html.matches("<div class=\"cmdl\"><code>brew upgrade ffmpeg</code>")
+                .count(),
+            1,
+            "the fix once"
+        );
+        assert!(html.contains("which all 3 advisories are in; the next sweep checks"));
+        let [two, one, three] = ["0002", "0001", "0003"].map(|n| {
+            html.find(&format!("<span class=\"t\">CVE-2026-{n}</span>"))
+                .unwrap()
+        });
+        assert!(
+            two < one && one < three,
+            "the exploited lead, then by severity"
+        );
+        for n in 1..=3 {
+            assert!(html.contains(&format!("<p class=\"why\">Why {n}.")), "{n}");
+            assert!(html.contains(&format!("<div class=\"ev\">Evidence {n}.</div>")));
+        }
+        assert_eq!(
+            html.matches("<b>Its own fix:</b> Upgrade ffmpeg to 9.")
+                .count(),
+            1
+        );
+        assert!(html.contains(
+            "<p><b>ffmpeg 8.1.2 on This Mac</b> is affected by <a \
+             href=\"https://nvd.nist.gov/vuln/detail/CVE-2026-0002\" \
+             referrerpolicy=\"no-referrer\">CVE-2026-0002</a>, which attackers"
+        ));
+        assert!(html.contains("<div><b>2</b><span>open in all</span>"));
+        assert!(html.contains("<div class=\"hot\"><b>1</b><span>need you</span>"));
+        assert!(html.contains("<h1>1 finding needs you</h1>"));
+        assert!(html.contains("<td class=\"num\">2</td><td class=\"num\">1</td>"));
+    }
+
+    #[test]
     fn exploited_findings_get_the_callout_and_others_do_not() {
         let html = page(vec![mac(vec![open(1, Severity::Medium, false)])]);
         assert!(!html.contains("class=\"rep-alert\""));
@@ -1000,6 +1172,7 @@ mod tests {
     #[test]
     fn findings_that_need_the_user_come_first_and_the_rest_under_lower() {
         let issue = Open {
+            component: None,
             version: None,
             advisories: Vec::new(),
             place: String::new(),

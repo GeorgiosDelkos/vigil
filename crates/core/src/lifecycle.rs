@@ -91,6 +91,20 @@ impl From<FindingKey> for String {
     }
 }
 
+/// The installed component a finding is in, as 16 hex digits hashed as a [`FindingKey`] is:
+/// from the target, the component's lookup, its version and where it was found, so two
+/// versions of one package, or one version in two places, are two components. The list groups
+/// findings by it. It is never stored; dismissals and fixes keep using each finding's key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(transparent)]
+pub struct ComponentKey(pub(crate) FindingKey);
+
+impl fmt::Display for ComponentKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// A finding key that is not 16 lowercase hex digits.
 #[derive(Debug, thiserror::Error)]
 #[error("{input:?} is not a finding key (16 hex digits, as shown in the report)")]
@@ -380,6 +394,8 @@ pub struct Open {
     pub name: String,
     /// The installed version; `None` for an issue.
     pub version: Option<String>,
+    /// The installed component it is in; `None` for an issue.
+    pub component: Option<ComponentKey>,
     /// The advisory ids, primary first; empty for an issue.
     pub advisories: Vec<String>,
     /// Where it was found, one line; empty for an issue.
@@ -444,7 +460,7 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
                 let state = last
                     .get(&e.key)
                     .and_then(|run| fix_state(run, saved.started));
-                open_entry(e, new(e.key), state)
+                open_entry(&target, e, new(e.key), state)
             })
             .collect();
         open.sort_by_key(|o| o.severity);
@@ -503,7 +519,7 @@ fn confirmed(run: &fix::Run, found: &BTreeSet<FindingKey>, report: Timestamp) ->
 
 /// `entry` as shown. Every text is a plain line: it holds agent text and names from the
 /// target. Commands passed the sweep's printable-ASCII check.
-fn open_entry(entry: &SavedEntry, new: bool, fix_state: Option<FixState>) -> Open {
+fn open_entry(target: &str, entry: &SavedEntry, new: bool, fix_state: Option<FixState>) -> Open {
     let plain = |text: &str| sweep::plain(text);
     Open {
         key: entry.key,
@@ -511,6 +527,7 @@ fn open_entry(entry: &SavedEntry, new: bool, fix_state: Option<FixState>) -> Ope
         title: plain(&entry.title),
         name: plain(&entry.name),
         version: entry.installed.as_ref().map(|i| plain(&i.version)),
+        component: entry.installed.as_ref().map(|i| i.component(target)),
         advisories: entry.advisories.iter().map(|a| plain(a)).collect(),
         place: plain(&entry.place),
         known_exploited: entry.known_exploited,
@@ -597,6 +614,27 @@ struct SavedFix {
 #[derive(Debug, Clone, Deserialize)]
 struct SavedInstalled {
     version: String,
+    /// Kept as the report has them, only to tell components apart. `Null` in a report saved
+    /// before they were kept.
+    #[serde(default)]
+    lookup: serde_json::Value,
+    #[serde(default)]
+    found_in: serde_json::Value,
+}
+
+impl SavedInstalled {
+    /// The key of this component in `target`. One report's writer serializes every component
+    /// the same way, so equal components print as equal text here, whether or not a crate in
+    /// the build turns on `serde_json`'s `preserve_order` (which keeps the file's key order).
+    fn component(&self, target: &str) -> ComponentKey {
+        let (lookup, found_in) = (self.lookup.to_string(), self.found_in.to_string());
+        ComponentKey(FindingKey::new(&[
+            target,
+            &lookup,
+            &self.version,
+            &found_in,
+        ]))
+    }
 }
 
 impl SavedEntry {
@@ -1047,6 +1085,59 @@ mod tests {
         );
         assert_eq!(mac.open[0].fix, "up grade", "one line");
         assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
+    }
+
+    #[test]
+    fn findings_name_their_component_by_lookup_version_and_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let formula = json!({"kind": "homebrew_formula", "name": "sqlite"});
+        let finding = |key: u64, lookup: serde_json::Value, version: &str, found_in| {
+            json!({"key": FindingKey(key), "severity": "high",
+                "installed": {"lookup": lookup, "version": version, "found_in": found_in}})
+        };
+        let product = json!({"product": "sqlite"});
+        let report = json!({
+            "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
+            "findings": [
+                finding(1, product.clone(), "3.51.3", formula.clone()),
+                finding(2, product.clone(), "3.51.3", formula.clone()),
+                finding(3, product.clone(), "3.53.2", formula.clone()),
+                finding(4, product, "3.51.3", json!({"kind": "path", "name": "sqlite"})),
+                finding(5, json!({"package": {"ecosystem": "npm", "name": "sqlite"}}),
+                    "3.51.3", formula),
+            ],
+            "issues": [{"key": FindingKey(6), "severity": "low"}],
+        });
+        save(&data_dir.sweeps_dir(), "20261105T000000Z/mac", &report);
+        dismiss(&data_dir, FindingKey(3), "not used").unwrap();
+
+        let mac = &latest(&data_dir, &config).unwrap()[0];
+        let component = |key: u64| {
+            mac.open
+                .iter()
+                .find(|o| o.key == FindingKey(key))
+                .map(|o| o.component)
+        };
+        let first = component(1).unwrap().expect("a finding has a component");
+        assert_eq!(
+            component(2),
+            Some(Some(first)),
+            "same lookup, version and place"
+        );
+        assert_eq!(component(3), None, "dismissed, so not open");
+        for other in [4, 5] {
+            assert_ne!(component(other), Some(Some(first)), "{other}");
+        }
+        assert_eq!(component(6), Some(None), "an issue has none");
+
+        let view =
+            crate::popover::popover_view(vec![latest(&data_dir, &config).unwrap().remove(0)]);
+        let sizes: Vec<usize> = view.items.iter().map(|i| 1 + i.others.len()).collect();
+        assert_eq!(sizes, [2, 1, 1, 1], "the dismissed version is gone");
     }
 
     #[test]
