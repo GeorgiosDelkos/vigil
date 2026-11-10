@@ -106,6 +106,26 @@ impl DataDir {
     }
 }
 
+/// Writes `text` to a temporary name beside `path`, syncs it, and renames it over `path`, so
+/// neither a reader nor a crash sees half a file. Two writers of one path at once would share
+/// the temporary file, so callers hold a lock.
+pub(crate) fn replace_file(path: &Path, text: &str) -> io::Result<()> {
+    let name = path
+        .file_name()
+        .expect("the path names a file")
+        .to_string_lossy();
+    let partial = path.with_file_name(format!(".{name}.partial"));
+    fs::File::create(&partial)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_data()
+        })
+        .and_then(|()| fs::rename(&partial, path))
+        // Best effort: the write's error is what matters, and a leftover partial file is
+        // harmless, since readers open files by their own names.
+        .inspect_err(|_| drop(fs::remove_file(&partial)))
+}
+
 /// Error from [`DataDir::init`].
 #[derive(Debug, thiserror::Error)]
 pub enum InitError {

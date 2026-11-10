@@ -409,7 +409,13 @@ which a test enforces with a message saying what to add. SHA-256 was weighed and
 no adversary picks the files compared, and `sha2` would be a new dependency of the core.
 The report problems were chosen as the channel because the sweep is where the prompt is used
 and they already carry the sweep's other notes (dismissals unreadable, an interrupted
-sweep's cleanup); the settings view has no place for notices.
+sweep's cleanup); the settings view has no place for notices. They reach `vigil sweep`'s
+output, `report.md` and `report.json`, but the menu-bar app shows no report problems yet, so
+an app-only user finds the note only there and in the `.default.md` file. The note says the
+built-in prompt may be newer, not that it is: without a record of the version the user
+started from, an edit of the current version looks the same as an edit of an old one. Not
+handled: a fix run does not update `fix.md` itself, the next sweep does; and an edit saved in
+the instant between the check and the rename is replaced.
 
 ### Bundle and findings (decided 2026-11-05)
 

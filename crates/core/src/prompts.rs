@@ -5,7 +5,9 @@
 //! built-in version some build shipped was never edited, and is replaced by the current
 //! built-in version. A copy that matches none was edited, and is kept; the current built-in
 //! version is written beside it as `<name>.default.md`, and the sweep notes it once, when that
-//! file is written or changes. A missing copy is left for [`render`] to create on first use.
+//! file is written or changes. The note says the built-in prompt may be newer, not that it is:
+//! without a record of the version the user started from, an edit of the current version looks
+//! the same as an edit of an old one. A missing copy is left for [`render`] to create on first use.
 //!
 //! How "never edited" is known (owner's decision, 2026-11-10): the app carries the hash of
 //! every built-in version in its git history ([`Prompt::shipped`]), and a copy whose hash is in
@@ -18,8 +20,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::paths;
 use crate::paths::DataDir;
-use crate::sweep;
 use crate::sweep::SweepError;
 
 /// Which built-in prompt a target uses.
@@ -81,7 +83,9 @@ impl Prompt {
 }
 
 /// The user's copy of `kind`'s prompt, created from the built-in one on first use, with the
-/// target filled in.
+/// target filled in. Must run under the sweeps lock, as the first write uses a shared temporary
+/// name. Written whole or not at all, as a torn copy would match no built-in version and be kept
+/// as an edit.
 pub(crate) fn render(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<String, SweepError> {
     let dir = data_dir.prompts_dir();
     let path = dir.join(kind.file_name());
@@ -89,7 +93,7 @@ pub(crate) fn render(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<S
         Ok(text) => text,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             fs::create_dir_all(&dir)
-                .and_then(|()| fs::write(&path, kind.default_text()))
+                .and_then(|()| paths::replace_file(&path, kind.default_text()))
                 .map_err(|source| SweepError::Write {
                     path: path.clone(),
                     source,
@@ -110,7 +114,7 @@ pub(crate) fn update(data_dir: &DataDir, notes: &mut Vec<String>) {
     for kind in Prompt::ALL {
         if let Err(e) = update_one(&dir, kind, notes) {
             notes.push(format!(
-                "prompts/{}: cannot bring it up to date: {e}",
+                "prompts/{}: cannot compare it with the built-in prompt or update it: {e}",
                 kind.file_name()
             ));
         }
@@ -129,7 +133,7 @@ fn update_one(dir: &Path, kind: Prompt, notes: &mut Vec<String>) -> io::Result<(
         return Ok(());
     }
     if kind.shipped().contains(&fnv1a(&copy)) {
-        return sweep::replace_file(&path, kind.default_text());
+        return paths::replace_file(&path, kind.default_text());
     }
 
     // An unreadable default file is written again, as it is only a copy of the built-in text.
@@ -137,10 +141,10 @@ fn update_one(dir: &Path, kind: Prompt, notes: &mut Vec<String>) -> io::Result<(
     if fs::read(&default).is_ok_and(|text| text == current) {
         return Ok(());
     }
-    sweep::replace_file(&default, kind.default_text())?;
+    paths::replace_file(&default, kind.default_text())?;
     notes.push(format!(
-        "prompts/{}: your edited copy is used, not the newer built-in prompt, which is in \
-         prompts/{} to compare",
+        "prompts/{}: your edited copy is used; the current built-in prompt, which may be \
+         newer, is in prompts/{} to compare",
         kind.file_name(),
         kind.default_name()
     ));
@@ -185,7 +189,7 @@ mod tests {
 
     /// Every version of `kind`'s built-in prompt in the git history, newest first. Commits on
     /// merged branches count too (`--full-history`): a build from a pull request's branch may
-    /// have copied one.
+    /// have copied one. Renames are not followed; no prompt has been renamed.
     fn versions_in_git(kind: Prompt) -> Vec<Vec<u8>> {
         let git = |args: &[&str]| {
             let out = Command::new("git")
@@ -201,6 +205,15 @@ mod tests {
             );
             out.stdout
         };
+        // A shallow clone's log succeeds with only its newest commits, which would fail the tests
+        // with a wrong reason.
+        let shallow = git(&["rev-parse", "--is-shallow-repository"]);
+        assert_eq!(
+            shallow.trim_ascii(),
+            b"false",
+            "the prompt tests read the prompts' git history: unshallow the clone (`git fetch \
+             --unshallow`, `fetch-depth: 0` in CI)"
+        );
         let path = format!("src/prompts/{}", kind.file_name());
         let commits =
             String::from_utf8(git(&["log", "--full-history", "--format=%H", "--", &path])).unwrap();
@@ -264,10 +277,17 @@ mod tests {
         assert_eq!(notes.len(), 1, "{notes:?}");
 
         // A default file from an older build is replaced, and noted again.
-        fs::write(data.prompts_dir().join("fix.default.md"), "older").unwrap();
+        let default = data.prompts_dir().join("fix.default.md");
+        fs::write(&default, "older").unwrap();
         update(&data, &mut notes);
         assert_eq!(read(&data, "fix.default.md"), Prompt::Fix.default_text());
         assert_eq!(notes.len(), 2, "{notes:?}");
+
+        // So is one that cannot be read. Write-only: the rename replaces it all the same.
+        fs::set_permissions(&default, fs::Permissions::from_mode(0o200)).unwrap();
+        update(&data, &mut notes);
+        assert_eq!(read(&data, "fix.default.md"), Prompt::Fix.default_text());
+        assert_eq!(notes.len(), 3, "{notes:?}");
     }
 
     #[test]

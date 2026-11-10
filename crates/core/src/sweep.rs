@@ -16,7 +16,6 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::thread;
@@ -64,6 +63,7 @@ use crate::lifecycle::Changes;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
+use crate::paths;
 use crate::paths::DataDir;
 use crate::prompts;
 use crate::prompts::Prompt;
@@ -334,9 +334,12 @@ pub fn sweep(
             error_chain(&e)
         ));
     }
-    prompts::update(data_dir, &mut notes);
     let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
     let running = cancel::mark_running(&dir)?;
+    // After the sweep folder exists, so a failure to create it does not lose the one note an
+    // edited prompt gets. A cancelled sweep can still lose it; the `.default.md` file it
+    // points to stays as the lasting record.
+    prompts::update(data_dir, &mut notes);
 
     let feeds = Feeds::new(data_dir, nvd_access(&mut notes));
     let kev = match feeds.kev() {
@@ -1196,29 +1199,9 @@ fn write_report(dir: &Path, report: &Report) -> Result<(), SweepError> {
         ("report.json", json),
     ] {
         let path = dir.join(name);
-        replace_file(&path, &text).map_err(|source| SweepError::Write { path, source })?;
+        paths::replace_file(&path, &text).map_err(|source| SweepError::Write { path, source })?;
     }
     Ok(())
-}
-
-/// Writes `text` to a temporary name beside `path`, syncs it, and renames it over `path`, so
-/// neither a reader nor a crash sees half a file. Two writers of one path at once would share
-/// the temporary file, so callers hold a lock.
-pub(crate) fn replace_file(path: &Path, text: &str) -> io::Result<()> {
-    let name = path
-        .file_name()
-        .expect("the path names a file")
-        .to_string_lossy();
-    let partial = path.with_file_name(format!(".{name}.partial"));
-    fs::File::create(&partial)
-        .and_then(|mut file| {
-            file.write_all(text.as_bytes())?;
-            file.sync_data()
-        })
-        .and_then(|()| fs::rename(&partial, path))
-        // Best effort: the write's error is what matters, and a leftover partial file is
-        // harmless, since readers open files by their own names.
-        .inspect_err(|_| drop(fs::remove_file(&partial)))
 }
 
 /// The report for a person: findings first, most severe first, then what was not checked.
