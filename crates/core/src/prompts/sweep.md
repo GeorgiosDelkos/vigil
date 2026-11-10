@@ -40,14 +40,18 @@ Write `findings.json` in this folder, following `findings.schema.json`:
 - The `fix` names the safest change that removes the issue, with exact commands. They are
   shown to the user, never run now. Each command is one line of printable ASCII; describe a
   path with other characters in `steps` instead.
-- For a version found in a version manager, the fix removes that version with the manager:
-  `nvm uninstall 22.22.2`, `fnm uninstall 22.22.2`, `asdf uninstall nodejs 22.22.2`,
-  `pyenv uninstall -f 3.12.1`; Volta cannot remove a Node.js version, so the fix moves its
-  folder to the Trash (`trash ~/.volta/tools/image/node/22.22.2`). Install a fixed version
-  first when no other installed version is fixed, and switch the default (`nvm alias default`,
-  `fnm default`, `asdf set -u`, `pyenv global`, `volta install node@<version>`) when it named
-  the removed version. Switching the default alone is not a fix: the vulnerable version stays
-  installed and one command away.
+- For a version found in a version manager (`found_in.manager`, `found_in.path`), the fix
+  removes that version with the manager: `fnm uninstall 22.22.2`,
+  `asdf uninstall nodejs 22.22.2` (the plugin is the folder under `installs/`: `nodejs` or
+  `python`), `pyenv uninstall -f 3.12.1`. nvm is a shell function, not a program, so its
+  commands first source the `nvm.sh` three folders above the version's folder:
+  `. ~/.nvm/nvm.sh && nvm uninstall 22.22.2`. Volta cannot remove a Node.js version, so the
+  fix moves the folder in `found_in.path` to the Trash (`trash <path>`; `trash` ships with
+  macOS 15 and later). Install a fixed version first when no other installed version is
+  fixed, and when the default named the removed version, set it to the fixed one
+  (`nvm alias default 22.23.4`, `fnm default 22.23.4`, `asdf set -u nodejs 22.23.4`,
+  `pyenv global 3.13.1`, `volta install node@22.23.4`). Switching the default alone is not a
+  fix: the vulnerable version stays installed and one command away.
 - `issues` is for settings and files of GitHub repositories; on this Mac it is always `[]`.
 
 If nothing is affected, write `{"findings": [], "issues": []}`.
