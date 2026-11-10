@@ -161,7 +161,7 @@ fn exploited_callout(view: &PopoverView) -> String {
                 .collect();
             format!(
                 "<p><b>{} on {}</b> is affected by {}, which attackers are using now.{first}</p>",
-                component(lead),
+                installed(item),
                 esc(&item.target),
                 advisory_links(&exploited),
             )
@@ -233,7 +233,7 @@ fn item(listed: &Listed, expanded: bool) -> String {
     };
     let body = if listed.others.is_empty() {
         let mut rows = subject_rows(lead);
-        rows.extend(component_rows(lead, &listed.target));
+        rows.extend(component_rows(listed));
         rows.extend(state_rows(lead));
         format!("{}{}", finding_part(lead, rows), fix_part(lead))
     } else {
@@ -246,7 +246,7 @@ fn item(listed: &Listed, expanded: bool) -> String {
          </span><span class=\"chev\">›</span></span></summary><div class=\"body\">{body}</div>\
          </details>\n",
         if expanded { " open" } else { "" },
-        esc(&lead.name),
+        esc(&listed.name),
         place(lead, &listed.target),
     )
 }
@@ -255,7 +255,7 @@ fn item(listed: &Listed, expanded: bool) -> String {
 /// what that fix covers, then each advisory with its own severity, explanation and evidence.
 fn component_part(listed: &Listed) -> String {
     let lead = &listed.lead;
-    let mut rows = component_rows(lead, &listed.target);
+    let mut rows = component_rows(listed);
     rows.push(("First seen", seen(listed.first_seen, listed.new)));
     let mut out = definitions(rows);
     out.push_str(&fix_part(lead));
@@ -317,10 +317,10 @@ fn finding_part(open: &Open, rows: Vec<(&'static str, String)>) -> String {
 }
 
 /// "ffmpeg 8.1.2", or the name alone for an issue; escaped.
-fn component(open: &Open) -> String {
-    match &open.version {
-        Some(version) => format!("{} {}", esc(&open.name), esc(version)),
-        None => esc(&open.name),
+fn installed(listed: &Listed) -> String {
+    match &listed.lead.version {
+        Some(version) => format!("{} {}", esc(&listed.name), esc(version)),
+        None => esc(&listed.name),
     }
 }
 
@@ -348,12 +348,12 @@ fn subject_rows(open: &Open) -> Vec<(&'static str, String)> {
 }
 
 /// What is installed (nothing for an issue) and where.
-fn component_rows(open: &Open, target: &str) -> Vec<(&'static str, String)> {
+fn component_rows(listed: &Listed) -> Vec<(&'static str, String)> {
     let mut rows = Vec::new();
-    if open.version.is_some() {
-        rows.push(("Installed", component(open)));
+    if listed.lead.version.is_some() {
+        rows.push(("Installed", installed(listed)));
     }
-    rows.push(("Where", place(open, target)));
+    rows.push(("Where", place(&listed.lead, &listed.target)));
     rows
 }
 
@@ -748,6 +748,7 @@ mod tests {
     use crate::lifecycle::ComponentKey;
     use crate::lifecycle::FindingKey;
     use crate::lifecycle::Fixed;
+    use crate::lifecycle::InComponent;
 
     fn at(s: &str) -> Timestamp {
         s.parse().unwrap()
@@ -761,7 +762,10 @@ mod tests {
             title: format!("finding {key}"),
             name: format!("pkg{key}"),
             version: Some("1.0.0".to_owned()),
-            component: Some(ComponentKey(FindingKey::new(&[&format!("pkg{key}")]))),
+            component: Some(InComponent {
+                key: ComponentKey(FindingKey::new(&[&format!("pkg{key}")])),
+                name: format!("pkg{key}"),
+            }),
             advisories: vec!["CVE-2024-3094".to_owned()],
             place: "Homebrew".to_owned(),
             known_exploited: exploited,
@@ -962,6 +966,10 @@ mod tests {
         let reported = Open {
             title: evil.to_owned(),
             name: evil.to_owned(),
+            component: Some(InComponent {
+                key: ComponentKey(FindingKey::new(&["evil"])),
+                name: evil.to_owned(),
+            }),
             version: Some(evil.to_owned()),
             advisories: vec![evil.to_owned()],
             place: evil.to_owned(),
@@ -1068,7 +1076,10 @@ mod tests {
         let ffmpeg = |key: u64, severity, exploited| Open {
             name: "ffmpeg".to_owned(),
             version: Some("8.1.2".to_owned()),
-            component: Some(ComponentKey(FindingKey::new(&["ffmpeg"]))),
+            component: Some(InComponent {
+                key: ComponentKey(FindingKey::new(&["ffmpeg"])),
+                name: "ffmpeg".to_owned(),
+            }),
             advisories: vec![format!("CVE-2026-{key:04}")],
             explanation: format!("Why {key}."),
             evidence: format!("Evidence {key}."),

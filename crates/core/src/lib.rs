@@ -91,6 +91,7 @@ pub use crate::lifecycle::Dismissal;
 pub use crate::lifecycle::FindingKey;
 pub use crate::lifecycle::FixState;
 pub use crate::lifecycle::Fixed;
+pub use crate::lifecycle::InComponent;
 pub use crate::lifecycle::Latest;
 pub use crate::lifecycle::Open;
 pub use crate::lifecycle::ParseFindingKeyError;

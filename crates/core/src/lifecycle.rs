@@ -29,6 +29,7 @@ use crate::findings::Confidence;
 use crate::findings::Severity;
 use crate::findings::is_forging;
 use crate::fix;
+use crate::inventory::FoundIn;
 use crate::paths::DataDir;
 use crate::sweep;
 
@@ -91,10 +92,21 @@ impl From<FindingKey> for String {
     }
 }
 
-/// The installed component a finding is in, as 16 hex digits hashed as a [`FindingKey`] is:
-/// from the target, the component's lookup, its version and where it was found, so two
-/// versions of one package, or one version in two places, are two components. The list groups
-/// findings by it. It is never stored; dismissals and fixes keep using each finding's key.
+/// The installed component a finding is in, as the list groups findings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InComponent {
+    /// Findings with the same key are in the same component.
+    pub key: ComponentKey,
+    /// The component's name as the list shows it: a Homebrew formula's own name (`curl`, which
+    /// holds the products curl and libcurl), otherwise the finding's component name.
+    pub name: String,
+}
+
+/// The key of an installed component, 16 hex digits hashed as a [`FindingKey`] is: from the
+/// target, its version and where it was found, and its lookup unless that place is one
+/// installed thing (a Homebrew formula, a toolchain). So two versions of one package, or one
+/// version in two places, are two components, and the NVD products of one formula are one.
+/// It is never stored; dismissals and fixes keep using each finding's key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(transparent)]
 pub struct ComponentKey(pub(crate) FindingKey);
@@ -395,7 +407,7 @@ pub struct Open {
     /// The installed version; `None` for an issue.
     pub version: Option<String>,
     /// The installed component it is in; `None` for an issue.
-    pub component: Option<ComponentKey>,
+    pub component: Option<InComponent>,
     /// The advisory ids, primary first; empty for an issue.
     pub advisories: Vec<String>,
     /// Where it was found, one line; empty for an issue.
@@ -527,7 +539,10 @@ fn open_entry(target: &str, entry: &SavedEntry, new: bool, fix_state: Option<Fix
         title: plain(&entry.title),
         name: plain(&entry.name),
         version: entry.installed.as_ref().map(|i| plain(&i.version)),
-        component: entry.installed.as_ref().map(|i| i.component(target)),
+        component: entry
+            .installed
+            .as_ref()
+            .map(|i| i.component(target, &plain(&entry.name))),
         advisories: entry.advisories.iter().map(|a| plain(a)).collect(),
         place: plain(&entry.place),
         known_exploited: entry.known_exploited,
@@ -615,7 +630,8 @@ struct SavedFix {
 struct SavedInstalled {
     version: String,
     /// Kept as the report has them, only to tell components apart. `Null` in a report saved
-    /// before they were kept.
+    /// before they were kept. Values rather than types, so a place this build does not know
+    /// still reads.
     #[serde(default)]
     lookup: serde_json::Value,
     #[serde(default)]
@@ -623,17 +639,32 @@ struct SavedInstalled {
 }
 
 impl SavedInstalled {
-    /// The key of this component in `target`. One report's writer serializes every component
-    /// the same way, so equal components print as equal text here, whether or not a crate in
-    /// the build turns on `serde_json`'s `preserve_order` (which keeps the file's key order).
-    fn component(&self, target: &str) -> ComponentKey {
-        let (lookup, found_in) = (self.lookup.to_string(), self.found_in.to_string());
-        ComponentKey(FindingKey::new(&[
-            target,
-            &lookup,
-            &self.version,
-            &found_in,
-        ]))
+    /// The component in `target` of a finding whose component is named `name`. One report's
+    /// writer serializes every component the same way, so equal components print as equal
+    /// text here, whether or not a crate in the build turns on `serde_json`'s `preserve_order`
+    /// (which keeps the file's key order). A place this build cannot read counts as holding
+    /// many things, so its components stay apart.
+    fn component(&self, target: &str, name: &str) -> InComponent {
+        let place = FoundIn::deserialize(&self.found_in).ok();
+        let one_install = place.as_ref().is_some_and(FoundIn::is_one_install);
+        let lookup = if one_install {
+            String::new()
+        } else {
+            self.lookup.to_string()
+        };
+        let found_in = self.found_in.to_string();
+        InComponent {
+            key: ComponentKey(FindingKey::new(&[
+                target,
+                &lookup,
+                &self.version,
+                &found_in,
+            ])),
+            name: place
+                .as_ref()
+                .and_then(FoundIn::install_name)
+                .map_or_else(|| name.to_owned(), sweep::plain),
+        }
     }
 }
 
@@ -1088,57 +1119,94 @@ mod tests {
     }
 
     #[test]
-    fn findings_name_their_component_by_lookup_version_and_place() {
+    fn findings_are_grouped_by_installed_place_and_version() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path().join("data"));
         let config_path = tmp.path().join("config.toml");
         fs::write(&config_path, "").unwrap();
         let config = Config::load(&config_path, tmp.path()).unwrap();
-        let formula = json!({"kind": "homebrew_formula", "name": "sqlite"});
-        let finding = |key: u64, lookup: serde_json::Value, version: &str, found_in| {
-            json!({"key": FindingKey(key), "severity": "high",
+        let finding = |key: u64, name: &str, lookup, version: &str, found_in| {
+            json!({"key": FindingKey(key), "severity": "high", "name": name,
                 "installed": {"lookup": lookup, "version": version, "found_in": found_in}})
         };
-        let product = json!({"product": "sqlite"});
+        let formula = json!({"kind": "homebrew_formula", "name": "curl"});
+        let curl = || json!({"product": "curl"});
+        let npm = |name: &str| json!({"package": {"ecosystem": "npm", "name": name}});
+        let lockfile = json!({"kind": "lockfile", "path": "/code/app/package-lock.json"});
+        let unknown = json!({"kind": "a_place_from_a_later_build"});
         let report = json!({
             "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
             "findings": [
-                finding(1, product.clone(), "3.51.3", formula.clone()),
-                finding(2, product.clone(), "3.51.3", formula.clone()),
-                finding(3, product.clone(), "3.53.2", formula.clone()),
-                finding(7, product.clone(), "3.53.3", formula.clone()),
-                finding(4, product, "3.51.3", json!({"kind": "path", "name": "sqlite"})),
-                finding(5, json!({"package": {"ecosystem": "npm", "name": "sqlite"}}),
-                    "3.51.3", formula),
+                finding(1, "curl", curl(), "8.11.0", formula.clone()),
+                // One formula, two NVD products: one upgrade, one component.
+                finding(2, "libcurl", json!({"product": "haxx:libcurl"}), "8.11.0",
+                    formula.clone()),
+                finding(3, "curl", curl(), "8.10.0", formula.clone()),
+                finding(4, "curl", curl(), "8.12.0", formula.clone()),
+                finding(5, "curl", curl(), "8.11.0",
+                    json!({"kind": "homebrew_formula", "name": "curl-openssl"})),
+                // A lockfile holds many packages: the lookup tells them apart.
+                finding(6, "lodash", npm("lodash"), "4.17.0", lockfile.clone()),
+                finding(7, "lodash", npm("lodash"), "4.17.0", lockfile.clone()),
+                finding(8, "minimist", npm("minimist"), "4.17.0", lockfile),
+                finding(9, "curl", curl(), "8.11.0", unknown.clone()),
+                finding(10, "libcurl", json!({"product": "haxx:libcurl"}), "8.11.0",
+                    unknown),
             ],
-            "issues": [{"key": FindingKey(6), "severity": "low"}],
+            "issues": [{"key": FindingKey(11), "severity": "low"}],
         });
         save(&data_dir.sweeps_dir(), "20261105T000000Z/mac", &report);
         dismiss(&data_dir, FindingKey(3), "not used").unwrap();
 
-        let mac = &latest(&data_dir, &config).unwrap()[0];
+        let mac = latest(&data_dir, &config).unwrap().remove(0);
         let component = |key: u64| {
-            mac.open
-                .iter()
-                .find(|o| o.key == FindingKey(key))
-                .map(|o| o.component)
+            let open = mac.open.iter().find(|o| o.key == FindingKey(key));
+            open.map(|o| o.component.as_ref().map(|c| (c.key, c.name.as_str())))
         };
-        let first = component(1).unwrap().expect("a finding has a component");
+        let (curl_key, name) = component(1).flatten().expect("a finding has a component");
+        assert_eq!(name, "curl");
         assert_eq!(
             component(2),
-            Some(Some(first)),
-            "same lookup, version and place"
+            Some(Some((curl_key, "curl"))),
+            "named after the formula"
         );
         assert_eq!(component(3), None, "dismissed, so not open");
-        for other in [4, 5, 7] {
-            assert_ne!(component(other), Some(Some(first)), "{other}");
+        for other in [4, 5, 6, 9] {
+            let (key, _) = component(other).flatten().unwrap();
+            assert_ne!(key, curl_key, "{other}");
         }
-        assert_eq!(component(6), Some(None), "an issue has none");
+        let (lodash, name) = component(6).flatten().unwrap();
+        assert_eq!(name, "lodash", "a lockfile's package keeps its own name");
+        assert_eq!(component(7).flatten().map(|c| c.0), Some(lodash));
+        assert_ne!(component(8).flatten().map(|c| c.0), Some(lodash));
+        let unknown = component(9).flatten().unwrap().0;
+        assert_ne!(
+            component(10).flatten().map(|c| c.0),
+            Some(unknown),
+            "an unknown place"
+        );
+        assert_eq!(component(11), Some(None), "an issue has none");
 
-        let view =
-            crate::popover::popover_view(vec![latest(&data_dir, &config).unwrap().remove(0)]);
-        let sizes: Vec<usize> = view.items.iter().map(|i| 1 + i.others.len()).collect();
-        assert_eq!(sizes, [2, 1, 1, 1, 1], "the dismissed version is gone");
+        let view = crate::popover::popover_view(vec![mac]);
+        let sizes: Vec<(&str, usize)> = view
+            .items
+            .iter()
+            .map(|i| (i.name.as_str(), 1 + i.others.len()))
+            .collect();
+        assert_eq!(
+            sizes,
+            [
+                ("curl", 2),
+                ("curl", 1),
+                ("curl-openssl", 1),
+                ("lodash", 2),
+                ("minimist", 1),
+                ("curl", 1),
+                ("libcurl", 1),
+                ("", 1)
+            ],
+            "the dismissed version is gone"
+        );
     }
 
     #[test]

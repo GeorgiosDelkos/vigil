@@ -66,7 +66,10 @@ pub struct Listed {
     pub id: String,
     /// Its target, as [`target_label`] shows it.
     pub target: String,
-    /// The finding that leads it: exploited first, then the worst, then the newest. Its name,
+    /// Its name: the component's (a Homebrew formula's own name, which can hold several
+    /// products), or the issue's subject.
+    pub name: String,
+    /// The finding that leads it: exploited first, then the worst, then the newest. Its
     /// version, place and fix are the item's, and Fix runs its key.
     pub lead: Open,
     /// The other findings in the same component, ranked the same way; empty for an issue.
@@ -217,7 +220,7 @@ pub fn items(target: &str, open: Vec<Open>) -> Vec<Listed> {
     let mut groups: Vec<Vec<Open>> = Vec::new();
     let mut by_component = BTreeMap::new();
     for finding in open {
-        let Some(component) = finding.component else {
+        let Some(component) = finding.component.as_ref().map(|c| c.key) else {
             groups.push(vec![finding]);
             continue;
         };
@@ -246,13 +249,17 @@ fn listed(target: &str, mut findings: Vec<Open>) -> Listed {
         .map(|f| f.severity)
         .fold(lead.severity, Ord::min);
     let known_exploited = all().any(|f| f.known_exploited);
+    let name = lead
+        .component
+        .as_ref()
+        .map_or_else(|| lead.name.clone(), |c| c.name.clone());
     let count = 1 + others.len();
     let (advisory_count, fix_scope) = if others.is_empty() {
         (None, None)
     } else {
         let component = match &lead.version {
-            Some(version) => format!("{} {version}", lead.name),
-            None => lead.name.clone(),
+            Some(version) => format!("{name} {version}"),
+            None => name.clone(),
         };
         (
             Some(format!("{count} advisories")),
@@ -265,8 +272,10 @@ fn listed(target: &str, mut findings: Vec<Open>) -> Listed {
     Listed {
         id: lead
             .component
-            .map_or_else(|| lead.key.to_string(), |c| c.to_string()),
+            .as_ref()
+            .map_or_else(|| lead.key.to_string(), |c| c.key.to_string()),
         target: target.to_owned(),
+        name,
         severity,
         known_exploited,
         needs_you: known_exploited || matches!(severity, Severity::Critical | Severity::High),
@@ -347,6 +356,7 @@ mod tests {
     use super::*;
     use crate::lifecycle::ComponentKey;
     use crate::lifecycle::FindingKey;
+    use crate::lifecycle::InComponent;
 
     fn open(key: u64, severity: Severity, exploited: bool, first_seen: Option<i64>) -> Open {
         Open {
@@ -390,7 +400,10 @@ mod tests {
     fn in_component(mut finding: Open, name: &str, version: &str) -> Open {
         finding.name = name.to_owned();
         finding.version = Some(version.to_owned());
-        finding.component = Some(ComponentKey(FindingKey::new(&[name, version])));
+        finding.component = Some(InComponent {
+            key: ComponentKey(FindingKey::new(&[name, version])),
+            name: name.to_owned(),
+        });
         finding
     }
 

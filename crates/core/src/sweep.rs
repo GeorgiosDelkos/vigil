@@ -455,7 +455,7 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             }
             plain(&format!(
                 "{} {}, {}: {} advisories",
-                component_name(installed),
+                group_name(installed),
                 installed.version,
                 installed.found_in,
                 group.len()
@@ -1309,7 +1309,7 @@ pub fn report_markdown(report: &Report) -> String {
         out.push_str(&format!(
             "## {} {} {}\n\nFound in {}. {advisories}.\n\n",
             first.finding.severity.to_string().to_uppercase(),
-            escape(&component_name(&first.installed)),
+            escape(&group_name(&first.installed)),
             escape(&first.installed.version),
             escape(&first.installed.found_in.to_string()),
         ));
@@ -1380,8 +1380,9 @@ fn headline(report: &Report) -> String {
     }
 }
 
-/// Groups findings by component (same lookup, version and place found), in the order of each
-/// group's first finding. Findings are sorted most severe first, so each group starts with its
+/// Groups findings by component (same version and place found, and same lookup unless the
+/// place is one installed thing, as the popover groups them), in the order of each group's
+/// first finding. Findings are sorted most severe first, so each group starts with its
 /// worst finding and the groups come worst first.
 fn by_component<'a>(findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
     let mut groups: Vec<Vec<&ReportFinding>> = Vec::new();
@@ -1399,12 +1400,21 @@ fn by_component<'a>(findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding
 }
 
 fn component_key(component: &Component) -> String {
-    format!(
-        "{}|{}|{}",
-        component_name(component),
-        component.version,
-        component.found_in
-    )
+    let lookup = if component.found_in.is_one_install() {
+        String::new()
+    } else {
+        component_name(component)
+    };
+    format!("{lookup}|{}|{}", component.version, component.found_in)
+}
+
+/// A group's name: the place's own (a Homebrew formula, which can hold several products), or
+/// the component's.
+fn group_name(component: &Component) -> String {
+    component
+        .found_in
+        .install_name()
+        .map_or_else(|| component_name(component), str::to_owned)
 }
 
 fn finding_markdown(key: FindingKey, finding: &Finding) -> String {
@@ -2150,6 +2160,28 @@ mod tests {
                 "mac: GHSA-4 in npm:b".to_owned()
             ],
             "the low one is not counted"
+        );
+
+        // One Homebrew formula mapped to two NVD products is one upgrade: one line, under
+        // the formula's name.
+        let mut first = Report {
+            first_verdict: true,
+            ..report(
+                vec![
+                    report_finding("CVE-1", "high", false, "curl"),
+                    report_finding("CVE-2", "high", false, "libcurl"),
+                ],
+                &[],
+            )
+        };
+        for f in &mut first.findings {
+            f.installed.found_in = FoundIn::HomebrewFormula {
+                name: "curl".to_owned(),
+            };
+        }
+        assert_eq!(
+            alerts(&[first]),
+            ["mac: curl 1.0, Homebrew formula curl: 2 advisories"]
         );
     }
 

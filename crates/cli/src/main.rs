@@ -329,7 +329,7 @@ fn item_text(item: &Listed) -> String {
     let version = lead.version.as_deref().unwrap_or_default();
     let mut out = format!(
         "  {:<8} {} {version}, {}: {count}\n           fix: {}\n",
-        item.severity, lead.name, lead.place, lead.fix
+        item.severity, item.name, lead.place, lead.fix
     );
     for finding in item.findings() {
         out.push_str(&format!(
@@ -720,6 +720,7 @@ mod tests {
         let item = Listed {
             id: "00000000000000ff".to_owned(),
             target: "This Mac".to_owned(),
+            name: "ffmpeg".to_owned(),
             lead,
             others: vec![finding("0000000000000002", Severity::Low, "CVE-2")],
             severity: Severity::Critical,
