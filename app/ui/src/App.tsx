@@ -21,11 +21,12 @@ import {
   type FixPreview,
   type Listed,
   type Overview,
+  type Severity,
   type Status,
   type TargetLine,
 } from "./overview.ts";
 import { Menu } from "./Menu.tsx";
-import { Orbit } from "./Orbit.tsx";
+import { Orbit, TargetFigures, mix } from "./Orbit.tsx";
 import { Settings } from "./Settings.tsx";
 import type { Section } from "./settings.ts";
 import { Glyph, Icon } from "./icons.tsx";
@@ -444,43 +445,43 @@ function Rows(props: {
   );
 }
 
+/** The list's severity colours, for the target rows' counts and bars. */
+const SEVERITY_COLOURS: Readonly<Record<Severity, string>> = {
+  critical: "var(--critical)",
+  high: "var(--high)",
+  medium: "var(--medium)",
+  low: "var(--low)",
+};
+
+/** One row per target, laid out as the main view's target rows (Orbit.tsx): the name and its
+ * open count, what was checked and when across the full width, then the counts and the bar. */
 function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
   return (
     <div class="group list pane" role="list" aria-label="Targets" tabindex="0">
       <For each={props.targets}>
         {(t) => (
-          <div class="row static target" role="listitem">
-            <span class="ticon">
-              <Icon name={t.kind} />
-            </span>
-            <span class="what">
-              <span class="t">{t.label}</span>
-              <Show when={t.open > 0}>
-                <span class="legend sevs">
-                  <For each={SEVERITIES.filter((s) => t.counts[s] > 0)}>
-                    {(s) => (
-                      <span>
-                        {/* The word follows, so the glyph is not read out a second time. */}
-                        <span class="glyph" aria-hidden="true">
-                          <Glyph severity={s} />
-                        </span>
-                        <b>{t.counts[s]}</b> {s}
-                      </span>
-                    )}
-                  </For>
-                </span>
+          <div class="trow target" role="listitem">
+            <Icon name={t.kind} />
+            <span class="tname">{t.label}</span>
+            <span class="tsub">
+              <Show when={t.swept} fallback="not swept yet">
+                {(swept) =>
+                  [t.checked, `swept ${since(swept(), props.now)} ago`]
+                    .filter((part) => part !== null)
+                    .join(" · ")
+                }
               </Show>
-              <span class="where">
-                <Show when={t.swept} fallback="not swept yet">
-                  {(swept) =>
-                    [t.checked, `swept ${since(swept(), props.now)} ago`]
-                      .filter((part) => part !== null)
-                      .join(" · ")
-                  }
-                </Show>
-                <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
-              </span>
+              <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
             </span>
+            {/* The counts are drawn for the eye; this names the ones it has, in words. */}
+            <Show when={t.open > 0}>
+              <span class="sr-only">
+                {mix(t)
+                  .map((m) => `${m.count} ${m.severity}`)
+                  .join(", ")}
+              </span>
+            </Show>
+            <TargetFigures target={t} colours={SEVERITY_COLOURS} />
             <span class="open">
               <Show when={t.swept !== null}>
                 <Show

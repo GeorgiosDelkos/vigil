@@ -35,8 +35,8 @@
   --space-24: 24px;
   --space-32: 32px;
   /* Off the 4 pixel grid, only beside hairlines: the segmented control's inset, the gaps
-     between bar segments, the switch's thumb inset, and centring a 16 pixel icon or a 24
-     pixel tile on a 20 pixel line. */
+     between bar segments, the switch's thumb inset, and centring a 16 pixel icon on a 20
+     pixel line. */
   --space-2: 2px;
   /* Each type size with the line height that keeps its lines on the 4 pixel grid. */
   --text-11: 11px;
@@ -444,9 +444,6 @@ select:focus-visible {
   min-height: 96px;
   overflow-y: auto;
 }
-.legend .glyph {
-  display: inline-flex;
-}
 .tagline {
   display: flex;
   flex-wrap: wrap;
@@ -469,32 +466,6 @@ select:focus-visible {
   border: 0;
   background: transparent;
   text-align: left;
-}
-.target .open {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-4);
-  /* The title's line height, so the count sits level with it, as the age does. */
-  line-height: var(--leading-13);
-  font-size: var(--text-12);
-  color: var(--l2);
-  white-space: nowrap;
-}
-.target .open b {
-  color: var(--l1);
-  font-weight: 600;
-}
-.target .open .icon {
-  color: var(--ok);
-}
-.sevs {
-  gap: 0 var(--space-12);
-  font-size: var(--text-11);
-  line-height: var(--leading-11);
-}
-/* The tile is 24 high and the title's line 20: raised 2, it is centred on the title. */
-.row > .ticon {
-  margin-top: calc(-1 * var(--space-2));
 }
 .row + .row::before {
   content: "";
@@ -586,14 +557,117 @@ button.row:hover {
   color: var(--run);
   background: rgba(110, 155, 255, 0.14);
 }
-.ticon {
-  width: var(--space-24);
-  height: var(--space-24);
-  border-radius: var(--radius-6);
+
+/* Target rows, in the list's Targets tab and on the main view (orbit.css): the row template
+   with every part in its own cell, the same in every row. Line 1 is the name and, at the right,
+   its status; line 2 what was checked and when; then the counts 8 below and the bar 4 below
+   them, both across the full width. With the row padding a row is 100 high. */
+.trow {
+  position: relative;
   display: grid;
-  place-items: center;
-  background: rgba(255, 255, 255, 0.08);
+  grid-template-columns: var(--space-24) minmax(0, 1fr) auto;
+  grid-template-rows: var(--leading-13) var(--leading-11) auto auto;
+  column-gap: var(--space-12);
+  align-items: center;
+  width: 100%;
+  padding: var(--space-8) var(--space-12);
+}
+.trow + .trow::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: calc(var(--space-12) + var(--space-24) + var(--space-12));
+  right: 0;
+  height: 0.5px;
+  background: var(--hair);
+}
+/* Centred on the name and checked lines together. */
+.trow > .icon {
+  grid-area: 1 / 1 / 3 / 2;
+  justify-self: center;
   color: var(--l2);
+}
+.tname,
+.tsub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tname {
+  grid-area: 1 / 2;
+  font-size: var(--text-13);
+  line-height: var(--leading-13);
+  font-weight: 600;
+}
+.tsub {
+  grid-area: 2 / 2 / 3 / 4;
+  color: var(--l3);
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
+}
+.target .open {
+  grid-area: 1 / 3;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-size: var(--text-12);
+  line-height: var(--leading-13);
+  color: var(--l2);
+  white-space: nowrap;
+}
+.target .open b {
+  color: var(--l1);
+  font-weight: 600;
+}
+.target .open .icon {
+  color: var(--ok);
+}
+/* Four equal columns, one per severity, so a count never moves. */
+.tcounts {
+  grid-area: 3 / 2 / 4 / 4;
+  margin-top: var(--space-8);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  column-gap: var(--space-8);
+}
+.tcount {
+  display: grid;
+  white-space: nowrap;
+}
+.tcount b {
+  font-size: var(--text-15);
+  line-height: var(--leading-11);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--c);
+}
+.tcount small {
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
+  color: color-mix(in srgb, var(--c) 70%, white);
+}
+.tcount.zero b,
+.tcount.zero small {
+  color: var(--l2);
+}
+/* Full width in every row: the bar shows the mix within a target, not its size. */
+.tbar {
+  grid-area: 4 / 2 / 5 / 4;
+  margin-top: var(--space-4);
+  display: flex;
+  gap: var(--space-2);
+  height: var(--space-4);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+}
+.tbar i {
+  flex-basis: 0;
+  background: var(--c);
+}
+.tbar.ok {
+  background: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
 /* Detail */

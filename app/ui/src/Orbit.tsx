@@ -207,7 +207,7 @@ function Progress(props: { status: Sweeping; now: Date }) {
 
 /** A target's open findings per severity, worst first, as bar segments: only the severities it
  * has. Empty before its first sweep and when it is clear. */
-function mix(target: TargetLine): { severity: Severity; count: number }[] {
+export function mix(target: TargetLine): { severity: Severity; count: number }[] {
   if (target.swept === null) {
     return [];
   }
@@ -258,29 +258,48 @@ function TargetRows(props: {
             <small class="tsub" aria-hidden="true">
               {t().checked ?? "not swept yet"}
             </small>
-            <span class="tcounts" aria-hidden="true">
-              <Index each={SEVERITIES}>
-                {(s) => (
-                  <span
-                    class="tcount"
-                    classList={{ zero: t().swept === null || t().counts[s()] === 0 }}
-                    style={{ "--c": NEON[s()] }}
-                  >
-                    <b>{t().swept === null ? "–" : t().counts[s()]}</b>
-                    <small>{s()}</small>
-                  </span>
-                )}
-              </Index>
-            </span>
-            <span class="tbar" classList={{ ok: t().swept !== null && t().open === 0 }}>
-              <Index each={mix(t())}>
-                {(m) => <i style={{ "flex-grow": m().count, "--c": NEON[m().severity] }} />}
-              </Index>
-            </span>
+            <TargetFigures target={t()} colours={NEON} />
           </button>
         )}
       </Index>
     </div>
+  );
+}
+
+/** A target row's last two lines, here and in the list's Targets tab: a count for each severity
+ * in fixed columns, number over word (a zero dimmed, a dash before the first sweep), and the bar
+ * split by severity. Hidden from screen readers; each row says the same in words. */
+export function TargetFigures(props: {
+  target: TargetLine;
+  colours: Readonly<Record<Severity, string>>;
+}) {
+  const t = () => props.target;
+  return (
+    <>
+      <span class="tcounts" aria-hidden="true">
+        <Index each={SEVERITIES}>
+          {(s) => (
+            <span
+              class="tcount"
+              classList={{ zero: t().swept === null || t().counts[s()] === 0 }}
+              style={{ "--c": props.colours[s()] }}
+            >
+              <b>{t().swept === null ? "–" : t().counts[s()]}</b>
+              <small>{s()}</small>
+            </span>
+          )}
+        </Index>
+      </span>
+      <span
+        class="tbar"
+        classList={{ ok: t().swept !== null && t().open === 0 }}
+        aria-hidden="true"
+      >
+        <Index each={mix(t())}>
+          {(m) => <i style={{ "flex-grow": m().count, "--c": props.colours[m().severity] }} />}
+        </Index>
+      </span>
+    </>
   );
 }
 
