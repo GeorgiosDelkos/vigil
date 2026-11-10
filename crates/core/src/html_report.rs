@@ -256,7 +256,12 @@ fn item(listed: &Listed, expanded: bool) -> String {
 fn component_part(listed: &Listed) -> String {
     let lead = &listed.lead;
     let mut rows = component_rows(listed);
-    rows.push(("First seen", seen(listed.first_seen, listed.new)));
+    // The earliest finding's date; only a newer one may be new, so say which is.
+    let mut first_seen = seen(listed.first_seen, false);
+    if listed.new {
+        first_seen.push_str(" (an advisory is new in the last sweep)");
+    }
+    rows.push(("First seen", first_seen));
     let mut out = definitions(rows);
     out.push_str(&fix_part(lead));
     if let Some(scope) = &listed.fix_scope {
@@ -1090,6 +1095,7 @@ mod tests {
             ..open(key, severity, exploited)
         };
         let mut own_fix = ffmpeg(3, Severity::Low, false);
+        own_fix.new = true;
         own_fix.fix = "Upgrade ffmpeg to 9.".to_owned();
         let mut no_fix = ffmpeg(5, Severity::Low, false);
         no_fix.fix = String::new();
@@ -1138,6 +1144,10 @@ mod tests {
             1
         );
         assert_eq!(html.matches("Its own fix").count(), 1, "none without a fix");
+        assert!(html.contains(
+            "<dt>First seen</dt><dd>1 Nov 2026, 00:00 UTC (an advisory is new in the last \
+             sweep)</dd>"
+        ));
         assert!(html.contains(
             "<p><b>ffmpeg 8.1.2 on This Mac</b> is affected by <a \
              href=\"https://nvd.nist.gov/vuln/detail/CVE-2026-0002\" \
