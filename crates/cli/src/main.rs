@@ -316,7 +316,7 @@ fn findings_text(all: Vec<Latest>) -> String {
 /// advisories.
 fn item_text(item: &Listed) -> String {
     let lead = &item.lead;
-    let Some(count) = &item.advisory_count else {
+    if item.others.is_empty() {
         let mut out = format!(
             "  {:<8} {}  {}\n           fix: {}\n",
             lead.severity, lead.key, lead.title, lead.fix
@@ -325,7 +325,8 @@ fn item_text(item: &Listed) -> String {
             out.push_str(&format!("           {}\n", fix_line(state)));
         }
         return out;
-    };
+    }
+    let count = item.advisory_count.as_deref().unwrap_or_default();
     let version = lead.version.as_deref().unwrap_or_default();
     let mut out = format!(
         "  {:<8} {} {version}, {}: {count}\n           fix: {}\n",

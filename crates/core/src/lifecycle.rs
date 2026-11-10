@@ -93,7 +93,7 @@ impl From<FindingKey> for String {
 }
 
 /// The installed component a finding is in, as the list groups findings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct InComponent {
     /// Findings with the same key are in the same component.
     pub key: ComponentKey,
@@ -542,7 +542,7 @@ fn open_entry(target: &str, entry: &SavedEntry, new: bool, fix_state: Option<Fix
         component: entry
             .installed
             .as_ref()
-            .map(|i| i.component(target, &plain(&entry.name))),
+            .map(|i| i.component(target, entry.key, &plain(&entry.name))),
         advisories: entry.advisories.iter().map(|a| plain(a)).collect(),
         place: plain(&entry.place),
         known_exploited: entry.known_exploited,
@@ -629,9 +629,8 @@ struct SavedFix {
 #[derive(Debug, Clone, Deserialize)]
 struct SavedInstalled {
     version: String,
-    /// Kept as the report has them, only to tell components apart. `Null` in a report saved
-    /// before they were kept. Values rather than types, so a place this build does not know
-    /// still reads.
+    /// Kept as the report has them, only to tell components apart; values rather than types,
+    /// so a place this build does not know still reads.
     #[serde(default)]
     lookup: serde_json::Value,
     #[serde(default)]
@@ -639,33 +638,51 @@ struct SavedInstalled {
 }
 
 impl SavedInstalled {
-    /// The component in `target` of a finding whose component is named `name`. One report's
-    /// writer serializes every component the same way, so equal components print as equal
-    /// text here, whether or not a crate in the build turns on `serde_json`'s `preserve_order`
-    /// (which keeps the file's key order). A place this build cannot read counts as holding
-    /// many things, so its components stay apart.
-    fn component(&self, target: &str, name: &str) -> InComponent {
-        let place = FoundIn::deserialize(&self.found_in).ok();
-        let one_install = place.as_ref().is_some_and(FoundIn::is_one_install);
-        let lookup = if one_install {
-            String::new()
+    /// The component in `target` of the finding `key`, whose component is named `name`.
+    /// Every report since findings had an `installed` keeps its lookup and place; one without
+    /// them would make every finding at a version one component, so such a finding stands
+    /// alone instead.
+    fn component(&self, target: &str, key: FindingKey, name: &str) -> InComponent {
+        let key = if self.lookup.is_null() || self.found_in.is_null() {
+            ComponentKey(FindingKey::new(&[target, &key.to_string()]))
         } else {
-            self.lookup.to_string()
+            component_key(target, &self.lookup, &self.version, &self.found_in)
         };
-        let found_in = self.found_in.to_string();
+        let place = FoundIn::deserialize(&self.found_in).ok();
         InComponent {
-            key: ComponentKey(FindingKey::new(&[
-                target,
-                &lookup,
-                &self.version,
-                &found_in,
-            ])),
+            key,
             name: place
                 .as_ref()
                 .and_then(FoundIn::install_name)
                 .map_or_else(|| name.to_owned(), sweep::plain),
         }
     }
+}
+
+/// The key of the component at `version` that `lookup` and `found_in` name in `target`,
+/// given as a report saves them: the one rule for what is one component, for the popover, the
+/// report, the CLI and notifications. The lookup counts only where the place holds many
+/// things; a place this build cannot read counts as one that does. One report's writer
+/// serializes every component the same way, so equal components print as equal text here,
+/// whether or not a crate in the build turns on `serde_json`'s `preserve_order`.
+pub(crate) fn component_key(
+    target: &str,
+    lookup: &serde_json::Value,
+    version: &str,
+    found_in: &serde_json::Value,
+) -> ComponentKey {
+    let one_install = FoundIn::deserialize(found_in).is_ok_and(|place| place.is_one_install());
+    let lookup = if one_install {
+        String::new()
+    } else {
+        lookup.to_string()
+    };
+    ComponentKey(FindingKey::new(&[
+        target,
+        &lookup,
+        version,
+        &found_in.to_string(),
+    ]))
 }
 
 impl SavedEntry {
@@ -1152,6 +1169,9 @@ mod tests {
                 finding(9, "curl", curl(), "8.11.0", unknown.clone()),
                 finding(10, "libcurl", json!({"product": "haxx:libcurl"}), "8.11.0",
                     unknown),
+                // Without a lookup and place, nothing says two findings share a component.
+                json!({"key": FindingKey(12), "severity": "high", "installed": {"version": "1"}}),
+                json!({"key": FindingKey(13), "severity": "high", "installed": {"version": "1"}}),
             ],
             "issues": [{"key": FindingKey(11), "severity": "low"}],
         });
@@ -1186,6 +1206,12 @@ mod tests {
             "an unknown place"
         );
         assert_eq!(component(11), Some(None), "an issue has none");
+        let bare = component(12).flatten().unwrap().0;
+        assert_ne!(
+            component(13).flatten().map(|c| c.0),
+            Some(bare),
+            "no lookup or place"
+        );
 
         let view = crate::popover::popover_view(vec![mac]);
         let sizes: Vec<(&str, usize)> = view
@@ -1203,6 +1229,8 @@ mod tests {
                 ("minimist", 1),
                 ("curl", 1),
                 ("libcurl", 1),
+                ("", 1),
+                ("", 1),
                 ("", 1)
             ],
             "the dismissed version is gone"

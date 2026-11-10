@@ -61,6 +61,7 @@ use crate::inventory::Inventory;
 use crate::inventory::Lookup;
 use crate::lifecycle;
 use crate::lifecycle::Changes;
+use crate::lifecycle::ComponentKey;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
@@ -448,19 +449,21 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             .iter()
             .filter(|f| f.dismissed.is_none() && serious(f.finding.severity) && new(f.key))
             .collect();
-        let components = by_component(&findings).into_iter().map(|group| {
-            let installed = &group[0].installed;
-            if group.len() == 1 {
-                return group[0].title.clone();
-            }
-            plain(&format!(
-                "{} {}, {}: {} advisories",
-                group_name(installed),
-                installed.version,
-                installed.found_in,
-                group.len()
-            ))
-        });
+        let components = by_component(&report.target, &findings)
+            .into_iter()
+            .map(|group| {
+                let installed = &group[0].installed;
+                if group.len() == 1 {
+                    return group[0].title.clone();
+                }
+                plain(&format!(
+                    "{} {}, {}: {} advisories",
+                    group_name(installed),
+                    installed.version,
+                    installed.found_in,
+                    group.len()
+                ))
+            });
         let issues = report
             .issues
             .iter()
@@ -1299,7 +1302,7 @@ pub fn report_markdown(report: &Report) -> String {
         report.findings.iter().partition(|f| f.dismissed.is_none());
     let (issues, dismissed_issues): (Vec<&ReportIssue>, Vec<&ReportIssue>) =
         report.issues.iter().partition(|i| i.dismissed.is_none());
-    for group in by_component(&findings) {
+    for group in by_component(&report.target, &findings) {
         let first = group[0];
         let advisories = if group.len() == 1 {
             "1 advisory".to_owned()
@@ -1380,32 +1383,30 @@ fn headline(report: &Report) -> String {
     }
 }
 
-/// Groups findings by component (same version and place found, and same lookup unless the
-/// place is one installed thing, as the popover groups them), in the order of each group's
-/// first finding. Findings are sorted most severe first, so each group starts with its
-/// worst finding and the groups come worst first.
-fn by_component<'a>(findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
-    let mut groups: Vec<Vec<&ReportFinding>> = Vec::new();
+/// Groups the findings of `target` by component, by the rule the popover uses
+/// ([`lifecycle::component_key`]), in the order of each group's first finding. Findings are
+/// sorted most severe first, so each group starts with its worst finding and the groups come
+/// worst first.
+fn by_component<'a>(target: &str, findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
+    let key = |f: &ReportFinding| {
+        let installed = &f.installed;
+        let serialized = "a component serializes to JSON, as its report does";
+        lifecycle::component_key(
+            target,
+            &serde_json::to_value(&installed.lookup).expect(serialized),
+            &installed.version,
+            &serde_json::to_value(&installed.found_in).expect(serialized),
+        )
+    };
+    let mut groups: Vec<(ComponentKey, Vec<&ReportFinding>)> = Vec::new();
     for &f in findings {
-        let key = component_key(&f.installed);
-        match groups
-            .iter_mut()
-            .find(|g| component_key(&g[0].installed) == key)
-        {
-            Some(group) => group.push(f),
-            None => groups.push(vec![f]),
+        let key = key(f);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group)) => group.push(f),
+            None => groups.push((key, vec![f])),
         }
     }
-    groups
-}
-
-fn component_key(component: &Component) -> String {
-    let lookup = if component.found_in.is_one_install() {
-        String::new()
-    } else {
-        component_name(component)
-    };
-    format!("{lookup}|{}|{}", component.version, component.found_in)
+    groups.into_iter().map(|(_, group)| group).collect()
 }
 
 /// A group's name: the place's own (a Homebrew formula, which can hold several products), or

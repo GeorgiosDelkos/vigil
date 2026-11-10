@@ -241,8 +241,11 @@ pub fn items(target: &str, open: Vec<Open>) -> Vec<Listed> {
 /// The item of `findings`, one or more in one component, or one issue.
 fn listed(target: &str, mut findings: Vec<Open>) -> Listed {
     findings.sort_by_key(|f| risk(f.known_exploited, f.severity, f.first_seen));
-    let lead = findings.remove(0);
-    let others = findings;
+    let mut findings = findings.into_iter();
+    let lead = findings
+        .next()
+        .expect("items makes each group around a finding it then adds");
+    let others: Vec<Open> = findings.collect();
     let all = || std::iter::once(&lead).chain(&others);
     let severity = others
         .iter()

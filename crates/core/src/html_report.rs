@@ -387,6 +387,7 @@ fn definitions(rows: Vec<(&'static str, String)>) -> String {
         .concat();
     format!("<dl>{rows}</dl>")
 }
+
 /// What the fix history says, one line; the pull request URL is the agent's, so plain text.
 fn fix_status(state: &FixState) -> String {
     match state {
@@ -434,6 +435,7 @@ fn fix_part(open: &Open) -> String {
     }
     out
 }
+
 /// One row per target.
 fn targets_table(view: &PopoverView) -> String {
     let rows: String = view
@@ -1089,10 +1091,13 @@ mod tests {
         };
         let mut own_fix = ffmpeg(3, Severity::Low, false);
         own_fix.fix = "Upgrade ffmpeg to 9.".to_owned();
+        let mut no_fix = ffmpeg(5, Severity::Low, false);
+        no_fix.fix = String::new();
         let html = page(vec![mac(vec![
             ffmpeg(1, Severity::Critical, false),
             ffmpeg(2, Severity::Medium, true),
             own_fix,
+            no_fix,
             open(4, Severity::Low, false),
         ])]);
         assert_eq!(
@@ -1100,12 +1105,12 @@ mod tests {
             2,
             "ffmpeg, pkg4"
         );
-        assert_eq!(html.matches("<details class=\"adv\">").count(), 3);
+        assert_eq!(html.matches("<details class=\"adv\">").count(), 4);
         assert!(html.contains(
             "<span class=\"dot critical\"></span><span class=\"t\">ffmpeg<span>8.1.2</span>"
         ));
         assert!(html.contains(
-            "<span class=\"cnt\">3 advisories</span><span class=\"sevlbl kev\">Exploited</span>\
+            "<span class=\"cnt\">4 advisories</span><span class=\"sevlbl kev\">Exploited</span>\
              <span class=\"sevlbl critical\">"
         ));
         assert_eq!(
@@ -1114,7 +1119,7 @@ mod tests {
             1,
             "the fix once"
         );
-        assert!(html.contains("which all 3 advisories are in; the next sweep checks"));
+        assert!(html.contains("which all 4 advisories are in; the next sweep checks"));
         let [two, one, three] = ["0002", "0001", "0003"].map(|n| {
             html.find(&format!("<span class=\"t\">CVE-2026-{n}</span>"))
                 .unwrap()
@@ -1132,6 +1137,7 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(html.matches("Its own fix").count(), 1, "none without a fix");
         assert!(html.contains(
             "<p><b>ffmpeg 8.1.2 on This Mac</b> is affected by <a \
              href=\"https://nvd.nist.gov/vuln/detail/CVE-2026-0002\" \
