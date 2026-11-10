@@ -142,9 +142,7 @@ pub(crate) fn pep440(text: &str) -> Option<Pep440> {
     let release_text = rest[..release_end].trim_end_matches('.');
     rest = &rest[release_text.len()..];
     let mut release: Vec<u64> = release_text.split('.').map(digits).collect::<Option<_>>()?;
-    while release.last() == Some(&0) {
-        release.pop();
-    }
+    drop_trailing_zeros(&mut release);
 
     let pre = suffix(
         &mut rest,
@@ -260,12 +258,19 @@ fn digits(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
+/// Drops the zeros at the end of a release (`1.2.0.0` is `1.2`), so spellings compare equal.
+///
+/// Not a `while last() == Some(&0)` loop: its `!=` mutant never ends, and CI counts the
+/// timeout as a failure.
+fn drop_trailing_zeros(numbers: &mut Vec<u64>) {
+    let len = numbers.iter().rposition(|&n| n != 0).map_or(0, |i| i + 1);
+    numbers.truncate(len);
+}
+
 /// Parses digits separated by single dots (`1.2.10`).
 pub(crate) fn dotted(text: &str) -> Option<Dotted> {
     let mut numbers: Vec<u64> = text.split('.').map(digits).collect::<Option<_>>()?;
-    while numbers.last() == Some(&0) {
-        numbers.pop();
-    }
+    drop_trailing_zeros(&mut numbers);
     Some(Dotted(numbers))
 }
 
