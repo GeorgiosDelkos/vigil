@@ -5,6 +5,7 @@
 //! full record as the source served it, for when the agent needs detail. Layout: spec, "Bundle
 //! and findings".
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -21,6 +22,7 @@ use crate::feeds::cache_key;
 use crate::findings::Known;
 use crate::findings::SCHEMA;
 use crate::inventory::Component;
+use crate::matching::Match;
 
 /// The longest summary kept in the index, in characters. Arbitrary: enough for the first
 /// sentence or two; the full text is in the record.
@@ -31,11 +33,12 @@ const SUMMARY_LIMIT: usize = 400;
 /// by its length and a pointer to the record, so the agent knows to open it.
 const VERSIONS_LIMIT: usize = 50;
 
-/// One advisory and the indexes of the components it was fetched for.
+/// One advisory and the components it is a candidate for, by index, each with how the
+/// advisory's affected versions relate to its version.
 #[derive(Debug)]
 pub(crate) struct Entry<'a> {
     pub(crate) advisory: &'a Advisory,
-    pub(crate) components: BTreeSet<usize>,
+    pub(crate) components: &'a BTreeMap<usize, Match>,
 }
 
 /// What goes into one target's bundle.
@@ -116,8 +119,15 @@ pub(crate) fn write(
         }
         let mut line = compact(advisory);
         line["known_exploited"] = json!(exploited);
-        let ids: Vec<String> = entry.components.iter().map(|i| component_id(*i)).collect();
-        line["components"] = json!(ids);
+        let components: Vec<Value> = entry
+            .components
+            .iter()
+            .map(|(i, verdict)| {
+                let id = component_id(*i);
+                json!({"component": id, "match": verdict.name(), "why": verdict.why()})
+            })
+            .collect();
+        line["components"] = json!(components);
         line["record"] = json!(record_name);
         index.push_str(&line.to_string());
         index.push('\n');
@@ -133,7 +143,7 @@ pub(crate) fn write(
             .advisories
             .entry(id)
             .or_default()
-            .extend(&entry.components);
+            .extend(entry.components.keys());
     }
 
     for (name, text) in [
@@ -356,6 +366,9 @@ mod tests {
     use super::*;
     use crate::inventory::FoundIn;
     use crate::inventory::Lookup;
+    use crate::matching::Linked;
+    use crate::matching::OsvRecord;
+    use crate::matching::keep_candidates;
 
     fn contents<'a>(
         prompt: &'a str,
@@ -520,14 +533,15 @@ mod tests {
         }];
         let osv = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record(&[]));
         let nvd = advisory(Source::Nvd, "CVE-1", &[], &nvd_record());
+        let in_range = [(0, Match::InRange("4.17.20 < fixed 4.17.21".to_owned()))].into();
         let entries = [
             Entry {
                 advisory: &osv,
-                components: [0].into(),
+                components: &in_range,
             },
             Entry {
                 advisory: &nvd,
-                components: BTreeSet::new(),
+                components: &BTreeMap::new(),
             },
         ];
 
@@ -551,7 +565,10 @@ mod tests {
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        assert_eq!(lines[0]["components"], json!(["c1"]));
+        assert_eq!(
+            lines[0]["components"],
+            json!([{"component": "c1", "match": "in_range", "why": "4.17.20 < fixed 4.17.21"}])
+        );
         assert_eq!(lines[0]["record"], "records/osv-GHSA-1.json");
         assert_eq!(
             lines[1]["record"], "records/nvd-CVE-1.json",
@@ -566,6 +583,73 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_advisories_are_left_out_counted_and_the_rest_annotated() {
+        let lodash = |version: &str| Component {
+            lookup: Lookup::Package("npm:lodash".parse().unwrap()),
+            version: version.into(),
+            found_in: FoundIn::NpmGlobal,
+        };
+        let components = [lodash("4.17.20"), lodash("4.17.21")];
+        let mut old = osv_record(&[]);
+        old["affected"][0]["ranges"][0]["events"][1]["fixed"] = json!("4.0.0");
+        let records = [
+            ("GHSA-1", osv_record(&[]), "CVE-1"),
+            ("GHSA-2", old.clone(), "CVE-2"),
+            ("GHSA-3", old, "CVE-3"),
+        ];
+        let mut fetched: Vec<Linked> = records
+            .iter()
+            .map(|(id, record, alias)| {
+                let advisory = advisory(Source::Osv, id, &[alias], record);
+                let parsed = OsvRecord::parse(&advisory.record);
+                let package = "npm:lodash".parse().unwrap();
+                let matches = (0..components.len())
+                    .map(|i| (i, parsed.verdict(&package, &components[i].version)))
+                    .collect();
+                (advisory, matches)
+            })
+            .collect();
+        let kev = Kev::from_ids(&["CVE-3"]);
+
+        let dropped = keep_candidates(&mut fetched);
+        assert_eq!(
+            dropped, 2,
+            "GHSA-2 and GHSA-3: both versions are past their fix, though CVE-3 is exploited"
+        );
+        let entries: Vec<Entry<'_>> = fetched
+            .iter()
+            .map(|(advisory, components)| Entry {
+                advisory,
+                components,
+            })
+            .collect();
+        let tmp = tempfile::tempdir().unwrap();
+        let contents = contents("p", &components, &entries);
+        let known = write(tmp.path(), &contents, Some(&kev)).unwrap();
+        assert_eq!(known.advisories["GHSA-1"], [0].into(), "4.17.21 is fixed");
+        assert!(!known.advisories.contains_key("GHSA-2"));
+        assert!(
+            !known.advisories.contains_key("GHSA-3"),
+            "in KEV, but provably out of range"
+        );
+
+        let index = fs::read_to_string(tmp.path().join("advisories.jsonl")).unwrap();
+        let lines: Vec<Value> = index
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(
+            lines[0]["components"],
+            json!([{
+                "component": "c1",
+                "match": "in_range",
+                "why": "4.17.20 >= introduced 0 and < fixed 4.17.21"
+            }])
+        );
+    }
+
+    #[test]
     fn known_exploited_comes_from_the_catalog() {
         let tmp = tempfile::tempdir().unwrap();
         let exploited = advisory(Source::Osv, "GHSA-1", &["CVE-1"], &osv_record(&[]));
@@ -573,11 +657,11 @@ mod tests {
         let entries = [
             Entry {
                 advisory: &exploited,
-                components: BTreeSet::new(),
+                components: &BTreeMap::new(),
             },
             Entry {
                 advisory: &other,
-                components: BTreeSet::new(),
+                components: &BTreeMap::new(),
             },
         ];
         let kev = Kev::from_ids(&["CVE-1"]);
@@ -598,7 +682,7 @@ mod tests {
         let evil = advisory(Source::Nvd, "../../escape", &[], &json!({}));
         let entries = [Entry {
             advisory: &evil,
-            components: BTreeSet::new(),
+            components: &BTreeMap::new(),
         }];
         let err = write(&tmp.path().join("b"), &contents("p", &[], &entries), None).unwrap_err();
         assert!(

@@ -12,7 +12,6 @@
 //! sweeps folder, which the system releases when the process ends, however it ends.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -36,7 +35,6 @@ use crate::config::Config;
 use crate::config::History;
 use crate::config::RepoSlug;
 use crate::config::Server;
-use crate::feeds::Advisory;
 use crate::feeds::Feeds;
 use crate::feeds::Kev;
 use crate::feeds::NvdAccess;
@@ -60,9 +58,14 @@ use crate::inventory::Inventory;
 use crate::inventory::Lookup;
 use crate::lifecycle;
 use crate::lifecycle::Changes;
+use crate::lifecycle::ComponentKey;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
+use crate::matching;
+use crate::matching::Linked;
+use crate::matching::Match;
+use crate::matching::OsvRecord;
 use crate::paths;
 use crate::paths::DataDir;
 use crate::prompts;
@@ -196,6 +199,11 @@ pub struct Report {
     pub components: usize,
     /// How many advisories went into the bundle.
     pub advisories: usize,
+    /// How many advisories were fetched for the target but left out of the bundle because
+    /// Vigil's version comparison shows that none of their components is affected: every
+    /// version is outside the affected ranges, or an NVD CVE names the product only as a
+    /// platform. Advisories in CISA's KEV catalog count like any other.
+    pub out_of_range: usize,
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
     /// Risky settings and files, most severe first.
@@ -231,6 +239,7 @@ impl Report {
             agent,
             components: 0,
             advisories: 0,
+            out_of_range: 0,
             findings: Vec::new(),
             issues: Vec::new(),
             changes: None,
@@ -405,10 +414,12 @@ pub fn sweep(
     }
 }
 
-/// What a sweep should raise a notification for: each finding and issue that is critical or
-/// high, not dismissed, and new since its target's last sweep with a verdict, as
-/// `target: title`. On a target's first sweep with a verdict, every such one is new; when the
-/// last report could not be read, none is.
+/// What a sweep should raise a notification for: the findings and issues that are critical
+/// or high, not dismissed, and new since their target's last sweep with a verdict, one line
+/// per component (as the popover counts them) and per issue. A component with one such finding
+/// reads `target: title`, one with more `target: component version, place: N advisories`. On a
+/// target's first sweep with a verdict, every such one is new; when the last report could not
+/// be read, none is.
 pub fn alerts(reports: &[Report]) -> Vec<String> {
     let mut alerts = Vec::new();
     for report in reports.iter().filter(|r| r.failure.is_none()) {
@@ -417,18 +428,33 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             None => report.first_verdict,
         };
         let serious = |severity: Severity| severity <= Severity::High;
-        let findings = report
+        let findings: Vec<&ReportFinding> = report
             .findings
             .iter()
             .filter(|f| f.dismissed.is_none() && serious(f.finding.severity) && new(f.key))
-            .map(|f| &f.title);
+            .collect();
+        let components = by_component(&report.target, &findings)
+            .into_iter()
+            .map(|group| {
+                let installed = &group[0].installed;
+                if group.len() == 1 {
+                    return group[0].title.clone();
+                }
+                plain(&format!(
+                    "{} {}, {}: {} advisories",
+                    group_name(installed),
+                    installed.version,
+                    installed.found_in,
+                    group.len()
+                ))
+            });
         let issues = report
             .issues
             .iter()
             .filter(|i| i.dismissed.is_none() && serious(i.issue.severity) && new(i.key))
-            .map(|i| &i.title);
+            .map(|i| i.title.clone());
         alerts.extend(
-            findings
+            components
                 .chain(issues)
                 .map(|t| format!("{}: {t}", report.target)),
         );
@@ -640,13 +666,14 @@ impl Shared<'_> {
         let dir = sweep_dir.join(&collected.dir_name);
         let mut problems = self.notes.to_vec();
         problems.extend(collected.problems);
-        let fetched = fetch(self.sources, &collected.components, &mut problems, progress);
+        let (fetched, out_of_range) =
+            fetch(self.sources, &collected.components, &mut problems, progress);
         self.sources.cancel.check()?;
         let entries: Vec<_> = fetched
             .iter()
             .map(|(advisory, components)| bundle::Entry {
                 advisory,
-                components: components.clone(),
+                components,
             })
             .collect();
         let prompt = prompts::render(self.data_dir, collected.prompt, &collected.title)?;
@@ -710,6 +737,7 @@ impl Shared<'_> {
         let mut report = Report::new(started, collected.target, self.agent, dir.clone());
         report.components = collected.components.len();
         report.advisories = entries.len();
+        report.out_of_range = out_of_range;
         report.findings = findings;
         report.issues = issues;
         report.changes = changes;
@@ -799,7 +827,7 @@ impl Shared<'_> {
         target: &str,
         components: &[Component],
         verdict: Verdict,
-        fetched: &[(Advisory, BTreeSet<usize>)],
+        fetched: &[Linked],
     ) -> (Vec<ReportFinding>, Vec<ReportIssue>) {
         let modified: BTreeMap<&str, Option<Timestamp>> = fetched
             .iter()
@@ -975,14 +1003,16 @@ fn nvd_access(problems: &mut Vec<String>) -> NvdAccess {
     })
 }
 
-/// Fetches every advisory for the inventory, each with the indexes of the components whose
-/// lookup returned it.
+/// Fetches every advisory for the inventory, each with the components whose lookup returned
+/// it, by index, and how its affected versions relate to each one's version. Out-of-range
+/// pairs are already left out (see [`matching::keep_candidates`]); the count is how many
+/// advisories that left out.
 fn fetch(
     sources: Sources<'_>,
     components: &[Component],
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Vec<(Advisory, BTreeSet<usize>)> {
+) -> (Vec<Linked>, usize) {
     let mut packages: BTreeMap<OsvQuery, Vec<usize>> = BTreeMap::new();
     let mut products: BTreeMap<String, (Product, Vec<usize>)> = BTreeMap::new();
     for (i, component) in components.iter().enumerate() {
@@ -1004,21 +1034,23 @@ fn fetch(
         products: products.len(),
     });
 
-    let mut fetched = fetch_osv(sources, &packages, problems);
+    let mut fetched = fetch_osv(sources, components, &packages, problems);
     fetched.extend(fetch_nvd(
         sources, components, &products, problems, progress,
     ));
-    fetched
+    let out_of_range = matching::keep_candidates(&mut fetched);
+    (fetched, out_of_range)
 }
 
 /// OSV advisories, linked by the queries that returned them. The record's own `affected`
-/// names are not used: OSV matches names the way each ecosystem compares them (PyPI's
-/// `Django` is `django`), and the query result already carries that match.
+/// names do not decide the link: OSV matches names the way each ecosystem compares them
+/// (PyPI's `Django` is `django`), and the query result already carries that match.
 fn fetch_osv(
     sources: Sources<'_>,
+    components: &[Component],
     packages: &BTreeMap<OsvQuery, Vec<usize>>,
     problems: &mut Vec<String>,
-) -> Vec<(Advisory, BTreeSet<usize>)> {
+) -> Vec<Linked> {
     if packages.is_empty() {
         return Vec::new();
     }
@@ -1045,39 +1077,32 @@ fn fetch_osv(
             crowded.kept,
         ));
     }
-    osv.advisories
-        .into_iter()
-        .map(
-            |OsvAdvisory {
-                 advisory,
-                 queries: matched,
-             }| {
-                let components = matched
-                    .iter()
-                    .filter_map(|p| packages.get(p))
-                    .flatten()
-                    .copied()
-                    .collect();
-                (advisory, components)
-            },
-        )
-        .collect()
+    let mut fetched = Vec::with_capacity(osv.advisories.len());
+    for OsvAdvisory { advisory, queries } in osv.advisories {
+        let record = OsvRecord::parse(&advisory.record);
+        let mut matches = BTreeMap::new();
+        for query in &queries {
+            for &i in packages.get(query).into_iter().flatten() {
+                let verdict = record.verdict(&query.package, &components[i].version);
+                matches.insert(i, verdict);
+            }
+        }
+        fetched.push((advisory, matches));
+    }
+    fetched
 }
 
-/// NVD CVEs per product, merged by CVE id, and one note for every product NVD does not know.
-/// A CVE is linked only to the components whose installed version it may affect, and left out
-/// when it may affect none of them (see `feeds::cpe`). A CVE in the KEV catalog is linked to
-/// every component of its product: one exploited in the wild is worth the agent's look even
-/// when its CPE matches seem to rule the version out. When the catalog could not be read,
-/// any CVE may be in it, so none is filtered.
+/// NVD CVEs per product, merged by CVE id, each linked to the components of its products with
+/// the verdict of its CPE matches (see `feeds::cpe`), and one note for every product NVD does
+/// not know.
 fn fetch_nvd(
     sources: Sources<'_>,
     components: &[Component],
     products: &BTreeMap<String, (Product, Vec<usize>)>,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Vec<(Advisory, BTreeSet<usize>)> {
-    let mut found: BTreeMap<String, (Advisory, BTreeSet<usize>)> = BTreeMap::new();
+) -> Vec<Linked> {
+    let mut found: BTreeMap<String, Linked> = BTreeMap::new();
     let mut unknown = Vec::new();
     for (done, (name, (product, indexes))) in products.iter().enumerate() {
         // The caller sees the request and stops; what was fetched is not used.
@@ -1101,24 +1126,15 @@ fn fetch_nvd(
             },
             Ok(advisories) => {
                 for advisory in advisories {
-                    let may_be_exploited = sources
-                        .kev
-                        .is_none_or(|kev| advisory.is_known_exploited(kev));
                     let matches = cpe::Matches::parse(&advisory.record);
-                    let affected: Vec<usize> = indexes
+                    let verdicts: Vec<(usize, Match)> = indexes
                         .iter()
-                        .copied()
-                        .filter(|&i| {
-                            may_be_exploited || matches.may_affect(product, &components[i].version)
-                        })
+                        .map(|&i| (i, matches.verdict(product, &components[i].version)))
                         .collect();
-                    if affected.is_empty() {
-                        continue;
-                    }
                     let entry = found
                         .entry(advisory.id.clone())
-                        .or_insert_with(|| (advisory, BTreeSet::new()));
-                    entry.1.extend(affected);
+                        .or_insert_with(|| (advisory, BTreeMap::new()));
+                    entry.1.extend(verdicts);
                 }
             }
             Err(e) => problems.push(format!("NVD product {name}: {}", error_chain(&e))),
@@ -1211,8 +1227,14 @@ fn write_report(dir: &Path, report: &Report) -> Result<(), SweepError> {
 /// visible text, though a renderer that autolinks may make it clickable.
 pub fn report_markdown(report: &Report) -> String {
     let mut out = format!(
-        "# Sweep of {} ({})\n\nAgent: {}. {} components, {} advisories checked.\n\n",
-        report.target, report.started, report.agent, report.components, report.advisories
+        "# Sweep of {} ({})\n\nAgent: {}. {} components, {} advisories checked, {} left out \
+         as out of range.\n\n",
+        report.target,
+        report.started,
+        report.agent,
+        report.components,
+        report.advisories,
+        report.out_of_range
     );
     out.push_str(&headline(report));
     if let Some(changes) = &report.changes {
@@ -1227,7 +1249,7 @@ pub fn report_markdown(report: &Report) -> String {
         report.findings.iter().partition(|f| f.dismissed.is_none());
     let (issues, dismissed_issues): (Vec<&ReportIssue>, Vec<&ReportIssue>) =
         report.issues.iter().partition(|i| i.dismissed.is_none());
-    for group in by_component(&findings) {
+    for group in by_component(&report.target, &findings) {
         let first = group[0];
         let advisories = if group.len() == 1 {
             "1 advisory".to_owned()
@@ -1237,7 +1259,7 @@ pub fn report_markdown(report: &Report) -> String {
         out.push_str(&format!(
             "## {} {} {}\n\nFound in {}. {advisories}.\n\n",
             first.finding.severity.to_string().to_uppercase(),
-            escape(&component_name(&first.installed)),
+            escape(&group_name(&first.installed)),
             escape(&first.installed.version),
             escape(&first.installed.found_in.to_string()),
         ));
@@ -1308,31 +1330,39 @@ fn headline(report: &Report) -> String {
     }
 }
 
-/// Groups findings by component (same lookup, version and place found), in the order of each
-/// group's first finding. Findings are sorted most severe first, so each group starts with its
-/// worst finding and the groups come worst first.
-fn by_component<'a>(findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
-    let mut groups: Vec<Vec<&ReportFinding>> = Vec::new();
+/// Groups the findings of `target` by component, by the rule the popover uses
+/// ([`lifecycle::component_key`]), in the order of each group's first finding. Findings are
+/// sorted most severe first, so each group starts with its worst finding and the groups come
+/// worst first.
+fn by_component<'a>(target: &str, findings: &[&'a ReportFinding]) -> Vec<Vec<&'a ReportFinding>> {
+    let key = |f: &ReportFinding| {
+        let installed = &f.installed;
+        let serialized = "a component serializes to JSON, as its report does";
+        lifecycle::component_key(
+            target,
+            &serde_json::to_value(&installed.lookup).expect(serialized),
+            &installed.version,
+            &serde_json::to_value(&installed.found_in).expect(serialized),
+        )
+    };
+    let mut groups: Vec<(ComponentKey, Vec<&ReportFinding>)> = Vec::new();
     for &f in findings {
-        let key = component_key(&f.installed);
-        match groups
-            .iter_mut()
-            .find(|g| component_key(&g[0].installed) == key)
-        {
-            Some(group) => group.push(f),
-            None => groups.push(vec![f]),
+        let key = key(f);
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, group)) => group.push(f),
+            None => groups.push((key, vec![f])),
         }
     }
-    groups
+    groups.into_iter().map(|(_, group)| group).collect()
 }
 
-fn component_key(component: &Component) -> String {
-    format!(
-        "{}|{}|{}",
-        component_name(component),
-        component.version,
-        component.found_in
-    )
+/// A group's name: the place's own (a Homebrew formula, which can hold several products), or
+/// the component's.
+fn group_name(component: &Component) -> String {
+    component
+        .found_in
+        .install_name()
+        .map_or_else(|| component_name(component), str::to_owned)
 }
 
 fn finding_markdown(key: FindingKey, finding: &Finding) -> String {
@@ -1693,26 +1723,30 @@ mod tests {
             kev: Some(&kev),
             cancel: &cancel,
         };
-        let fetched = fetch(sources, &inventory.components, &mut problems, &mut |p| {
+        let (fetched, dropped) = fetch(sources, &inventory.components, &mut problems, &mut |p| {
             seen.push(format!("{p:?}"));
         });
-
+        assert_eq!(
+            fetched[0].1[&0],
+            Match::Unknown("an affected entry gives neither ranges nor versions".to_owned()),
+            "each pair carries its verdict"
+        );
+        assert_eq!(dropped, 2, "CVE-6 and CVE-7");
         let linked: Vec<(&str, Vec<usize>)> = fetched
             .iter()
-            .map(|(a, c)| (a.id.as_str(), c.iter().copied().collect()))
+            .map(|(a, c)| (a.id.as_str(), c.keys().copied().collect()))
             .collect();
         assert_eq!(
             linked,
             [
                 ("GHSA-1", vec![0, 2]),
                 ("PYSEC-1", vec![4]),
-                ("CVE-7", vec![1, 5]),
                 ("CVE-8", vec![5]),
                 ("CVE-9", vec![1, 5]),
             ],
             "linked by query, so `Django` reaches django; an NVD CVE only to the versions it \
-             may affect, so CVE-6, which affects neither curl, is left out, unless it is \
-             exploited in the wild like CVE-7"
+             may affect, so CVE-6 and CVE-7, which affect neither curl, are left out, though \
+             CVE-7 is exploited in the wild"
         );
         assert_eq!(
             problems,
@@ -1739,17 +1773,13 @@ mod tests {
         );
         assert!(!seen.iter().any(|s| s.starts_with("Product")), "{seen:?}");
 
-        // Without the KEV catalog any CVE may be exploited, so none is left out.
+        // Without the KEV catalog the same advisories are left out.
         let unknown = Sources {
             kev: None,
             ..sources
         };
-        let fetched = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
-        let linked: Vec<(&str, Vec<usize>)> = fetched
-            .iter()
-            .map(|(a, c)| (a.id.as_str(), c.iter().copied().collect()))
-            .collect();
-        assert!(linked.contains(&("CVE-6", vec![1, 5])), "{linked:?}");
+        let (_, dropped) = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
+        assert_eq!(dropped, 2);
     }
 
     #[test]
@@ -1863,6 +1893,7 @@ mod tests {
             agent: AgentKind::Claude,
             components: 2,
             advisories: 1,
+            out_of_range: 3,
             findings,
             issues: Vec::new(),
             changes: None,
@@ -2057,6 +2088,53 @@ mod tests {
     }
 
     #[test]
+    fn alerts_name_a_component_once_with_how_many_advisories() {
+        let first = Report {
+            first_verdict: true,
+            ..report(
+                vec![
+                    report_finding("GHSA-1", "critical", false, "npm:a"),
+                    report_finding("GHSA-2", "high", false, "npm:a"),
+                    report_finding("GHSA-3", "low", false, "npm:a"),
+                    report_finding("GHSA-4", "high", false, "npm:b"),
+                ],
+                &[],
+            )
+        };
+        let name = component_name(&first.findings[0].installed);
+        assert_eq!(
+            alerts(&[first]),
+            [
+                format!("mac: {name} 1.0, macOS: 2 advisories"),
+                "mac: GHSA-4 in npm:b".to_owned()
+            ],
+            "the low one is not counted"
+        );
+
+        // One Homebrew formula mapped to two NVD products is one upgrade: one line, under
+        // the formula's name.
+        let mut first = Report {
+            first_verdict: true,
+            ..report(
+                vec![
+                    report_finding("CVE-1", "high", false, "curl"),
+                    report_finding("CVE-2", "high", false, "libcurl"),
+                ],
+                &[],
+            )
+        };
+        for f in &mut first.findings {
+            f.installed.found_in = FoundIn::HomebrewFormula {
+                name: "curl".to_owned(),
+            };
+        }
+        assert_eq!(
+            alerts(&[first]),
+            ["mac: curl 1.0, Homebrew formula curl: 2 advisories"]
+        );
+    }
+
+    #[test]
     fn markdown_lists_findings_then_gaps() {
         let text = report_markdown(&report(
             vec![
@@ -2135,6 +2213,12 @@ mod tests {
             clean.contains("Nothing affected or risky was found."),
             "{clean}"
         );
+        assert!(
+            clean.contains("1 advisories checked, 3 left out as out of range."),
+            "{clean}"
+        );
+        let json = serde_json::to_value(report(vec![], &[])).unwrap();
+        assert_eq!(json["out_of_range"], 3, "report.json counts them too");
         let gaps = report_markdown(&report(vec![], &["OSV: offline"]));
         assert!(gaps.contains("some things were not checked"), "{gaps}");
         assert!(

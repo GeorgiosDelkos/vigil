@@ -22,7 +22,7 @@ and the user can approve a fix the agent then performs.
 | Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
 | Feed flow | App fetches into a local cache; agent reads files |
 | History window | User-chosen (`since` date or `all`); then deltas |
-| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV) |
+| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV). Since 2026-11-10 the same rule covers OSV: Vigil compares versions itself (see "Version pre-match") and drops every advisory whose components are all out of range; the agent judges applicability. KEV entries no longer skip it (owner's decision, 2026-11-10): a known-exploited advisory that is provably out of range for every component is dropped too, which took one Mac's bundle from 271 advisories to 168 |
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
 | Agent permissions | Sweeps restricted: read anything, write only `findings.json`, read-only listing commands. Fixes get full access, only after the user confirms (decided 2026-11-05) |
 | Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
@@ -131,6 +131,32 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   pull request, for 30 days. Which report a run fixes is decided by the sweep it was planned
   from (`found` in the record), never by comparing clocks; the last run of a key in
   `state/fixes.jsonl` decides, in file order. `vigil findings` shows the same.
+
+### Grouping by component (decided 2026-11-10)
+
+The 2026-11-10 Mac sweep found 113 findings in 12 components: ffmpeg 8.1.2 alone had 33, one
+per advisory, each with the same `brew upgrade ffmpeg`. The owner chose to show components:
+
+- A finding belongs to the installed component it was found in: same target, version and
+  place found, and same lookup unless the place is one installed thing (a Homebrew formula or
+  cask, a rustup toolchain, the `node` or `python3` on `PATH`, a version manager's folder, an
+  OS source package). One formula can map to several NVD products (curl and libcurl), all at
+  its version, and one upgrade replaces them, so they are one component, named after the
+  formula. A place that holds many packages (a lockfile, a dependency graph, npm's global
+  packages, macOS) keeps them apart by lookup; so does a place this build cannot read.
+- `popover_view` turns open findings into items: one per component, holding its findings,
+  and one per issue (an issue has no component). An item's lead is its most urgent finding
+  (exploited, then severity, then newest); the lead's fix is the item's fix, shown once, and
+  Fix runs it with the existing per-finding flow, its confirmation saying the fix is for the
+  component and the next sweep checks every advisory again. An item has the worst severity
+  of its findings, is exploited if any is, and was first seen when the earliest was.
+- Everything the popover and the report count is items: the headline, "N exploited", the
+  severity counts and bar, the target rows' columns (each component once, at its worst
+  severity), the tabs, the tray's worst severity, the urgent line, and the notification
+  (one line per component, with how many new advisories). Dismissed counts stay findings.
+- Findings stay the unit of keys, dismissals, fixes and storage; nothing on disk changed. A
+  component's detail lists each advisory, collapsed, with its own severity, explanation,
+  evidence, key and Dismiss; dismissing them all removes the item.
 
 ### Mac inventory
 
@@ -285,12 +311,15 @@ Issues on a server name a file (`server/listening.txt`); there are no settings.
 1. Feeds: delta-sync all sources (skip a source that fails, record the error in the report).
 2. Inventory:
    - Mac, GitHub and servers: app collects (servers over SSH, see "Servers").
-3. Bundle: app writes `bundle/` = `inventory.json`, filtered `advisories.jsonl`,
-   `findings.schema.json`, rendered prompt.
-4. Agent run: headless CLI in `bundle/` as cwd; agent writes `findings.json`.
-5. Validate with serde (strict). On failure, one retry with the error appended; then mark the
+3. Pre-match (see "Version pre-match"): each advisory and component pair gets in range,
+   unknown or out of range. Out-of-range pairs are dropped, KEV or not, then advisories left
+   with none; the report counts those as `out_of_range`.
+4. Bundle: app writes `bundle/` = `inventory.json`, filtered `advisories.jsonl` with each
+   candidate's verdict and reason, `findings.schema.json`, rendered prompt.
+5. Agent run: headless CLI in `bundle/` as cwd; agent writes `findings.json`.
+6. Validate with serde (strict). On failure, one retry with the error appended; then mark the
    target failed.
-6. Key each finding and issue, apply dismissals, compare with the target's last sweep (see
+7. Key each finding and issue, apply dismissals, compare with the target's last sweep (see
    "Lifecycle"), write the report; the tray app updates and notifies on new critical/high.
 
 ### Fix flow
@@ -425,8 +454,9 @@ Each target's bundle folder holds:
 - `inventory.jsonl`: one component per line with a short id (`c1`, `c2`, ...).
 - `advisories.jsonl`: one compact line per advisory: id, source, aliases, summary, source
   severity (CVSS score and vector, NVD's primary score first, or GHSA severity), what is
-  affected, `known_exploited`, the ids of the components whose lookup returned it, and
-  `record`, the path of its full record.
+  affected, `known_exploited`, the components it is a candidate for, each as
+  `{"component": "c23", "match": "in_range", "why": "2.88.1 < versionEndExcluding 2.89.0"}`
+  (see "Version pre-match"), and `record`, the path of its full record.
 - `records/<source>-<id>.json`: each advisory's full record as the source served it, opened
   on demand. OSV `versions` lists of up to 50 stay on the index line; a longer one is only
   counted there. NVD configurations keep their AND/OR structure.
@@ -454,6 +484,54 @@ Homebrew products for which NVD returns no CVEs are checked against NVD's CPE di
 unknown answer is asked again after 30 days); a product NVD does not know is reported in the
 sweep report, so a wrong guessed name is visible.
 
+### Version pre-match (decided 2026-11-10)
+
+Sweeps run the agent without a shell, so an agent that compared hundreds of ranges by hand
+spent 38 minutes on one Mac and 24 on one repository, with context compaction and a real risk
+of a wrong match. Version comparison is deterministic, so the app does it (`matching`,
+`feeds::cpe`) and the agent only judges applicability: the app narrows input, the agent
+decides "affected".
+
+Each advisory and component pair gets one verdict with a short reason:
+
+- `in_range`: the version is in an affected range or listed as affected.
+- `unknown`: the version could not be placed with certainty.
+- `out_of_range`: every part of the record that names the component puts the version
+  outside.
+
+The rule is conservative: anything not read with certainty is `unknown`, never
+`out_of_range`, since a false `out_of_range` hides a vulnerability.
+
+- OSV: the schema's evaluation algorithm
+  (<https://github.com/ossf/osv-schema/blob/7e336cc6dabe2f414d8e65f1955d1f1aa4b17d39/docs/schema.md#evaluation>)
+  over the `affected` entries for the component's ecosystem and name (PyPI names normalized,
+  crates.io `-` and `_` alike): `SEMVER` and `ECOSYSTEM` ranges with `introduced` (`0` before
+  every version), `fixed`, `last_affected` and `limit`, plus the explicit `versions` list.
+  Versions compare as SemVer 2.0 for crates.io, npm, Go (a Go version loses its `v`),
+  GitHub Actions and every `SEMVER` range, as PEP 440 for PyPI, and for RubyGems only when
+  both sides are plain dotted numbers. `GIT` ranges, unreadable versions or bounds (a manifest range such
+  as `^1.2.0`), two events at one version, a range without `introduced`, and a record whose
+  entries never name the component are `unknown`. OS packages are queried by version, so
+  OSV's answer is `in_range`.
+- NVD: each CPE match marked vulnerable for the component's product, with the rules in
+  `feeds::cpe` (start and end bounds, including or excluding; a version named in the
+  criteria; `*` without bounds is every version). A match whose version is `-` (not
+  applicable), a negated node, an unparsable record, and a record that never names the
+  product are `unknown`; a record that names the product only as not vulnerable (the
+  platform) is `out_of_range`. A match in a configuration that ANDs several CPEs keeps its
+  verdict, and its reason asks the agent to judge the platform; the app never decides
+  platforms.
+
+Out-of-range pairs are dropped from each advisory, then advisories left with none, and the
+report's `out_of_range` counts those advisories, so none disappears silently. KEV
+advisories follow the same rule (owner's decision, 2026-11-10): one is kept only when some
+pair is in range or unknown, and whether the catalog could be read changes nothing. Until
+then every KEV entry reached the agent; on the Mac 104 of 281 advisories were KEV CVEs for
+macOS releases fixed long ago. An advisory linked to no component would be kept, as nothing
+shows it out of range, but every fetched advisory comes from a component's lookup. On the
+2026-11-10 sweep's bundles this kept 16 of a repository's 341 advisories and 168 of the
+Mac's 281, and every one of the 118 findings of that sweep stayed a candidate, in range.
+
 ### Feeds
 
 Decided 2026-11-05 after checking the live APIs: OSV already mirrors the GitHub Advisory
@@ -473,9 +551,9 @@ not an OSV ecosystem, so formulae go through NVD.
   limit: 5 per 30 s without a key, 50 per 30 s with an API key read from the macOS Keychain
   (service `io.github.georgiosdelkos.vigil`, account `nvd-api-key`). A CVE reaches the bundle
   only for the installed versions its CPE matches may cover (`feeds::cpe`, which lists the
-  rules); whatever it cannot tell is kept, a CVE that names the product only as not vulnerable
-  (the platform another product runs on) is dropped, and a CVE in KEV is always kept; when
-  the KEV catalog cannot be read, no CVE is filtered.
+  rules, and "Version pre-match"); whatever it cannot tell is kept, a CVE that names the
+  product only as not vulnerable (the platform another product runs on) is dropped, KEV or
+  not (since 2026-11-10; before, a CVE in KEV was always kept).
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
 - A product's cached CVEs are used without a request for 2 hours after the last fetch's
@@ -553,6 +631,8 @@ Built in step 9a (2026-11-06):
 - A sweep that finds new, open, critical or high findings or issues raises one notification
   listing up to three of them (`alerts`; on a target's first sweep with a verdict every such
   one is new, and when its last report cannot be read none is, so nothing is notified twice).
+  It counts as the popover does: one line per component, with how many such advisories it
+  has, and one per issue.
 - A tray click within 300 ms of the popover hiding on blur leaves it hidden: clicking the icon
   first takes focus from the open popover, then delivers the click.
 - Accepted: the "last sweep failed" icon is kept in memory, so after the app restarts the
@@ -578,7 +658,7 @@ Built in step 9b (2026-11-06):
   folder, repository or server; set the agent, schedule or history) checked like a loaded
   config before it is written.
 - Every value the UI shows is worked out in Rust (owner's rule, 2026-11-06): the core's
-  `popover_view` ranks findings (exploited, then severity, then newest), counts them, lists the confirmed fixes
+  `popover_view` groups findings by component, ranks the items (exploited, then severity, then newest), counts them, lists the confirmed fixes
   newest first, writes the headline and the target lines; `settings_view` writes each section's summary, the
   choices and which are chosen, folders as `~/...`, and whether a host can be added. The UI
   lays these out and sends `Setting`s; the only formatting left in TypeScript is "5 min ago",
@@ -613,11 +693,15 @@ with all the details", dark, not white):
   the app's `open_report` command writes it and opens it with `/usr/bin/open`; the popover's
   button that calls it comes with the popover's new main view, built separately. It renders `latest` through `popover_view`, so it shows what `vigil
   findings` and the popover show: the headline, the key numbers (need you, exploited, open,
-  fixed in 30 days, dismissed), a callout for each finding exploited in the wild with the
-  command to run first, the open findings and issues under "Needs you" (exploited, critical
-  or high) and "Lower", each expanding to its explanation, advisories (or, for an issue, its
-  subject), installed version, place, confidence, first seen, fix status, key, the agent's evidence, the fix's summary,
-  steps and commands with Copy buttons; then a table of targets and one of the fixes
+  fixed in 30 days, dismissed), a callout for each item with a finding exploited in the wild,
+  naming those advisories, with the command to run first, the open items under "Needs you"
+  (exploited, critical or high) and "Lower". A finding or issue alone expands to its
+  explanation, advisories (or, for an issue, its subject), installed version, place,
+  confidence, first seen, fix status, key, the agent's evidence, the fix's summary, steps and
+  commands with Copy buttons. A component with several findings is one card (2026-11-10):
+  how many advisories, what is installed where, its one fix shown once with what it covers,
+  then each advisory collapsed, with its own severity, explanation, evidence and key (and its
+  own fix summary when it differs from the lead's); then a table of targets and one of the fixes
   confirmed in the last 30 days, and the sources. Times are in UTC. Agent text is shown as
   one plain line, as everywhere else (line breaks become spaces). Writers take `state/.lock`,
   so the CLI and the app never write it at once.
@@ -642,11 +726,16 @@ asks to confirm). Same core, same files.
   newest report with a verdict: severity, key, title (the advisories, component, version and
   where it was found; or the issue's subject) and the fix summary, plus how many are
   dismissed. Dismissed means dismissed in `state/dismissals.json` now, as `fix` checks it, so a
-  `dismiss` shows at once. Titles and summaries are printed as plain lines (control and
+  `dismiss` shows at once. Since 2026-11-10 it groups as the popover does and counts items:
+  a component with several findings is one line (worst severity, name, version, place, how
+  many advisories) with its one fix, then a line per finding with its severity, key and
+  advisories; a lone finding or an issue keeps its one line. Titles and summaries are printed
+  as plain lines (control and
   invisible characters replaced), since they hold agent text and names from the target.
   `--json` prints one object per target (`target`, `swept`, `components`, `open`, `fixed`,
-  `dismissed`); an open entry also has its `confidence` (null for an issue), `evidence` and
-  fix `steps`, and its `fix_state` is null or `reported` (with `summary` and
+  `dismissed`), still one `open` entry per finding; an open entry also has its `confidence`
+  (null for an issue), `evidence`, fix `steps` and `component` (its key and name, null for
+  an issue), and its `fix_state` is null or `reported` (with `summary` and
   `pull_request`) or `not_held`. Each report
   entry carries that `title`, so the tray app shows the same line. `--target` matches the
   report name exactly.

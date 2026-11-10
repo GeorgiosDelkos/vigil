@@ -18,6 +18,7 @@ mod version_managers;
 use std::path::Path;
 use std::path::PathBuf;
 
+use serde::Deserialize;
 use serde::Serialize;
 
 use crate::feeds::Product;
@@ -147,7 +148,7 @@ pub enum Lookup {
 }
 
 /// Where a component was found, so the agent knows what to check and what to fix.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum FoundIn {
     /// The operating system.
@@ -205,6 +206,52 @@ pub enum FoundIn {
     },
 }
 
+impl FoundIn {
+    /// Whether this place is one installed thing, all of whose components one upgrade
+    /// replaces: one Homebrew formula can map to several NVD products (curl and libcurl), all
+    /// at its version. A lockfile, a dependency graph, npm's global packages or macOS hold
+    /// many things, each upgraded on its own.
+    pub(crate) fn is_one_install(&self) -> bool {
+        match self {
+            Self::HomebrewFormula { .. }
+            | Self::HomebrewCask { .. }
+            | Self::Rustup { .. }
+            | Self::Node
+            | Self::Python
+            | Self::VersionManager { .. }
+            | Self::OsPackage { .. } => true,
+            Self::MacOs
+            | Self::CargoInstall
+            | Self::NpmGlobal
+            | Self::UvTool
+            | Self::Pipx
+            | Self::Lockfile { .. }
+            | Self::DependencyGraph { .. } => false,
+        }
+    }
+
+    /// The name this place gives what it installed, when that names it better than any one of
+    /// its products: a Homebrew formula's name (`curl`, for curl and libcurl) or a cask's token.
+    pub(crate) fn install_name(&self) -> Option<&str> {
+        match self {
+            Self::HomebrewFormula { name } => Some(name),
+            Self::HomebrewCask { token } => Some(token),
+            Self::MacOs
+            | Self::Rustup { .. }
+            | Self::CargoInstall
+            | Self::Node
+            | Self::NpmGlobal
+            | Self::Python
+            | Self::UvTool
+            | Self::Pipx
+            | Self::VersionManager { .. }
+            | Self::Lockfile { .. }
+            | Self::OsPackage { .. }
+            | Self::DependencyGraph { .. } => None,
+        }
+    }
+}
+
 /// How a person reads it: "Homebrew formula openssl@3", "lockfile /path/Cargo.lock".
 impl std::fmt::Display for FoundIn {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -230,7 +277,7 @@ impl std::fmt::Display for FoundIn {
 }
 
 /// A version manager that keeps several versions of a runtime side by side.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VersionManager {
     /// nvm, for Node.js.
@@ -353,6 +400,85 @@ impl InventoryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_place_reads_back_as_written_and_says_how_it_groups() {
+        let places = [
+            (FoundIn::MacOs, false),
+            (
+                FoundIn::HomebrewFormula {
+                    name: "curl".to_owned(),
+                },
+                true,
+            ),
+            (
+                FoundIn::HomebrewCask {
+                    token: "firefox".to_owned(),
+                },
+                true,
+            ),
+            (
+                FoundIn::Rustup {
+                    toolchain: "stable".to_owned(),
+                },
+                true,
+            ),
+            (FoundIn::CargoInstall, false),
+            (FoundIn::Node, true),
+            (FoundIn::NpmGlobal, false),
+            (FoundIn::Python, true),
+            (FoundIn::UvTool, false),
+            (FoundIn::Pipx, false),
+            (
+                FoundIn::VersionManager {
+                    manager: VersionManager::Nvm,
+                    path: PathBuf::from("/v"),
+                },
+                true,
+            ),
+            (
+                FoundIn::Lockfile {
+                    path: PathBuf::from("/l"),
+                },
+                false,
+            ),
+            (
+                FoundIn::OsPackage {
+                    packages: vec!["libssl3".to_owned()],
+                },
+                true,
+            ),
+            (
+                FoundIn::DependencyGraph {
+                    repo: "o/r".to_owned(),
+                },
+                false,
+            ),
+        ];
+        for (place, one) in places {
+            let value = serde_json::to_value(&place).unwrap();
+            let back = FoundIn::deserialize(&value).unwrap();
+            assert_eq!(back.to_string(), place.to_string());
+            assert_eq!(place.is_one_install(), one, "{place}");
+        }
+        for manager in [
+            VersionManager::Fnm,
+            VersionManager::Volta,
+            VersionManager::Asdf,
+            VersionManager::Pyenv,
+        ] {
+            let value = serde_json::to_value(manager).unwrap();
+            assert_eq!(
+                VersionManager::deserialize(&value).unwrap().name(),
+                manager.name()
+            );
+        }
+        let formula = FoundIn::HomebrewFormula {
+            name: "openssl@3".to_owned(),
+        };
+        assert_eq!(formula.install_name(), Some("openssl@3"));
+        assert_eq!(FoundIn::Python.install_name(), None);
+    }
 
     #[test]
     fn missing_tools_are_listed_once() {
