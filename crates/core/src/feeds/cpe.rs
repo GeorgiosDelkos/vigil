@@ -274,6 +274,7 @@ impl CpeMatch {
         }
     }
 }
+
 /// Whether a match naming the version `named` covers `installed`: the same version, any update
 /// of it when `any_update`, and `None` when `installed` cannot be read as a version. A name
 /// without digits (`cvs`, `nightly`) is a snapshot, never a release that is installed.
@@ -828,6 +829,24 @@ mod tests {
         let matches = Matches::parse(&RawValue::from_string(one_node.to_string()).unwrap());
         let verdict = matches.verdict(&product("openssl"), "3.6.4");
         assert!(verdict.why().ends_with("judge them"), "{verdict:?}");
+        assert!(
+            on_platform(Match::Unknown("u".to_owned()))
+                .why()
+                .ends_with("judge them"),
+            "an unknown candidate gets the note too"
+        );
+
+        let alone = json!({"id": "CVE-3", "configurations": [{"operator": "AND", "nodes": [
+            {"operator": "AND", "cpeMatch": [
+                vulnerable("cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*"),
+            ]},
+        ]}]});
+        let matches = Matches::parse(&RawValue::from_string(alone.to_string()).unwrap());
+        assert_eq!(
+            matches.verdict(&product("openssl"), "3.6.4"),
+            Match::InRange("every version (* without bounds)".to_owned()),
+            "an AND of one CPE needs nothing else"
+        );
     }
 
     #[test]

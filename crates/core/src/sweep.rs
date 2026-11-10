@@ -36,7 +36,6 @@ use crate::config::Config;
 use crate::config::History;
 use crate::config::RepoSlug;
 use crate::config::Server;
-use crate::feeds::Advisory;
 use crate::feeds::Feeds;
 use crate::feeds::Kev;
 use crate::feeds::NvdAccess;
@@ -64,6 +63,7 @@ use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
 use crate::matching;
+use crate::matching::Linked;
 use crate::matching::Match;
 use crate::matching::OsvRecord;
 use crate::paths::DataDir;
@@ -673,9 +673,9 @@ impl Shared<'_> {
         let dir = sweep_dir.join(&collected.dir_name);
         let mut problems = self.notes.to_vec();
         problems.extend(collected.problems);
-        let mut fetched = fetch(self.sources, &collected.components, &mut problems, progress);
+        let (fetched, out_of_range) =
+            fetch(self.sources, &collected.components, &mut problems, progress);
         self.sources.cancel.check()?;
-        let out_of_range = matching::keep_candidates(&mut fetched, self.sources.kev);
         let entries: Vec<_> = fetched
             .iter()
             .map(|(advisory, components)| bundle::Entry {
@@ -834,7 +834,7 @@ impl Shared<'_> {
         target: &str,
         components: &[Component],
         verdict: Verdict,
-        fetched: &[(Advisory, BTreeMap<usize, Match>)],
+        fetched: &[Linked],
     ) -> (Vec<ReportFinding>, Vec<ReportIssue>) {
         let modified: BTreeMap<&str, Option<Timestamp>> = fetched
             .iter()
@@ -1011,13 +1011,15 @@ fn nvd_access(problems: &mut Vec<String>) -> NvdAccess {
 }
 
 /// Fetches every advisory for the inventory, each with the components whose lookup returned
-/// it, by index, and how its affected versions relate to each one's version.
+/// it, by index, and how its affected versions relate to each one's version. Out-of-range
+/// pairs are already left out (see [`matching::keep_candidates`]); the count is how many
+/// advisories that left out.
 fn fetch(
     sources: Sources<'_>,
     components: &[Component],
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Vec<(Advisory, BTreeMap<usize, Match>)> {
+) -> (Vec<Linked>, usize) {
     let mut packages: BTreeMap<OsvQuery, Vec<usize>> = BTreeMap::new();
     let mut products: BTreeMap<String, (Product, Vec<usize>)> = BTreeMap::new();
     for (i, component) in components.iter().enumerate() {
@@ -1043,7 +1045,8 @@ fn fetch(
     fetched.extend(fetch_nvd(
         sources, components, &products, problems, progress,
     ));
-    fetched
+    let out_of_range = matching::keep_candidates(&mut fetched, sources.kev);
+    (fetched, out_of_range)
 }
 
 /// OSV advisories, linked by the queries that returned them. The record's own `affected`
@@ -1054,7 +1057,7 @@ fn fetch_osv(
     components: &[Component],
     packages: &BTreeMap<OsvQuery, Vec<usize>>,
     problems: &mut Vec<String>,
-) -> Vec<(Advisory, BTreeMap<usize, Match>)> {
+) -> Vec<Linked> {
     if packages.is_empty() {
         return Vec::new();
     }
@@ -1105,8 +1108,8 @@ fn fetch_nvd(
     products: &BTreeMap<String, (Product, Vec<usize>)>,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Vec<(Advisory, BTreeMap<usize, Match>)> {
-    let mut found: BTreeMap<String, (Advisory, BTreeMap<usize, Match>)> = BTreeMap::new();
+) -> Vec<Linked> {
+    let mut found: BTreeMap<String, Linked> = BTreeMap::new();
     let mut unknown = Vec::new();
     for (done, (name, (product, indexes))) in products.iter().enumerate() {
         // The caller sees the request and stops; what was fetched is not used.
@@ -1752,7 +1755,7 @@ mod tests {
             kev: Some(&kev),
             cancel: &cancel,
         };
-        let mut fetched = fetch(sources, &inventory.components, &mut problems, &mut |p| {
+        let (fetched, dropped) = fetch(sources, &inventory.components, &mut problems, &mut |p| {
             seen.push(format!("{p:?}"));
         });
         assert_eq!(
@@ -1760,8 +1763,6 @@ mod tests {
             Match::Unknown("an affected entry gives neither ranges nor versions".to_owned()),
             "each pair carries its verdict"
         );
-
-        let dropped = matching::keep_candidates(&mut fetched, Some(&kev));
         assert_eq!(dropped, 1, "CVE-6");
         let linked: Vec<(&str, Vec<usize>)> = fetched
             .iter()
@@ -1810,8 +1811,9 @@ mod tests {
             kev: None,
             ..sources
         };
-        let mut fetched = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
-        assert_eq!(matching::keep_candidates(&mut fetched, None), 0);
+        let (fetched, dropped) =
+            fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
+        assert_eq!(dropped, 0);
         let linked: Vec<(&str, Vec<usize>)> = fetched
             .iter()
             .map(|(a, c)| (a.id.as_str(), c.keys().copied().collect()))
@@ -2203,6 +2205,12 @@ mod tests {
             clean.contains("Nothing affected or risky was found."),
             "{clean}"
         );
+        assert!(
+            clean.contains("1 advisories checked, 3 left out as out of range."),
+            "{clean}"
+        );
+        let json = serde_json::to_value(report(vec![], &[])).unwrap();
+        assert_eq!(json["out_of_range"], 3, "report.json counts them too");
         let gaps = report_markdown(&report(vec![], &["OSV: offline"]));
         assert!(gaps.contains("some things were not checked"), "{gaps}");
         assert!(

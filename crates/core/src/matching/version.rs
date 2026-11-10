@@ -24,7 +24,7 @@ enum Identifier {
 }
 
 /// A PEP 440 version, as the key `packaging` sorts by (`_cmpkey` in
-/// <https://github.com/pypa/packaging/blob/24.2/src/packaging/version.py>): fields in
+/// <https://github.com/pypa/packaging/blob/d8e3b31b734926ebbcaff654279f6855a73e052f/src/packaging/version.py>): fields in
 /// precedence order, so the derived `Ord` is PEP 440's.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Pep440 {

@@ -366,6 +366,7 @@ mod tests {
     use super::*;
     use crate::inventory::FoundIn;
     use crate::inventory::Lookup;
+    use crate::matching::Linked;
     use crate::matching::OsvRecord;
     use crate::matching::keep_candidates;
 
@@ -596,7 +597,7 @@ mod tests {
             ("GHSA-2", old.clone(), "CVE-2"),
             ("GHSA-3", old, "CVE-3"),
         ];
-        let mut fetched: Vec<(Advisory, BTreeMap<usize, Match>)> = records
+        let mut fetched: Vec<Linked> = records
             .iter()
             .map(|(id, record, alias)| {
                 let advisory = advisory(Source::Osv, id, &[alias], record);

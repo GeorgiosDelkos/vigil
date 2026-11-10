@@ -25,7 +25,8 @@ use crate::package::Ecosystem;
 use crate::package::Package;
 
 /// How an advisory's affected versions relate to one installed version, and why.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
+#[cfg_attr(test, derive(Clone, PartialEq, Eq))]
 pub(crate) enum Match {
     /// The version is inside an affected range or listed as affected.
     InRange(String),
@@ -69,6 +70,10 @@ impl Match {
     }
 }
 
+/// An advisory and the components it was fetched for, by inventory index, each with its
+/// verdict.
+pub(crate) type Linked = (Advisory, BTreeMap<usize, Match>);
+
 /// Drops from each advisory the components whose version is out of range, then the
 /// advisories left with none, and returns how many advisories that dropped.
 ///
@@ -77,10 +82,7 @@ impl Match {
 /// it): one exploited in the wild is worth the agent's look even when its ranges seem to
 /// rule the version out, since a range can be wrong. This keeps the spec's pre-filter
 /// decision that every KEV entry reaches the agent.
-pub(crate) fn keep_candidates(
-    fetched: &mut Vec<(Advisory, BTreeMap<usize, Match>)>,
-    kev: Option<&Kev>,
-) -> usize {
+pub(crate) fn keep_candidates(fetched: &mut Vec<Linked>, kev: Option<&Kev>) -> usize {
     let before = fetched.len();
     fetched.retain_mut(|(advisory, matches)| {
         if kev.is_none_or(|kev| advisory.is_known_exploited(kev)) {
@@ -112,7 +114,9 @@ impl OsvRecord {
     /// Judges `package` installed at `version`, following the evaluation in the OSV schema
     /// (<https://github.com/ossf/osv-schema/blob/7e336cc6dabe2f414d8e65f1955d1f1aa4b17d39/docs/schema.md#evaluation>):
     /// the version is affected when an `affected` entry for the package lists it in
-    /// `versions` or one of its `ranges` covers it.
+    /// `versions` or one of its `ranges` covers it. A package of an ecosystem queried by
+    /// version (an OS package) is in range without the record being read: OSV returned the
+    /// record for that version, matched in the ecosystem's own ordering.
     pub(crate) fn verdict(&self, package: &Package, version: &str) -> Match {
         let ecosystem = package.ecosystem;
         if ecosystem.queried_by_version() {
@@ -221,7 +225,7 @@ impl Event {
 impl Affected {
     /// Whether this entry is about `package`. Ecosystems compare without case. Names compare
     /// as the ecosystem treats them: PyPI normalizes case and runs of `-`, `_` and `.`
-    /// (<https://packaging.python.org/en/latest/specifications/name-normalization/>),
+    /// (<https://github.com/pypa/packaging.python.org/blob/f4b5123d448fefac85db85058668ae64f89ad05c/source/specifications/name-normalization.rst>),
     /// crates.io treats `-` and `_` as one; others compare without case. A name of `*` means
     /// every package of the ecosystem.
     fn names(&self, package: &Package) -> bool {
@@ -255,7 +259,7 @@ impl Affected {
             .versions
             .as_deref()
             .filter(|list| !list.is_empty())
-            .map(|list| Scheme::of(ecosystem).listed(list, version));
+            .map(|list| listed(Scheme::of(ecosystem), list, version));
         let ranges = self.ranges.iter().map(|r| r.verdict(ecosystem, version));
         Match::any(listed.into_iter().chain(ranges)).unwrap_or_else(|| {
             Match::Unknown("an affected entry gives neither ranges nor versions".to_owned())
@@ -271,7 +275,7 @@ impl Range {
             "GIT" => return Match::Unknown("a GIT range is commits, not versions".to_owned()),
             other => return Match::Unknown(format!("a {other} range is not one Vigil reads")),
         };
-        scheme.evaluate(&self.events, version)
+        evaluate(scheme, &self.events, version)
     }
 }
 
@@ -281,9 +285,19 @@ enum Scheme {
     SemVer,
     Pep440,
     /// Plain dotted numbers only, for ecosystems whose own ordering is not implemented here
-    /// (RubyGems, GitHub Actions, Go `ECOSYSTEM` ranges): there every ordering agrees, and
+    /// (RubyGems, GitHub Actions, Go `ECOSYSTEM` ranges, and the OS ecosystems, whose records
+    /// are never evaluated here since OSV matched them): there every ordering agrees, and
     /// anything else (`1.0.0.pre`, `v4`) is unknown.
     Dotted,
+}
+
+/// A version parsed in one [`Scheme`]. A range or a `versions` list is read in one scheme, so
+/// keys of different variants are never compared.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    SemVer(version::SemVer),
+    Pep440(version::Pep440),
+    Dotted(version::Dotted),
 }
 
 impl Scheme {
@@ -309,73 +323,43 @@ impl Scheme {
         }
     }
 
-    fn evaluate(self, events: &[Event], version: &str) -> Match {
+    fn parse(self, text: &str) -> Option<Key> {
         match self {
-            Self::SemVer => evaluate(version::semver, self, events, version),
-            Self::Pep440 => evaluate(version::pep440, self, events, version),
-            Self::Dotted => evaluate(version::dotted, self, events, version),
+            Self::SemVer => version::semver(text).map(Key::SemVer),
+            Self::Pep440 => version::pep440(text).map(Key::Pep440),
+            Self::Dotted => version::dotted(text).map(Key::Dotted),
         }
     }
 
-    fn listed(self, list: &[String], version: &str) -> Match {
-        match self {
-            Self::SemVer => listed(version::semver, self, list, version),
-            Self::Pep440 => listed(version::pep440, self, list, version),
-            Self::Dotted => listed(version::dotted, self, list, version),
-        }
+    /// The verdict for a version this scheme does not read.
+    fn unreadable(self, version: &str) -> Match {
+        Match::Unknown(format!("{version} is not a {} version", self.name()))
     }
 }
 
 /// Where an event sits in a range's timeline: the schema's `introduced: "0"` comes before
 /// every version and a `limit` containing `*` after every version.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Bound<K> {
+enum Bound {
     First,
-    At(K),
+    At(Key),
     Infinity,
 }
 
+/// A range's events sorted by version, each with its kind and its text as written.
+type Timeline<'e> = Vec<(Bound, EventKind, &'e str)>;
+
 /// Evaluates one range for `version`, as `IncludedInRanges` and `BeforeLimits` in the
 /// schema's evaluation: the events sorted, and the last one the version has reached decides.
-fn evaluate<K: Ord>(
-    parse: fn(&str) -> Option<K>,
-    scheme: Scheme,
-    events: &[Event],
-    version: &str,
-) -> Match {
-    let Some(installed) = parse(version) else {
-        return Match::Unknown(format!("{version} is not a {} version", scheme.name()));
+fn evaluate(scheme: Scheme, events: &[Event], version: &str) -> Match {
+    let Some(installed) = scheme.parse(version) else {
+        return scheme.unreadable(version);
     };
     let installed = Bound::At(installed);
-    let mut timeline = Vec::with_capacity(events.len());
-    for event in events {
-        let Some((kind, text)) = event.single() else {
-            return Match::Unknown("an event does not give exactly one version".to_owned());
-        };
-        let bound = match (kind, text) {
-            (EventKind::Introduced, "0") => Bound::First,
-            (EventKind::Limit, text) if text.contains('*') => Bound::Infinity,
-            (_, text) => {
-                let Some(key) = parse(text) else {
-                    let kind = kind.name();
-                    let scheme = scheme.name();
-                    return Match::Unknown(format!("{kind} {text} is not a {scheme} version"));
-                };
-                Bound::At(key)
-            }
-        };
-        timeline.push((bound, kind, text));
-    }
-    timeline.sort_by(|a, b| a.0.cmp(&b.0));
-    // Two events at one version have no order the schema defines.
-    if let Some(pair) = timeline.windows(2).find(|w| w[0].0 == w[1].0) {
-        return Match::Unknown(format!("two events at {}", pair[0].2));
-    }
-    // The schema requires one, and without it the evaluation would call every version
-    // unaffected.
-    if !timeline.iter().any(|(_, k, _)| *k == EventKind::Introduced) {
-        return Match::Unknown("a range without an introduced event".to_owned());
-    }
+    let timeline = match timeline(scheme, events) {
+        Ok(timeline) => timeline,
+        Err(unknown) => return unknown,
+    };
 
     let limits: Vec<_> = timeline
         .iter()
@@ -399,18 +383,48 @@ fn evaluate<K: Ord>(
     describe(&timeline, last, version)
 }
 
+/// The range's events as a sorted timeline, or the unknown verdict when they cannot be
+/// ordered with certainty.
+fn timeline(scheme: Scheme, events: &[Event]) -> Result<Timeline<'_>, Match> {
+    let mut timeline = Vec::with_capacity(events.len());
+    for event in events {
+        let (kind, text) = event.single().ok_or_else(|| {
+            Match::Unknown("an event does not give exactly one version".to_owned())
+        })?;
+        let bound = match (kind, text) {
+            (EventKind::Introduced, "0") => Bound::First,
+            (EventKind::Limit, text) if text.contains('*') => Bound::Infinity,
+            (_, text) => Bound::At(
+                scheme
+                    .parse(text)
+                    .ok_or_else(|| scheme.unreadable(&format!("{} {text}", kind.name())))?,
+            ),
+        };
+        timeline.push((bound, kind, text));
+    }
+    timeline.sort_by(|a, b| a.0.cmp(&b.0));
+    // Two events at one version have no order the schema defines.
+    if let Some(pair) = timeline.windows(2).find(|w| w[0].0 == w[1].0) {
+        return Err(Match::Unknown(format!("two events at {}", pair[0].2)));
+    }
+    // The schema requires one, and without it the evaluation would call every version
+    // unaffected.
+    if !timeline.iter().any(|(_, k, _)| *k == EventKind::Introduced) {
+        return Err(Match::Unknown(
+            "a range without an introduced event".to_owned(),
+        ));
+    }
+    Ok(timeline)
+}
+
 /// The verdict for a range whose last reached event is `timeline[last]`, with the events
 /// around the version as its reason.
-fn describe<K>(
-    timeline: &[(Bound<K>, EventKind, &str)],
-    last: Option<usize>,
-    version: &str,
-) -> Match {
+fn describe(timeline: &[(Bound, EventKind, &str)], last: Option<usize>, version: &str) -> Match {
     let Some(last) = last else {
         let (_, _, first) = timeline
             .iter()
             .find(|(_, k, _)| *k == EventKind::Introduced)
-            .expect("evaluate returns before describing a range without an introduced event");
+            .expect("timeline rejects a range without an introduced event");
         return Match::OutOfRange(format!("{version} < introduced {first}"));
     };
     let (_, kind, text) = &timeline[last];
@@ -437,21 +451,16 @@ fn describe<K>(
 /// Whether `version` is in an entry's `versions` list: the same text, or the same version in
 /// the ecosystem's ordering (`1.0` and `1.0.0` in PyPI). It is out of range only when it and
 /// every listed version parse, so none can be another spelling of it.
-fn listed<K: Ord>(
-    parse: fn(&str) -> Option<K>,
-    scheme: Scheme,
-    list: &[String],
-    version: &str,
-) -> Match {
+fn listed(scheme: Scheme, list: &[String], version: &str) -> Match {
     if list.iter().any(|v| v == version) {
         return Match::InRange(format!("{version} is listed in versions"));
     }
-    let Some(installed) = parse(version) else {
-        return Match::Unknown(format!("{version} is not a {} version", scheme.name()));
+    let Some(installed) = scheme.parse(version) else {
+        return scheme.unreadable(version);
     };
     let mut unreadable = None;
     for text in list {
-        match parse(text) {
+        match scheme.parse(text) {
             Some(key) if key == installed => {
                 return Match::InRange(format!("{version} is listed in versions as {text}"));
             }
