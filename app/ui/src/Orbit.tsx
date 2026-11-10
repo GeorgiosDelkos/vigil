@@ -204,15 +204,6 @@ function Progress(props: { status: Sweeping; now: Date }) {
   );
 }
 
-/** The count columns' severity names. "med" is short so every column fits a three-digit
- * count at the popover's 360px width. */
-const LABEL: Readonly<Record<Severity, string>> = {
-  critical: "critical",
-  high: "high",
-  medium: "med",
-  low: "low",
-};
-
 /** A target's open findings per severity, worst first, as bar segments: only the severities it
  * has. Empty before its first sweep and when it is clear. */
 function mix(target: TargetLine): { severity: Severity; count: number }[] {
@@ -236,8 +227,8 @@ function rowStatus(target: TargetLine): string {
 }
 
 /** One row per target, every row the same shape: the name, what was checked, a count for each
- * severity in fixed columns (a zero is dimmed, so a severity sits in the same place in every
- * row), and a bar split by severity. The owner asked for standard sizes and positions over tags
+ * severity in fixed columns, the number above its name so four digits fit at the popover's
+ * 360px width (a zero is dimmed, so a severity sits in the same place in every row), and a bar split by severity. The owner asked for standard sizes and positions over tags
  * that wrapped and moved with the counts (2026-11-10). Every bar is the full width, so it shows
  * the mix within its target, not its size beside the others. During a sweep the rows dim: their
  * counts are from the last sweep. Past three rows the card scrolls, so the vortex keeps its
@@ -274,7 +265,8 @@ function TargetRows(props: {
                     classList={{ zero: t().swept === null || t().counts[s()] === 0 }}
                     style={{ "--c": NEON[s()] }}
                   >
-                    <b>{t().swept === null ? "–" : t().counts[s()]}</b> {LABEL[s()]}
+                    <b>{t().swept === null ? "–" : t().counts[s()]}</b>
+                    <small>{s()}</small>
                   </span>
                 )}
               </Index>

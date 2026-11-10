@@ -106,9 +106,10 @@ function targetRow(name: RegExp): {
   const button = screen.getByRole("button", { name });
   return {
     sub: button.querySelector(".tsub")?.textContent ?? "",
-    counts: [...button.querySelectorAll(".tcount")].map((c) =>
-      c.classList.contains("zero") ? `(${c.textContent ?? ""})` : (c.textContent ?? ""),
-    ),
+    counts: [...button.querySelectorAll(".tcount")].map((c) => {
+      const text = `${c.querySelector("b")?.textContent ?? ""} ${c.querySelector("small")?.textContent ?? ""}`;
+      return c.classList.contains("zero") ? `(${text})` : text;
+    }),
     bar: [...button.querySelectorAll<HTMLElement>(".tbar i")].map(
       (i) => `${i.style.flexGrow} ${i.style.getPropertyValue("--c")}`,
     ),
@@ -985,7 +986,7 @@ describe("the main view", () => {
     expect(screen.getByText("3 targets · every 6 hours")).toBeTruthy();
     expect(targetRow(/^This Mac/)).toEqual({
       sub: "12 components checked",
-      counts: ["(0 critical)", "(0 high)", "(0 med)", "(0 low)"],
+      counts: ["(0 critical)", "(0 high)", "(0 medium)", "(0 low)"],
       bar: [],
       clear: true,
     });
@@ -1036,6 +1037,15 @@ describe("the main view", () => {
           open: 9,
         },
         { ...line, label: "me/app", kind: "repo", swept, checked: "3 components checked" },
+        {
+          ...line,
+          label: "big",
+          kind: "server",
+          swept,
+          checked: "900 components checked",
+          counts: { critical: 100, high: 0, medium: 12, low: 0 },
+          open: 112,
+        },
         { ...line, label: "This Mac", swept: null, checked: null },
       ],
     };
@@ -1044,7 +1054,7 @@ describe("the main view", () => {
     await screen.findByTitle("Show details");
     expect(targetRow(/^web/)).toEqual({
       sub: "139 components checked",
-      counts: ["1 critical", "5 high", "2 med", "1 low"],
+      counts: ["1 critical", "5 high", "2 medium", "1 low"],
       bar: ["1 #ff3b3b", "5 #ff8a1f", "2 #ffe14a", "1 #8fa2ff"],
       clear: false,
     });
@@ -1053,9 +1063,11 @@ describe("the main view", () => {
         name: "web, 9 open: 1 critical, 5 high, 2 medium, 1 low, 139 components checked",
       }),
     ).toBeTruthy();
+    // Every severity keeps its column: a zero beside a count is dimmed, not dropped.
+    expect(targetRow(/^big/).counts).toEqual(["100 critical", "(0 high)", "12 medium", "(0 low)"]);
     expect(targetRow(/^me\/app/)).toEqual({
       sub: "3 components checked",
-      counts: ["(0 critical)", "(0 high)", "(0 med)", "(0 low)"],
+      counts: ["(0 critical)", "(0 high)", "(0 medium)", "(0 low)"],
       bar: [],
       clear: true,
     });
@@ -1064,7 +1076,7 @@ describe("the main view", () => {
     ).toBeTruthy();
     expect(targetRow(/^This Mac/)).toEqual({
       sub: "not swept yet",
-      counts: ["(– critical)", "(– high)", "(– med)", "(– low)"],
+      counts: ["(– critical)", "(– high)", "(– medium)", "(– low)"],
       bar: [],
       clear: false,
     });
@@ -1076,7 +1088,7 @@ describe("the main view", () => {
     handlers.get("changed")?.({ payload: null });
     await screen.findByText("sweeping This Mac");
     expect(document.querySelector(".trows.stale")).not.toBeNull();
-    expect(targetRow(/^web/).counts).toEqual(["1 critical", "5 high", "2 med", "1 low"]);
+    expect(targetRow(/^web/).counts).toEqual(["1 critical", "5 high", "2 medium", "1 low"]);
   });
 
   it("shows why the last sweep failed", async () => {
