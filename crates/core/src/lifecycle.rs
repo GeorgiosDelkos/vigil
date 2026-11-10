@@ -1135,13 +1135,9 @@ mod tests {
         assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
     }
 
-    #[test]
-    fn findings_are_grouped_by_installed_place_and_version() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = DataDir::new(tmp.path().join("data"));
-        let config_path = tmp.path().join("config.toml");
-        fs::write(&config_path, "").unwrap();
-        let config = Config::load(&config_path, tmp.path()).unwrap();
+    /// A Mac report whose findings cover every grouping case, for
+    /// `findings_are_grouped_by_installed_place_and_version`.
+    fn grouping_report() -> serde_json::Value {
         let finding = |key: u64, name: &str, lookup, version: &str, found_in| {
             json!({"key": FindingKey(key), "severity": "high", "name": name,
                 "installed": {"lookup": lookup, "version": version, "found_in": found_in}})
@@ -1151,7 +1147,7 @@ mod tests {
         let npm = |name: &str| json!({"package": {"ecosystem": "npm", "name": name}});
         let lockfile = json!({"kind": "lockfile", "path": "/code/app/package-lock.json"});
         let unknown = json!({"kind": "a_place_from_a_later_build"});
-        let report = json!({
+        json!({
             "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
             "findings": [
                 finding(1, "curl", curl(), "8.11.0", formula.clone()),
@@ -1179,7 +1175,17 @@ mod tests {
                     "installed": {"lookup": curl(), "version": "1"}}),
             ],
             "issues": [{"key": FindingKey(11), "severity": "low"}],
-        });
+        })
+    }
+
+    #[test]
+    fn findings_are_grouped_by_installed_place_and_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let report = grouping_report();
         save(&data_dir.sweeps_dir(), "20261105T000000Z/mac", &report);
         dismiss(&data_dir, FindingKey(3), "not used").unwrap();
 
