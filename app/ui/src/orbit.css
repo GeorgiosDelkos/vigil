@@ -1,4 +1,4 @@
-/* Orbit, in neon: the main view. Coloured light sits behind the panel, frosted glass chips blur
+/* Orbit, in neon: the main view. Coloured light sits behind the panel, frosted glass cards blur
    it, and a vortex of light is drawn on a canvas (Orbit.tsx). The owner chose this design on
    2026-11-09, asked for a softer, less blurred light (blur 80px at 0.42 opacity behind, 8px in
    the glass), and for nothing to move: the light, the vortex and the urgent dot are still. */
@@ -212,7 +212,7 @@
   margin: 0 16px;
   padding: 12px 14px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
   text-align: left;
@@ -220,6 +220,7 @@
   cursor: pointer;
 }
 .orbit .urgent .glow {
+  justify-self: center;
   width: 10px;
   height: 10px;
   border-radius: 50%;
@@ -277,48 +278,116 @@
   box-shadow: 0 0 12px var(--n-cyan);
 }
 
-.orbit .chips {
+/* The target rows share the urgent row's edges and columns (16px marker, 12px gap, 14px
+   padding), so names, chevrons and both cards line up. */
+.orbit .trows {
+  margin: 10px 16px 0;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  padding: 10px 16px 0;
+  /* About three rows; more scroll inside the card. overflow also clips a hovered row to the
+     card's rounded corners. */
+  max-height: 228px;
+  overflow-y: auto;
 }
-.orbit .chips button {
+.orbit .trows:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+.orbit .trow {
   display: grid;
-  gap: 5px;
-  justify-items: center;
-  padding: 10px 4px;
+  grid-template-columns: 16px minmax(64px, 1fr) minmax(0, auto) auto;
+  gap: 2px 12px;
+  align-items: center;
+  padding: 11px 14px 12px;
+  border: 0;
+  background: none;
+  color: inherit;
   font: inherit;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
 }
-.orbit .chips .icon {
+.orbit .trow + .trow {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+.orbit .trow:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+/* Every part has its cell: rows are name and tags, then the checked line, then the bar. The
+   icon and chevron span the first two, centred like the urgent row's. */
+.orbit .trow .icon,
+.orbit .trow .go {
+  grid-row: 1 / 3;
+}
+.orbit .trow .icon {
+  grid-column: 1;
   width: 16px;
   height: 16px;
   fill: none;
   stroke: rgba(242, 244, 255, 0.7);
 }
-.orbit .chips b {
-  font-size: 11.5px;
-  font-weight: 600;
-  max-width: 100%;
+.orbit .tname,
+.orbit .tsub {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.orbit .chips i {
+.orbit .tname {
+  grid-area: 1 / 2;
+  font-size: 13px;
+  font-weight: 600;
+}
+/* Its own line under the name and tags, so the tags never cut it short. */
+.orbit .tsub {
+  grid-area: 2 / 2 / 3 / 4;
+  color: var(--n-ink2);
+  font-size: 11px;
+}
+.orbit .tags {
+  grid-area: 1 / 3;
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
+  justify-content: flex-end;
   gap: 4px;
-  min-height: 7px;
 }
-.orbit .chips i span {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+.orbit .stag {
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--c);
+  background: color-mix(in srgb, var(--c) 15%, transparent);
+}
+.orbit .stag.ok {
+  --c: var(--n-green);
+}
+.orbit .trow .go {
+  grid-column: 4;
+  color: rgba(242, 244, 255, 0.5);
+  font-size: 18px;
+}
+/* Full width in every row: the bar shows the mix within a target, not its size. */
+.orbit .tbar {
+  grid-area: 3 / 2 / 4 / -1;
+  margin-top: 8px;
+  display: flex;
+  gap: 2px;
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+}
+.orbit .tbar i {
+  flex-basis: 0;
   background: var(--c);
   box-shadow: 0 0 8px var(--c);
+}
+.orbit .tbar.ok {
+  background: color-mix(in srgb, var(--n-green) 45%, transparent);
+}
+.orbit .trows.stale .tags,
+.orbit .trows.stale .tbar {
+  opacity: 0.4;
 }
 
 .orbit-foot {
