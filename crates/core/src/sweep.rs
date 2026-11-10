@@ -429,10 +429,12 @@ pub fn sweep(
     }
 }
 
-/// What a sweep should raise a notification for: each finding and issue that is critical or
-/// high, not dismissed, and new since its target's last sweep with a verdict, as
-/// `target: title`. On a target's first sweep with a verdict, every such one is new; when the
-/// last report could not be read, none is.
+/// What a sweep should raise a notification for: the findings and issues that are critical
+/// or high, not dismissed, and new since their target's last sweep with a verdict, one line
+/// per component (as the popover counts them) and per issue. A component with one such finding
+/// reads `target: title`, one with more `target: component version, place: N advisories`. On a
+/// target's first sweep with a verdict, every such one is new; when the last report could not
+/// be read, none is.
 pub fn alerts(reports: &[Report]) -> Vec<String> {
     let mut alerts = Vec::new();
     for report in reports.iter().filter(|r| r.failure.is_none()) {
@@ -441,18 +443,31 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             None => report.first_verdict,
         };
         let serious = |severity: Severity| severity <= Severity::High;
-        let findings = report
+        let findings: Vec<&ReportFinding> = report
             .findings
             .iter()
             .filter(|f| f.dismissed.is_none() && serious(f.finding.severity) && new(f.key))
-            .map(|f| &f.title);
+            .collect();
+        let components = by_component(&findings).into_iter().map(|group| {
+            let installed = &group[0].installed;
+            if group.len() == 1 {
+                return group[0].title.clone();
+            }
+            plain(&format!(
+                "{} {}, {}: {} advisories",
+                component_name(installed),
+                installed.version,
+                installed.found_in,
+                group.len()
+            ))
+        });
         let issues = report
             .issues
             .iter()
             .filter(|i| i.dismissed.is_none() && serious(i.issue.severity) && new(i.key))
-            .map(|i| &i.title);
+            .map(|i| i.title.clone());
         alerts.extend(
-            findings
+            components
                 .chain(issues)
                 .map(|t| format!("{}: {t}", report.target)),
         );
@@ -2110,6 +2125,31 @@ mod tests {
         assert_eq!(
             alerts(&[first, failed]),
             ["mac: GHSA-3 in npm:c", "mac: file f"]
+        );
+    }
+
+    #[test]
+    fn alerts_name_a_component_once_with_how_many_advisories() {
+        let first = Report {
+            first_verdict: true,
+            ..report(
+                vec![
+                    report_finding("GHSA-1", "critical", false, "npm:a"),
+                    report_finding("GHSA-2", "high", false, "npm:a"),
+                    report_finding("GHSA-3", "low", false, "npm:a"),
+                    report_finding("GHSA-4", "high", false, "npm:b"),
+                ],
+                &[],
+            )
+        };
+        let name = component_name(&first.findings[0].installed);
+        assert_eq!(
+            alerts(&[first]),
+            [
+                format!("mac: {name} 1.0, macOS: 2 advisories"),
+                "mac: GHSA-4 in npm:b".to_owned()
+            ],
+            "the low one is not counted"
         );
     }
 
