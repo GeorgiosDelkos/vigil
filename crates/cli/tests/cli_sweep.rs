@@ -173,6 +173,14 @@ impl Sandbox {
             .env("SHELL", self.path().join("login-shell"))
             .env("FAKE_AGENT_MODE", mode)
             .env("FAKE_AGENT_COUNTER", self.path().join("counter"))
+            // Version managers are read from the sandbox's home only.
+            .env_remove("NVM_DIR")
+            .env_remove("FNM_DIR")
+            .env_remove("VOLTA_HOME")
+            .env_remove("ASDF_DATA_DIR")
+            .env_remove("PYENV_ROOT")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
             // Port 1 on loopback refuses connections, so every feed request fails at once.
             .env("ALL_PROXY", "http://127.0.0.1:1")
             .env_remove("HTTPS_PROXY")
