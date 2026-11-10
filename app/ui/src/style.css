@@ -2,17 +2,14 @@
    blurs the desktop behind it). Text uses four brightness levels of white, groups are inset
    lists with hairline dividers, and severity has its own shape and colour. One fixed dark
    look, as the HUD material is dark in both appearances. */
-/*! IBM Plex Sans: Copyright © 2017 IBM Corp. with Reserved Font Name "Plex". Licensed under
-   the SIL Open Font License, Version 1.1 (https://openfontlicense.org); the full text is in
-   app/ui/src/fonts/OFL.txt. Kept in the built CSS (a /*! comment) so the notice ships with the
-   fonts, as the licence asks. */
-
 /* IBM Plex Sans, the one typeface for all of Vigil's text: the owner chose it on 2026-11-10
    over Sora, Geist and Chakra Petch, and asked for one font everywhere, code included. IBM's own
    split web fonts from @ibm/plex-sans 1.1.0 (https://github.com/IBM/plex/tree/
    1da12f02587b630c07e92692d21492d722f53614/packages/plex-sans/fonts/split/woff2), unmodified:
    the licence reserves the name "Plex", so a subset of our own would have to be renamed. SIL
-   Open Font License 1.1, in fonts/OFL.txt. Bundled so the app looks the same offline.
+   Open Font License 1.1, in app/ui/public/fonts/OFL.txt, which Vite copies into the build
+   beside the fonts as the licence asks (the CSS minifier drops comments, so a notice here would
+   not ship). Bundled so the app looks the same offline.
 
    Two files per weight with IBM's unicode ranges from the same folder's CSS: Latin1 for text,
    Pi for arrows and symbols such as the report button's arrow. The report inlines these same

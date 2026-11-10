@@ -455,7 +455,8 @@ not an OSV ecosystem, so formulae go through NVD.
   moves instead of filling, and the step shows how long it has run (decided 2026-11-08).
 - One typeface for all text, IBM Plex Sans (chosen 2026-11-10 over Sora, Geist and Chakra
   Petch), code and counts included: IBM's unmodified web fonts, bundled in `app/ui/src/fonts`
-  so the app and the report look the same offline.
+  so the app and the report look the same offline. The licence ships beside them in the build
+  (`app/ui/public/fonts/OFL.txt`), and the report's font CSS opens with the copyright notice.
 - Plugins: notification, autostart, positioner (versions looked up at implementation time).
 - Scheduler: in-app interval timer; skip if a sweep is running; run once on wake if overdue.
 
