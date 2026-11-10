@@ -1106,6 +1106,7 @@ mod tests {
                 finding(1, product.clone(), "3.51.3", formula.clone()),
                 finding(2, product.clone(), "3.51.3", formula.clone()),
                 finding(3, product.clone(), "3.53.2", formula.clone()),
+                finding(7, product.clone(), "3.53.3", formula.clone()),
                 finding(4, product, "3.51.3", json!({"kind": "path", "name": "sqlite"})),
                 finding(5, json!({"package": {"ecosystem": "npm", "name": "sqlite"}}),
                     "3.51.3", formula),
@@ -1129,7 +1130,7 @@ mod tests {
             "same lookup, version and place"
         );
         assert_eq!(component(3), None, "dismissed, so not open");
-        for other in [4, 5] {
+        for other in [4, 5, 7] {
             assert_ne!(component(other), Some(Some(first)), "{other}");
         }
         assert_eq!(component(6), Some(None), "an issue has none");
@@ -1137,7 +1138,7 @@ mod tests {
         let view =
             crate::popover::popover_view(vec![latest(&data_dir, &config).unwrap().remove(0)]);
         let sizes: Vec<usize> = view.items.iter().map(|i| 1 + i.others.len()).collect();
-        assert_eq!(sizes, [2, 1, 1, 1], "the dismissed version is gone");
+        assert_eq!(sizes, [2, 1, 1, 1, 1], "the dismissed version is gone");
     }
 
     #[test]
