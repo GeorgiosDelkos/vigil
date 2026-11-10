@@ -330,6 +330,27 @@ fn clean_sweep_writes_bundle_and_report() {
 }
 
 #[test]
+fn an_edited_prompt_is_used_and_the_newer_built_in_one_noted() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let prompts = sandbox.path().join("data/prompts");
+    fs::create_dir_all(&prompts).unwrap();
+    fs::write(prompts.join("sweep.md"), "Mine: {{target}}").unwrap();
+    let out = sandbox.sweep("ok");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let dir = sandbox.sweep_dir();
+    let prompt = fs::read_to_string(dir.join("bundle/PROMPT.md")).unwrap();
+    assert_eq!(prompt, "Mine: this Mac (macOS 27.2)");
+    let built_in = fs::read_to_string(prompts.join("sweep.default.md")).unwrap();
+    assert!(built_in.starts_with("# Vulnerability sweep:"), "{built_in}");
+    let report = fs::read_to_string(dir.join("report.md")).unwrap();
+    assert!(
+        report.contains("prompts/sweep.md: your edited copy is used"),
+        "{report}"
+    );
+}
+
+#[test]
 fn agent_exit_codes_decide_only_without_a_valid_file() {
     // Valid findings count even when the agent exits non-zero after writing them.
     let sandbox = Sandbox::new("agent = \"claude\"\n");
