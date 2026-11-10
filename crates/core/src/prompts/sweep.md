@@ -6,7 +6,9 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 
 - `inventory.jsonl`: what is installed, one component per line. Each has an `id` (`c1`,
   `c2`, ...), a `lookup` (an OSV package or an NVD product), the installed `version`, and
-  `found_in` (where it was found: Homebrew, a lockfile path, a toolchain).
+  `found_in` (where it was found: Homebrew, a lockfile path, a toolchain, or a version
+  manager's folder for one Node.js or Python version: `version_manager` with the `manager`
+  and the version's `path`).
 - `advisories.jsonl`: advisories that name those components, one per line: `id`, `aliases`,
   `summary`, the source's `severity`, what is `affected` (OSV ranges and explicit versions, or
   NVD configurations), `known_exploited` (CISA KEV), the `components` it was fetched for,
@@ -38,6 +40,14 @@ Write `findings.json` in this folder, following `findings.schema.json`:
 - The `fix` names the safest change that removes the issue, with exact commands. They are
   shown to the user, never run now. Each command is one line of printable ASCII; describe a
   path with other characters in `steps` instead.
+- For a version found in a version manager, the fix removes that version with the manager:
+  `nvm uninstall 22.22.2`, `fnm uninstall 22.22.2`, `asdf uninstall nodejs 22.22.2`,
+  `pyenv uninstall -f 3.12.1`; Volta cannot remove a Node.js version, so the fix moves its
+  folder to the Trash (`trash ~/.volta/tools/image/node/22.22.2`). Install a fixed version
+  first when no other installed version is fixed, and switch the default (`nvm alias default`,
+  `fnm default`, `asdf set -u`, `pyenv global`, `volta install node@<version>`) when it named
+  the removed version. Switching the default alone is not a fix: the vulnerable version stays
+  installed and one command away.
 - `issues` is for settings and files of GitHub repositories; on this Mac it is always `[]`.
 
 If nothing is affected, write `{"findings": [], "issues": []}`.
