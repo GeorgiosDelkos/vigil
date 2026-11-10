@@ -284,10 +284,9 @@ impl Range {
 enum Scheme {
     SemVer,
     Pep440,
-    /// Plain dotted numbers only, for ecosystems whose own ordering is not implemented here
-    /// (RubyGems, GitHub Actions, Go `ECOSYSTEM` ranges, and the OS ecosystems, whose records
-    /// are never evaluated here since OSV matched them): there every ordering agrees, and
-    /// anything else (`1.0.0.pre`, `v4`) is unknown.
+    /// Plain dotted numbers only, for RubyGems, whose `Gem::Version` orders them the same way
+    /// (`1.2` equals `1.2.0`), and for the OS ecosystems, whose records are never evaluated
+    /// here since OSV matched them. Anything else (`1.0.0.pre`) is unknown.
     Dotted,
 }
 
@@ -304,11 +303,14 @@ impl Scheme {
     /// The ordering of `ecosystem`'s own versions.
     fn of(ecosystem: Ecosystem) -> Self {
         match ecosystem {
-            Ecosystem::CratesIo | Ecosystem::Npm => Self::SemVer,
+            // Go modules are SemVer with a `v` (<https://go.dev/ref/mod#versions>), and Go
+            // rejects `1.2`, so dotted numbers would wrongly make it `1.2.0`. An Actions tag
+            // is SemVer by convention, and a bare major (`4`) is a moving tag, not `4.0.0`.
+            Ecosystem::CratesIo | Ecosystem::Npm | Ecosystem::Go | Ecosystem::GitHubActions => {
+                Self::SemVer
+            }
             Ecosystem::PyPI => Self::Pep440,
-            Ecosystem::Go
-            | Ecosystem::RubyGems
-            | Ecosystem::GitHubActions
+            Ecosystem::RubyGems
             | Ecosystem::Debian { .. }
             | Ecosystem::Ubuntu { .. }
             | Ecosystem::Alpine { .. } => Self::Dotted,
@@ -365,8 +367,11 @@ fn evaluate(scheme: Scheme, events: &[Event], version: &str) -> Match {
         .iter()
         .filter(|(_, kind, _)| *kind == EventKind::Limit)
         .collect();
-    if !limits.is_empty() && limits.iter().all(|(limit, _, _)| installed >= *limit) {
-        return Match::OutOfRange(format!("{version} >= limit {}", limits[0].2));
+    // The lowest limit above the version: the one the reason can name truthfully.
+    let below = limits.iter().find(|(limit, _, _)| installed < *limit);
+    if !limits.is_empty() && below.is_none() {
+        let highest = limits.last().expect("limits is not empty");
+        return Match::OutOfRange(format!("{version} >= limit {}", highest.2));
     }
 
     let mut last = None;
@@ -380,7 +385,7 @@ fn evaluate(scheme: Scheme, events: &[Event], version: &str) -> Match {
             last = Some(i);
         }
     }
-    describe(&timeline, last, version)
+    describe(&timeline, last, below.map(|(_, _, text)| *text), version)
 }
 
 /// The range's events as a sorted timeline, or the unknown verdict when they cannot be
@@ -418,8 +423,13 @@ fn timeline(scheme: Scheme, events: &[Event]) -> Result<Timeline<'_>, Match> {
 }
 
 /// The verdict for a range whose last reached event is `timeline[last]`, with the events
-/// around the version as its reason.
-fn describe(timeline: &[(Bound, EventKind, &str)], last: Option<usize>, version: &str) -> Match {
+/// around the version as its reason. `limit` is the lowest limit above the version, if any.
+fn describe(
+    timeline: &[(Bound, EventKind, &str)],
+    last: Option<usize>,
+    limit: Option<&str>,
+    version: &str,
+) -> Match {
     let Some(last) = last else {
         let (_, _, first) = timeline
             .iter()
@@ -430,17 +440,19 @@ fn describe(timeline: &[(Bound, EventKind, &str)], last: Option<usize>, version:
     let (_, kind, text) = &timeline[last];
     match kind {
         EventKind::Introduced => {
-            let next = timeline[last + 1..]
+            // Every event after `last` is above the version, so the first fix is the nearest.
+            let fix = timeline[last + 1..]
                 .iter()
                 .find_map(|(_, kind, text)| match kind {
-                    EventKind::Fixed | EventKind::Limit => {
-                        Some(format!(" and < {} {text}", kind.name()))
-                    }
+                    EventKind::Fixed => Some(format!(" and < fixed {text}")),
                     EventKind::LastAffected => Some(format!(" and <= last_affected {text}")),
-                    EventKind::Introduced => None,
-                });
-            let next = next.unwrap_or_default();
-            Match::InRange(format!("{version} >= introduced {text}{next}"))
+                    EventKind::Introduced | EventKind::Limit => None,
+                })
+                .unwrap_or_default();
+            let limit = limit
+                .map(|l| format!(" and < limit {l}"))
+                .unwrap_or_default();
+            Match::InRange(format!("{version} >= introduced {text}{fix}{limit}"))
         }
         EventKind::Fixed => Match::OutOfRange(format!("{version} >= fixed {text}")),
         EventKind::LastAffected => Match::OutOfRange(format!("{version} > last_affected {text}")),
@@ -577,6 +589,16 @@ mod tests {
         assert!(is_in(&npm(&either, "2.0.0")), "below one of the limits");
         let star = json!([{"introduced": "0"}, {"limit": "*"}]);
         assert!(is_in(&npm(&star, "99.0.0")), "`*` is infinity");
+
+        // The reason names only bounds that hold: the version is past the first limit.
+        let mixed = json!([
+            {"introduced": "1.0.0"}, {"limit": "2.0.0"}, {"fixed": "4.0.0"}, {"limit": "5.0.0"}
+        ]);
+        assert_eq!(
+            npm(&mixed, "3.0.0"),
+            in_range("3.0.0 >= introduced 1.0.0 and < fixed 4.0.0 and < limit 5.0.0")
+        );
+        assert_eq!(npm(&mixed, "5.0.0"), out("5.0.0 >= limit 5.0.0"));
     }
 
     #[test]
@@ -679,6 +701,21 @@ mod tests {
         let net = "go:golang.org/x/net";
         assert!(is_in(&judge(net, entry.clone(), "v0.32.0")));
         assert!(is_out(&judge(net, entry, "v0.33.0")));
+
+        // Go rejects `1.2`, so it is not `1.2.0` there.
+        let ecosystem = json!({"ranges": [{"type": "ECOSYSTEM", "events": [
+            {"introduced": "0"}, {"fixed": "1.2"}
+        ]}]});
+        assert!(is_unknown(&judge(net, ecosystem, "v1.2.0")));
+        // An Actions major tag moves; it is not 4.0.0.
+        let action = json!({"ranges": [{"type": "ECOSYSTEM", "events": [
+            {"introduced": "0"}, {"fixed": "4.0.1"}
+        ]}]});
+        assert!(is_unknown(&judge(
+            "github actions:actions/checkout",
+            action,
+            "4"
+        )));
     }
 
     #[test]
