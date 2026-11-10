@@ -627,6 +627,49 @@ kbd {
 .cmd .p {
   color: var(--l3);
 }
+/* A component's advisories under its detail, each collapsed to its severity and ids. */
+.advs {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  display: grid;
+  gap: 2px;
+}
+.adv summary {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.adv summary::-webkit-details-marker {
+  display: none;
+}
+.adv summary:hover,
+.adv[open] summary {
+  background: rgba(255, 255, 255, 0.05);
+}
+.adv-sev {
+  font: 600 9.5px/1 var(--ui);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--l3);
+}
+.adv-body {
+  display: grid;
+  gap: 8px;
+  padding: 8px 8px 10px 30px;
+}
+.evidence {
+  margin: 0;
+  font-size: 11px;
+  color: var(--l3);
+  overflow-wrap: anywhere;
+  user-select: text;
+}
 .confirm {
   display: grid;
   gap: 8px;

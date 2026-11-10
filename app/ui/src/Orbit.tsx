@@ -24,7 +24,7 @@ export type OrbitActions = {
   readonly onList: () => void;
   /** Opens the list at its targets. */
   readonly onTargets: () => void;
-  readonly onFinding: (key: string) => void;
+  readonly onFinding: (id: string) => void;
   readonly onSweep: () => void;
   readonly onCancel: () => void;
   readonly onReport: () => void;
@@ -41,8 +41,8 @@ function sceneOf(overview: Overview): Scene {
     return { mood: "clear" };
   }
   // Rust says all clear once a sweep found nothing, so no findings here means no sweep yet.
-  return overview.findings.length > 0
-    ? { mood: "findings", lit: overview.findings.map(neon) }
+  return overview.items.length > 0
+    ? { mood: "findings", lit: overview.items.map(neon) }
     : { mood: "unswept" };
 }
 
@@ -50,7 +50,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
   const sweeping = () =>
     props.overview.status.state === "sweeping" ? props.overview.status : null;
   const clear = () => sweeping() === null && props.overview.all_clear;
-  const first = () => (sweeping() === null ? props.overview.findings[0] : undefined);
+  const first = () => (sweeping() === null ? props.overview.items[0] : undefined);
   const failed = () => (props.overview.status.state === "failed" ? props.overview.status : null);
 
   return (
@@ -87,7 +87,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
       <Switch>
         <Match when={sweeping()}>{(s) => <Progress status={s()} now={props.now} />}</Match>
         <Match when={first()}>
-          {(f) => <Urgent finding={f()} onOpen={() => props.actions.onFinding(f().key)} />}
+          {(f) => <Urgent item={f()} onOpen={() => props.actions.onFinding(f().id)} />}
         </Match>
         <Match when={clear()}>
           <button type="button" class="urgent glass" onClick={() => props.actions.onList()}>
@@ -141,12 +141,12 @@ function Centre(props: { overview: Overview; sweeping: Sweeping | null }) {
         <span class="n word">Clear</span>
         <span class="l">nothing open</span>
       </Match>
-      <Match when={o().findings.length === 0}>
+      <Match when={o().items.length === 0}>
         <span class="n word small">{o().headline}</span>
       </Match>
       {/* With nothing urgent, the count is of what is open, as Rust's headline says. */}
       <Match when={o().needs_you === 0}>
-        <span class="n">{o().findings.length}</span>
+        <span class="n">{o().items.length}</span>
         <span class="l">open</span>
       </Match>
       <Match when={true}>
@@ -160,19 +160,20 @@ function Centre(props: { overview: Overview; sweeping: Sweeping | null }) {
   );
 }
 
-/** The finding Rust ranked first, with where it is; tapping it opens its detail. */
-function Urgent(props: { finding: Listed; onOpen: () => void }) {
-  const f = () => props.finding;
+/** The item Rust ranked first, with where it is; tapping it opens its detail. */
+function Urgent(props: { item: Listed; onOpen: () => void }) {
+  const f = () => props.item;
   return (
     <button type="button" class="urgent glass" onClick={() => props.onOpen()}>
       <span class="glow" style={{ "--c": neon(f()) }} />
       <span>
         <b>
-          {f().name}
-          <Show when={f().version}>{(v) => ` ${v()}`}</Show>
+          {f().lead.name}
+          <Show when={f().lead.version}>{(v) => ` ${v()}`}</Show>
         </b>
         <small>
-          {f().known_exploited ? "exploited in the wild" : f().severity} · {f().target}
+          {f().known_exploited ? "exploited in the wild" : f().severity}
+          <Show when={f().advisory_count}>{(n) => ` · ${n()}`}</Show> · {f().target}
         </small>
       </span>
       <span class="go" aria-hidden="true">
