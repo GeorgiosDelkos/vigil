@@ -95,18 +95,21 @@ const context = {
   stroke: () => undefined,
 };
 
-/** The target row named `name`: its checked line, tags, bar segments as count and colour, and
+/** The target row named `name`: its checked line, count columns (dimmed ones in brackets), bar segments as count and colour, and
  * whether its bar is the all-clear green. */
 function targetRow(name: RegExp): {
   sub: string;
-  tags: string[];
+  counts: string[];
   bar: string[];
   clear: boolean;
 } {
   const button = screen.getByRole("button", { name });
   return {
     sub: button.querySelector(".tsub")?.textContent ?? "",
-    tags: [...button.querySelectorAll(".stag")].map((t) => t.textContent ?? ""),
+    counts: [...button.querySelectorAll(".tcount")].map((c) => {
+      const text = `${c.querySelector("b")?.textContent ?? ""} ${c.querySelector("small")?.textContent ?? ""}`;
+      return c.classList.contains("zero") ? `(${text})` : text;
+    }),
     bar: [...button.querySelectorAll<HTMLElement>(".tbar i")].map(
       (i) => `${i.style.flexGrow} ${i.style.getPropertyValue("--c")}`,
     ),
@@ -983,7 +986,7 @@ describe("the main view", () => {
     expect(screen.getByText("3 targets · every 6 hours")).toBeTruthy();
     expect(targetRow(/^This Mac/)).toEqual({
       sub: "12 components checked",
-      tags: ["clear"],
+      counts: ["(0 critical)", "(0 high)", "(0 medium)", "(0 low)"],
       bar: [],
       clear: true,
     });
@@ -1015,7 +1018,7 @@ describe("the main view", () => {
     expect(await screen.findByTitle("Show details")).toBeTruthy();
   });
 
-  it("shows each target's findings as labelled tags and a bar, worst first", async () => {
+  it("shows each target's counts in fixed severity columns and a bar, worst first", async () => {
     const swept = "2026-11-06T11:00:00Z";
     const line = overview().targets[0];
     if (line === undefined) {
@@ -1034,6 +1037,15 @@ describe("the main view", () => {
           open: 9,
         },
         { ...line, label: "me/app", kind: "repo", swept, checked: "3 components checked" },
+        {
+          ...line,
+          label: "big",
+          kind: "server",
+          swept,
+          checked: "900 components checked",
+          counts: { critical: 100, high: 0, medium: 12, low: 0 },
+          open: 112,
+        },
         { ...line, label: "This Mac", swept: null, checked: null },
       ],
     };
@@ -1042,7 +1054,7 @@ describe("the main view", () => {
     await screen.findByTitle("Show details");
     expect(targetRow(/^web/)).toEqual({
       sub: "139 components checked",
-      tags: ["1 critical", "5 high", "2 med", "1 low"],
+      counts: ["1 critical", "5 high", "2 medium", "1 low"],
       bar: ["1 #ff3b3b", "5 #ff8a1f", "2 #ffe14a", "1 #8fa2ff"],
       clear: false,
     });
@@ -1051,9 +1063,11 @@ describe("the main view", () => {
         name: "web, 9 open: 1 critical, 5 high, 2 medium, 1 low, 139 components checked",
       }),
     ).toBeTruthy();
+    // Every severity keeps its column: a zero beside a count is dimmed, not dropped.
+    expect(targetRow(/^big/).counts).toEqual(["100 critical", "(0 high)", "12 medium", "(0 low)"]);
     expect(targetRow(/^me\/app/)).toEqual({
       sub: "3 components checked",
-      tags: ["clear"],
+      counts: ["(0 critical)", "(0 high)", "(0 medium)", "(0 low)"],
       bar: [],
       clear: true,
     });
@@ -1062,7 +1076,7 @@ describe("the main view", () => {
     ).toBeTruthy();
     expect(targetRow(/^This Mac/)).toEqual({
       sub: "not swept yet",
-      tags: [],
+      counts: ["(– critical)", "(– high)", "(– medium)", "(– low)"],
       bar: [],
       clear: false,
     });
@@ -1074,7 +1088,7 @@ describe("the main view", () => {
     handlers.get("changed")?.({ payload: null });
     await screen.findByText("sweeping This Mac");
     expect(document.querySelector(".trows.stale")).not.toBeNull();
-    expect(targetRow(/^web/).tags).toEqual(["1 critical", "5 high", "2 med", "1 low"]);
+    expect(targetRow(/^web/).counts).toEqual(["1 critical", "5 high", "2 medium", "1 low"]);
   });
 
   it("shows why the last sweep failed", async () => {

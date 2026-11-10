@@ -204,17 +204,8 @@ function Progress(props: { status: Sweeping; now: Date }) {
   );
 }
 
-/** The tags' severity names. "med" is short so three tags fit on one line beside a name; a
- * fourth wraps. */
-const TAG: Readonly<Record<Severity, string>> = {
-  critical: "critical",
-  high: "high",
-  medium: "med",
-  low: "low",
-};
-
-/** A target's open findings per severity it has, worst first: one tag and one bar segment
- * each. Empty before its first sweep and when it is clear. */
+/** A target's open findings per severity, worst first, as bar segments: only the severities it
+ * has. Empty before its first sweep and when it is clear. */
 function mix(target: TargetLine): { severity: Severity; count: number }[] {
   if (target.swept === null) {
     return [];
@@ -225,7 +216,7 @@ function mix(target: TargetLine): { severity: Severity; count: number }[] {
   }));
 }
 
-/** What a row's tags and bar say, for those who cannot see them. */
+/** What a row's counts and bar say, for those who cannot see them. */
 function rowStatus(target: TargetLine): string {
   if (target.swept === null) {
     return "not swept yet";
@@ -235,10 +226,13 @@ function rowStatus(target: TargetLine): string {
   return target.checked === null ? open : `${open}, ${target.checked}`;
 }
 
-/** One row per target, with its open findings as labelled tags and a bar split by severity.
- * Every bar is the full width, so it shows the mix within its target, not its size beside the
- * others (the owner's choice, 2026-11-10). During a sweep the rows dim: their counts are from
- * the last sweep. Past three rows the card scrolls, so the vortex keeps its room. */
+/** One row per target, every row the same shape: the name, what was checked, a count for each
+ * severity in fixed columns, the number above its name so four digits fit at the popover's
+ * 360px width (a zero is dimmed, so a severity sits in the same place in every row), and a bar split by severity. The owner asked for standard sizes and positions over tags
+ * that wrapped and moved with the counts (2026-11-10). Every bar is the full width, so it shows
+ * the mix within its target, not its size beside the others. During a sweep the rows dim: their
+ * counts are from the last sweep. Past three rows the card scrolls, so the vortex keeps its
+ * room. */
 function TargetRows(props: {
   targets: readonly TargetLine[];
   sweeping: boolean;
@@ -257,30 +251,26 @@ function TargetRows(props: {
             <span class="sr-only">
               {t().label}, {rowStatus(t())}
             </span>
-            <span class="tags" aria-hidden="true">
-              <Show
-                when={mix(t()).length > 0}
-                fallback={
-                  <Show when={t().swept !== null}>
-                    <span class="stag ok">clear</span>
-                  </Show>
-                }
-              >
-                <Index each={mix(t())}>
-                  {(m) => (
-                    <span class="stag" style={{ "--c": NEON[m().severity] }}>
-                      {m().count} {TAG[m().severity]}
-                    </span>
-                  )}
-                </Index>
-              </Show>
-            </span>
             <span class="go" aria-hidden="true">
               ›
             </span>
             <small class="tsub" aria-hidden="true">
               {t().checked ?? "not swept yet"}
             </small>
+            <span class="tcounts" aria-hidden="true">
+              <Index each={SEVERITIES}>
+                {(s) => (
+                  <span
+                    class="tcount"
+                    classList={{ zero: t().swept === null || t().counts[s()] === 0 }}
+                    style={{ "--c": NEON[s()] }}
+                  >
+                    <b>{t().swept === null ? "–" : t().counts[s()]}</b>
+                    <small>{s()}</small>
+                  </span>
+                )}
+              </Index>
+            </span>
             <span class="tbar" classList={{ ok: t().swept !== null && t().open === 0 }}>
               <Index each={mix(t())}>
                 {(m) => <i style={{ "flex-grow": m().count, "--c": NEON[m().severity] }} />}
