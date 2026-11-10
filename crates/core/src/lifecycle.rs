@@ -1172,6 +1172,11 @@ mod tests {
                 // Without a lookup and place, nothing says two findings share a component.
                 json!({"key": FindingKey(12), "severity": "high", "installed": {"version": "1"}}),
                 json!({"key": FindingKey(13), "severity": "high", "installed": {"version": "1"}}),
+                // A lookup without a place is not enough either.
+                json!({"key": FindingKey(14), "severity": "high",
+                    "installed": {"lookup": curl(), "version": "1"}}),
+                json!({"key": FindingKey(15), "severity": "high",
+                    "installed": {"lookup": curl(), "version": "1"}}),
             ],
             "issues": [{"key": FindingKey(11), "severity": "low"}],
         });
@@ -1212,6 +1217,12 @@ mod tests {
             Some(bare),
             "no lookup or place"
         );
+        let lookup_only = component(14).flatten().unwrap().0;
+        assert_ne!(
+            component(15).flatten().map(|c| c.0),
+            Some(lookup_only),
+            "a lookup but no place"
+        );
 
         let view = crate::popover::popover_view(vec![mac]);
         let sizes: Vec<(&str, usize)> = view
@@ -1229,6 +1240,8 @@ mod tests {
                 ("minimist", 1),
                 ("curl", 1),
                 ("libcurl", 1),
+                ("", 1),
+                ("", 1),
                 ("", 1),
                 ("", 1),
                 ("", 1)
