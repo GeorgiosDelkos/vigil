@@ -71,7 +71,7 @@ Core modules (one concept each):
   config.toml
   report.html (the HTML report, replaced each time it is asked for)
   prompts/{sweep,sweep-github,sweep-server,fix}.md
-  prompts/<name>.default.md (the current built-in prompt, beside a copy the user edited)
+  prompts/<name>.default.md (the built-in prompt when it last differed from a copy the user edited)
   feeds/osv/<id>.json, feeds/nvd/<product>.json
   state/.lock, state/dismissals.json, state/fixes.jsonl
   sweeps/.lock

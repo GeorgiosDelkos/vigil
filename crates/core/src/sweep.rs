@@ -346,8 +346,9 @@ pub fn sweep(
     let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
     let running = cancel::mark_running(&dir)?;
     // After the sweep folder exists, so a failure to create it does not lose the one note an
-    // edited prompt gets. A cancelled sweep can still lose it; the `.default.md` file it
-    // points to stays as the lasting record.
+    // edited prompt gets. A sweep that ends without a report (cancelled, a target error, or no
+    // target run) still loses it; the `.default.md` file it points to stays as the lasting
+    // record.
     prompts::update(data_dir, &mut notes);
 
     let feeds = Feeds::new(data_dir, nvd_access(&mut notes));

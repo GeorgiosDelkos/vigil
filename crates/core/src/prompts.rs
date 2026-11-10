@@ -64,9 +64,9 @@ impl Prompt {
         }
     }
 
-    /// The [`fnv1a`] hash of every version of the built-in prompt in the git history, oldest
-    /// first, the current one included. Tests check that the list holds exactly those versions
-    /// and the current one.
+    /// The [`fnv1a`] hash of every version of the built-in prompt in the git history, the
+    /// current one included, in no particular order. Tests check that the list holds exactly
+    /// those versions and the current one.
     fn shipped(self) -> &'static [u64] {
         match self {
             Self::Mac => &[
@@ -74,13 +74,21 @@ impl Prompt {
                 0x7daf_590d_9d09_a885,
                 0x280d_e73a_4e6e_2028,
                 0x2f63_49e2_0ee6_b52b,
+                0x43e3_14c9_7f99_636c,
                 0x6700_b7d7_68f8_b586,
+                0x6fb4_8641_0926_923e,
             ],
-            Self::GitHub => &[0x61c0_4d78_7cf2_cfd0, 0xd32b_864c_dff2_7518],
+            Self::GitHub => &[
+                0x61c0_4d78_7cf2_cfd0,
+                0xd32b_864c_dff2_7518,
+                0x63b2_93e7_5d62_bfc3,
+                0xddaa_01c1_7a2a_02d4,
+            ],
             Self::Server => &[
                 0xf408_6f27_d0ec_3536,
                 0xaa44_bd87_ef56_8a55,
                 0x495c_677b_2b0e_eafc,
+                0xafea_94d5_e019_3384,
             ],
             Self::Fix => &[0x77ef_cded_9b10_794c, 0x55ae_3d08_e3e0_8813],
         }
@@ -119,7 +127,8 @@ pub(crate) fn update(data_dir: &DataDir, notes: &mut Vec<String>) {
     for kind in Prompt::ALL {
         if let Err(e) = update_one(&dir, kind, notes) {
             notes.push(format!(
-                "prompts/{}: cannot compare it with the built-in prompt or update it: {e}",
+                "prompts/{}: cannot compare it with the built-in prompt or update it: {e}; \
+                 check that the prompts folder can be read and written",
                 kind.file_name()
             ));
         }
@@ -377,8 +386,8 @@ mod tests {
             let hash = fnv1a(kind.default_text().as_bytes());
             assert!(
                 kind.shipped().contains(&hash),
-                "src/prompts/{} changed: add {hash:#x} to the end of its list in \
-                 Prompt::shipped, so installs holding this version are updated to the next",
+                "src/prompts/{} changed: add {hash:#x} to its list in Prompt::shipped, \
+                 so installs holding this version are updated to the next",
                 kind.file_name()
             );
         }
