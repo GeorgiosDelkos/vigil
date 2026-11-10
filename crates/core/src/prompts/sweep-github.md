@@ -50,9 +50,9 @@ fell:
 - `unknown`: Vigil could not place the version with certainty (a range from a manifest, a
   version or bound it cannot read, a GIT range); `why` says what. Read the record and decide
   yourself.
-- `out_of_range`: only on advisories in CISA KEV (on every advisory when the catalog could
-  not be read). Vigil keeps those even when the version is outside, so that a wrong range
-  cannot hide an exploited issue. Check the record; usually the version is not affected.
+
+Components outside an advisory's affected versions are left out, and so is an advisory left
+with none, known-exploited ones included.
 
 ## What to do
 

@@ -611,8 +611,11 @@ mod tests {
             .collect();
         let kev = Kev::from_ids(&["CVE-3"]);
 
-        let dropped = keep_candidates(&mut fetched, Some(&kev));
-        assert_eq!(dropped, 1, "GHSA-2: both versions are past its fix");
+        let dropped = keep_candidates(&mut fetched);
+        assert_eq!(
+            dropped, 2,
+            "GHSA-2 and GHSA-3: both versions are past their fix, though CVE-3 is exploited"
+        );
         let entries: Vec<Entry<'_>> = fetched
             .iter()
             .map(|(advisory, components)| Entry {
@@ -624,15 +627,18 @@ mod tests {
         let contents = contents("p", &components, &entries);
         let known = write(tmp.path(), &contents, Some(&kev)).unwrap();
         assert_eq!(known.advisories["GHSA-1"], [0].into(), "4.17.21 is fixed");
-        assert_eq!(known.advisories["GHSA-3"], [0, 1].into());
         assert!(!known.advisories.contains_key("GHSA-2"));
+        assert!(
+            !known.advisories.contains_key("GHSA-3"),
+            "in KEV, but provably out of range"
+        );
 
         let index = fs::read_to_string(tmp.path().join("advisories.jsonl")).unwrap();
         let lines: Vec<Value> = index
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        assert_eq!(lines.len(), 2);
+        assert_eq!(lines.len(), 1);
         assert_eq!(
             lines[0]["components"],
             json!([{
@@ -640,12 +646,6 @@ mod tests {
                 "match": "in_range",
                 "why": "4.17.20 >= introduced 0 and < fixed 4.17.21"
             }])
-        );
-        assert_eq!(lines[1]["id"], "GHSA-3");
-        assert_eq!(
-            lines[1]["components"][1],
-            json!({"component": "c2", "match": "out_of_range", "why": "4.17.21 >= fixed 4.0.0"}),
-            "known exploited, so kept with its verdict"
         );
     }
 

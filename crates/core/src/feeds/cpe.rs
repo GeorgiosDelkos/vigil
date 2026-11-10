@@ -27,9 +27,8 @@
 //! its own name only when it is in the inventory (macOS, Homebrew, toolchains, lockfiles), so
 //! a CVE for an app installed some other way (Zoom from its own installer) no longer reaches
 //! the agent through macOS. The user chose this (2026-11-08): those platform matches were
-//! 4031 of the 10304 advisories, nearly all for software not installed. CVEs in CISA's KEV
-//! catalog, and every CVE when the catalog could not be read, are kept whatever the verdict
-//! (`matching::keep_candidates`).
+//! 4031 of the 10304 advisories, nearly all for software not installed. Since 2026-11-10 (the
+//! owner's decision) this holds for CVEs in CISA's KEV catalog too (`matching::keep_candidates`).
 //!
 //! Matches inside an AND configuration are judged one by one, so a CVE that needs a
 //! vulnerable product on a particular platform is a candidate whatever the platform; its
@@ -487,7 +486,7 @@ mod tests {
     use serde_json::json;
 
     impl Matches {
-        /// Whether the CVE stays a candidate for a component whose advisory is not in KEV.
+        /// Whether the CVE stays a candidate for the component.
         fn may_affect(&self, product: &Product, version: &str) -> bool {
             !matches!(self.verdict(product, version), Match::OutOfRange(_))
         }

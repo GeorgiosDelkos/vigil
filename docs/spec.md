@@ -22,7 +22,7 @@ and the user can approve a fix the agent then performs.
 | Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
 | Feed flow | App fetches into a local cache; agent reads files |
 | History window | User-chosen (`since` date or `all`); then deltas |
-| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV). Since 2026-11-10 the same rule covers OSV: Vigil compares versions itself (see "Version pre-match") and drops every advisory not in KEV whose components are all out of range; the agent judges applicability |
+| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV). Since 2026-11-10 the same rule covers OSV: Vigil compares versions itself (see "Version pre-match") and drops every advisory whose components are all out of range; the agent judges applicability. KEV entries no longer skip it (owner's decision, 2026-11-10): a known-exploited advisory that is provably out of range for every component is dropped too, which took one Mac's bundle from 271 advisories to 168 |
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
 | Agent permissions | Sweeps restricted: read anything, write only `findings.json`, read-only listing commands. Fixes get full access, only after the user confirms (decided 2026-11-05) |
 | Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
@@ -285,8 +285,8 @@ Issues on a server name a file (`server/listening.txt`); there are no settings.
 2. Inventory:
    - Mac, GitHub and servers: app collects (servers over SSH, see "Servers").
 3. Pre-match (see "Version pre-match"): each advisory and component pair gets in range,
-   unknown or out of range. Out-of-range pairs are dropped unless the advisory is in KEV, then
-   advisories left with none; the report counts those as `out_of_range`.
+   unknown or out of range. Out-of-range pairs are dropped, KEV or not, then advisories left
+   with none; the report counts those as `out_of_range`.
 4. Bundle: app writes `bundle/` = `inventory.json`, filtered `advisories.jsonl` with each
    candidate's verdict and reason, `findings.schema.json`, rendered prompt.
 5. Agent run: headless CLI in `bundle/` as cwd; agent writes `findings.json`.
@@ -467,12 +467,14 @@ The rule is conservative: anything not read with certainty is `unknown`, never
   platforms.
 
 Out-of-range pairs are dropped from each advisory, then advisories left with none, and the
-report's `out_of_range` counts those advisories, so none disappears silently. An advisory in
-KEV keeps every pair, out-of-range ones included, as does every advisory when the catalog
-could not be read (the pre-filter decision: every KEV entry reaches the agent). On the
-2026-11-10 sweep's bundles this kept 17 of a repository's 341 advisories and 271 of the
-Mac's 281 (104 of them in KEV and wholly out of range), and every one of the 118 findings
-of that sweep stayed a candidate, in range.
+report's `out_of_range` counts those advisories, so none disappears silently. KEV
+advisories follow the same rule (owner's decision, 2026-11-10): one is kept only when some
+pair is in range or unknown, and whether the catalog could be read changes nothing. Until
+then every KEV entry reached the agent; on the Mac 104 of 281 advisories were KEV CVEs for
+macOS releases fixed long ago. An advisory linked to no component would be kept, as nothing
+shows it out of range, but every fetched advisory comes from a component's lookup. On the
+2026-11-10 sweep's bundles this kept 16 of a repository's 341 advisories and 168 of the
+Mac's 281, and every one of the 118 findings of that sweep stayed a candidate, in range.
 
 ### Feeds
 
@@ -494,8 +496,8 @@ not an OSV ecosystem, so formulae go through NVD.
   (service `io.github.georgiosdelkos.vigil`, account `nvd-api-key`). A CVE reaches the bundle
   only for the installed versions its CPE matches may cover (`feeds::cpe`, which lists the
   rules, and "Version pre-match"); whatever it cannot tell is kept, a CVE that names the
-  product only as not vulnerable (the platform another product runs on) is dropped, and a
-  CVE in KEV is always kept; when the KEV catalog cannot be read, no CVE is filtered.
+  product only as not vulnerable (the platform another product runs on) is dropped, KEV or
+  not (since 2026-11-10; before, a CVE in KEV was always kept).
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
 - A product's cached CVEs are used without a request for 2 hours after the last fetch's

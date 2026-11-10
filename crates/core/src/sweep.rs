@@ -229,8 +229,7 @@ pub struct Report {
     /// How many advisories were fetched for the target but left out of the bundle because
     /// Vigil's version comparison shows that none of their components is affected: every
     /// version is outside the affected ranges, or an NVD CVE names the product only as a
-    /// platform. Advisories in CISA's KEV catalog are never left out, nor any when the
-    /// catalog could not be read.
+    /// platform. Advisories in CISA's KEV catalog count like any other.
     pub out_of_range: usize,
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
@@ -1045,7 +1044,7 @@ fn fetch(
     fetched.extend(fetch_nvd(
         sources, components, &products, problems, progress,
     ));
-    let out_of_range = matching::keep_candidates(&mut fetched, sources.kev);
+    let out_of_range = matching::keep_candidates(&mut fetched);
     (fetched, out_of_range)
 }
 
@@ -1763,7 +1762,7 @@ mod tests {
             Match::Unknown("an affected entry gives neither ranges nor versions".to_owned()),
             "each pair carries its verdict"
         );
-        assert_eq!(dropped, 1, "CVE-6");
+        assert_eq!(dropped, 2, "CVE-6 and CVE-7");
         let linked: Vec<(&str, Vec<usize>)> = fetched
             .iter()
             .map(|(a, c)| (a.id.as_str(), c.keys().copied().collect()))
@@ -1773,13 +1772,12 @@ mod tests {
             [
                 ("GHSA-1", vec![0, 2]),
                 ("PYSEC-1", vec![4]),
-                ("CVE-7", vec![1, 5]),
                 ("CVE-8", vec![5]),
                 ("CVE-9", vec![1, 5]),
             ],
             "linked by query, so `Django` reaches django; an NVD CVE only to the versions it \
-             may affect, so CVE-6, which affects neither curl, is left out, unless it is \
-             exploited in the wild like CVE-7"
+             may affect, so CVE-6 and CVE-7, which affect neither curl, are left out, though \
+             CVE-7 is exploited in the wild"
         );
         assert_eq!(
             problems,
@@ -1806,19 +1804,13 @@ mod tests {
         );
         assert!(!seen.iter().any(|s| s.starts_with("Product")), "{seen:?}");
 
-        // Without the KEV catalog any CVE may be exploited, so none is left out.
+        // Without the KEV catalog the same advisories are left out.
         let unknown = Sources {
             kev: None,
             ..sources
         };
-        let (fetched, dropped) =
-            fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
-        assert_eq!(dropped, 0);
-        let linked: Vec<(&str, Vec<usize>)> = fetched
-            .iter()
-            .map(|(a, c)| (a.id.as_str(), c.keys().copied().collect()))
-            .collect();
-        assert!(linked.contains(&("CVE-6", vec![1, 5])), "{linked:?}");
+        let (_, dropped) = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
+        assert_eq!(dropped, 2);
     }
 
     #[test]

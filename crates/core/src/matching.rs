@@ -20,7 +20,6 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use crate::feeds::Advisory;
-use crate::feeds::Kev;
 use crate::package::Ecosystem;
 use crate::package::Package;
 
@@ -77,15 +76,16 @@ pub(crate) type Linked = (Advisory, BTreeMap<usize, Match>);
 /// Drops from each advisory the components whose version is out of range, then the
 /// advisories left with none, and returns how many advisories that dropped.
 ///
-/// An advisory in CISA's KEV catalog keeps every component, out-of-range ones included, as
-/// does every advisory when `kev` is `None` (the catalog could not be read, so any may be in
-/// it): one exploited in the wild is worth the agent's look even when its ranges seem to
-/// rule the version out, since a range can be wrong. This keeps the spec's pre-filter
-/// decision that every KEV entry reaches the agent.
-pub(crate) fn keep_candidates(fetched: &mut Vec<Linked>, kev: Option<&Kev>) -> usize {
+/// Advisories in CISA's KEV catalog are treated like any other: one whose every component is
+/// provably out of range is dropped too (the owner's decision, 2026-11-10; until then every
+/// KEV entry reached the agent, and on one Mac 104 of 281 advisories were KEV CVEs for macOS
+/// releases long fixed). An advisory linked to no component at all is kept, since nothing
+/// shows it out of range; `sweep::fetch` never produces one, as every advisory comes from a
+/// component's lookup.
+pub(crate) fn keep_candidates(fetched: &mut Vec<Linked>) -> usize {
     let before = fetched.len();
-    fetched.retain_mut(|(advisory, matches)| {
-        if kev.is_none_or(|kev| advisory.is_known_exploited(kev)) {
+    fetched.retain_mut(|(_, matches)| {
+        if matches.is_empty() {
             return true;
         }
         matches.retain(|_, m| !matches!(m, Match::OutOfRange(_)));
@@ -831,7 +831,7 @@ mod tests {
     }
 
     #[test]
-    fn candidates_keep_in_range_unknown_and_every_known_exploited_pair() {
+    fn candidates_keep_in_range_and_unknown_pairs_only() {
         let unknown = Match::Unknown("u".to_owned());
         let mut fetched = vec![
             (
@@ -839,23 +839,18 @@ mod tests {
                 [(0, in_range("i")), (1, unknown), (2, out("o"))].into(),
             ),
             (advisory("2"), [(0, out("o")), (1, out("o"))].into()),
-            (advisory("3"), [(0, out("o"))].into()),
+            (advisory("3"), BTreeMap::new()),
         ];
-        let kev = Kev::from_ids(&["CVE-3"]);
-        assert_eq!(keep_candidates(&mut fetched, Some(&kev)), 1);
+        assert_eq!(keep_candidates(&mut fetched), 1);
         let kept: Vec<(&str, Vec<usize>)> = fetched
             .iter()
             .map(|(a, m)| (a.id.as_str(), m.keys().copied().collect()))
             .collect();
-        assert_eq!(kept, [("1", vec![0, 1]), ("3", vec![0])]);
-
-        let mut fetched = vec![(advisory("2"), [(0, out("o"))].into())];
         assert_eq!(
-            keep_candidates(&mut fetched, None),
-            0,
-            "any may be exploited"
+            kept,
+            [("1", vec![0, 1]), ("3", vec![])],
+            "an advisory with no component is not shown out of range"
         );
-        assert_eq!(fetched[0].1[&0], out("o"));
     }
 
     proptest! {
