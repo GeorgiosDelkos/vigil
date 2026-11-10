@@ -1,37 +1,39 @@
-//! Whether an NVD CVE can affect the version installed, read from the CPE matches in its
-//! configurations.
+//! Whether an NVD CVE's CPE matches cover the version installed, as a [`Match`] with its
+//! reason, under the conservative rule in `matching`.
 //!
 //! NVD returns every CVE whose configurations name a product, at any version, and also those
 //! that name it only as the platform another product runs on. For macOS that is over 7000
 //! CVEs, nearly all of them fixed long ago or in other software (measured on one Mac,
 //! 2026-11-08: 10304 advisories in a bundle). The agent still decides what is affected; this
-//! only drops the CVEs that cannot be, and keeps a CVE whenever it cannot tell:
+//! only finds the CVEs that cannot be, and says unknown whenever it cannot tell:
 //!
-//! - a CVE is kept when any match that marks the product vulnerable could cover the version;
-//! - a range covers a version unless one of its bounds puts the version cleanly outside.
-//!   `1.0.2` against `1.0.2k`, `r3222` against `0.164` and `1.2.3-1` against `1.2.3` do not
-//!   compare cleanly (a patch or a pre-release, a different scheme), so such a bound does not;
+//! - a CVE is in range when any match that marks the product vulnerable covers the version;
+//! - a range covers a version unless one of its bounds puts the version cleanly outside, and
+//!   is unknown when a bound does not compare cleanly. `1.0.2` against `1.0.2k`, `r3222`
+//!   against `0.164` and `1.2.3-1` against `1.2.3` do not (a patch or a pre-release, a
+//!   different scheme);
 //! - a match that names one version (`openssl:1.1.1:w`, the release `1.1.1w`) covers that
-//!   version, any update of it when the update is `*` (`macos:15:*` covers `15.1`), and an
-//!   installed version that cannot be read as one (a cask's `1.2,345` or `latest`). It does
-//!   not cover another version (`1.1.1` is not `1.1.1w`), or anything when it names a
-//!   snapshot without digits (`ffmpeg:cvs`). An installed version is taken as written: macOS's
-//!   `10.15.7` is not `10.15.7` with `security_update_2020-001`, although `sw_vers` cannot show
-//!   that update; a CVE needing one names an old release anyway;
-//! - a match in a negated node, a record that does not parse, and a record whose matches never
-//!   name the product all keep the CVE.
+//!   version, any update of it when the update is `*` (`macos:15:*` covers `15.1`), and is
+//!   unknown for an installed version that cannot be read as one (a cask's `1.2,345` or
+//!   `latest`). It does not cover another version (`1.1.1` is not `1.1.1w`), or anything when
+//!   it names a snapshot without digits (`ffmpeg:cvs`). An installed version is taken as
+//!   written: macOS's `10.15.7` is not `10.15.7` with `security_update_2020-001`, although
+//!   `sw_vers` cannot show that update; a CVE needing one names an old release anyway;
+//! - a match whose version is `-` (not applicable), a match in a negated node, a record that
+//!   does not parse, and a record whose matches never name the product are all unknown.
 //!
-//! A CVE whose matches name the product only as not vulnerable is dropped: the product is the
-//! platform there (Firefox on macOS). The software that is vulnerable is matched under its own
-//! name only when it is in the inventory (macOS, Homebrew, toolchains, lockfiles), so a CVE
-//! for an app installed some other way (Zoom from its own installer) no longer reaches the
-//! agent through macOS. The user chose this (2026-11-08): those platform matches were 4031 of
-//! the 10304 advisories, nearly all for software not installed. CVEs in CISA's KEV catalog,
-//! and every CVE when the catalog could not be read, skip this filter (`sweep::fetch_nvd`).
+//! A CVE whose matches name the product only as not vulnerable is out of range: the product
+//! is the platform there (Firefox on macOS). The software that is vulnerable is matched under
+//! its own name only when it is in the inventory (macOS, Homebrew, toolchains, lockfiles), so
+//! a CVE for an app installed some other way (Zoom from its own installer) no longer reaches
+//! the agent through macOS. The user chose this (2026-11-08): those platform matches were
+//! 4031 of the 10304 advisories, nearly all for software not installed. CVEs in CISA's KEV
+//! catalog, and every CVE when the catalog could not be read, are kept whatever the verdict
+//! (`matching::keep_candidates`).
 //!
 //! Matches inside an AND configuration are judged one by one, so a CVE that needs a
-//! vulnerable product on a particular platform is kept whatever the platform. The agent reads
-//! the structure from the bundle.
+//! vulnerable product on a particular platform is a candidate whatever the platform; its
+//! reason says the platform is the agent's to judge from the bundle.
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -40,51 +42,79 @@ use serde::Deserialize;
 use serde_json::value::RawValue;
 
 use crate::feeds::Product;
+use crate::matching::Match;
 
-/// The CPE matches of one NVD CVE record, read once and tested against each installed version.
+/// The CPE matches of one NVD CVE record, read once and judged against each installed version.
 #[derive(Debug)]
 pub(crate) struct Matches {
-    /// The configuration nodes, or `None` when the record did not parse: then the CVE may
-    /// affect every version.
-    nodes: Option<Vec<Node>>,
+    /// The configurations, or `None` when the record did not parse: then the CVE may affect
+    /// every version.
+    configurations: Option<Vec<Configuration>>,
 }
 
 impl Matches {
     /// Reads the matches.
     pub(crate) fn parse(record: &RawValue) -> Self {
-        let nodes = serde_json::from_str::<Record>(record.get())
+        let configurations = serde_json::from_str::<Record>(record.get())
             .ok()
-            .map(|r| r.configurations.into_iter().flat_map(|c| c.nodes).collect());
-        Self { nodes }
+            .map(|r| r.configurations);
+        Self { configurations }
     }
 
-    /// Returns whether the CVE may affect `product` installed at `version`.
-    pub(crate) fn may_affect(&self, product: &Product, version: &str) -> bool {
-        let Some(nodes) = &self.nodes else {
-            return true;
+    /// Judges `product` installed at `version`.
+    pub(crate) fn verdict(&self, product: &Product, version: &str) -> Match {
+        let Some(configurations) = &self.configurations else {
+            return Match::Unknown("the record does not parse as an NVD CVE".to_owned());
         };
         let mut named = false;
-        for node in nodes {
-            for cpe in &node.cpe_match {
-                let Some(name) = Cpe::parse(&cpe.criteria) else {
-                    // A name that cannot be read could be the product.
-                    return true;
-                };
-                if !product.is_named_by(&unescape(name.vendor), &unescape(name.product)) {
-                    continue;
-                }
-                named = true;
-                // A negated node matches the versions outside its range; judging that needs
-                // the whole configuration, so the agent does.
-                if node.negate {
-                    return true;
-                }
-                if cpe.vulnerable && cpe.covers(&name, version) != Some(false) {
-                    return true;
+        let mut verdicts = Vec::new();
+        for configuration in configurations {
+            let platform = configuration.needs_more_than_one();
+            for node in &configuration.nodes {
+                for cpe in &node.cpe_match {
+                    let Some(name) = Cpe::parse(&cpe.criteria) else {
+                        // A name that cannot be read could be the product.
+                        verdicts.push(Match::Unknown("a CPE match does not parse".to_owned()));
+                        continue;
+                    };
+                    if !product.is_named_by(&unescape(name.vendor), &unescape(name.product)) {
+                        continue;
+                    }
+                    named = true;
+                    // A negated node matches the versions outside its range; judging that
+                    // needs the whole configuration, so the agent does.
+                    if node.negate {
+                        verdicts.push(Match::Unknown("a negated node names it".to_owned()));
+                    } else if cpe.vulnerable {
+                        let verdict = cpe.covers(&name, version);
+                        verdicts.push(if platform {
+                            on_platform(verdict)
+                        } else {
+                            verdict
+                        });
+                    }
                 }
             }
         }
-        !named
+        if !named {
+            return Match::Unknown(format!("no CPE match names {product}"));
+        }
+        Match::any(verdicts).unwrap_or_else(|| {
+            Match::OutOfRange(format!(
+                "names {product} only as not vulnerable: the platform of other software"
+            ))
+        })
+    }
+}
+
+/// Adds to a candidate's reason that its configuration needs another CPE too (usually the
+/// platform), which only the agent can judge.
+fn on_platform(verdict: Match) -> Match {
+    const NOTE: &str = "; its configuration ANDs other CPEs (a platform): judge them";
+    match verdict {
+        Match::InRange(why) => Match::InRange(format!("{why}{NOTE}")),
+        Match::Unknown(why) => Match::Unknown(format!("{why}{NOTE}")),
+        out @ Match::OutOfRange(_) => out,
     }
 }
 
@@ -97,12 +127,27 @@ struct Record {
 
 #[derive(Debug, Deserialize)]
 struct Configuration {
+    operator: Option<String>,
     #[serde(default)]
     nodes: Vec<Node>,
 }
 
+impl Configuration {
+    /// Whether a match here holds only together with another: the configuration or one of its
+    /// nodes ANDs several.
+    fn needs_more_than_one(&self) -> bool {
+        let and = |operator: &Option<String>| operator.as_deref() == Some("AND");
+        (and(&self.operator) && self.nodes.len() > 1)
+            || self
+                .nodes
+                .iter()
+                .any(|n| and(&n.operator) && n.cpe_match.len() > 1)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct Node {
+    operator: Option<String>,
     #[serde(default)]
     negate: bool,
     #[serde(default, rename = "cpeMatch")]
@@ -110,7 +155,7 @@ struct Node {
 }
 
 /// One CPE match. `vulnerable` is required, as in NVD's schema: a match without it is not
-/// read as a platform, the record fails to parse and the CVE is kept.
+/// read as a platform, the record fails to parse and the CVE is unknown.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CpeMatch {
@@ -122,45 +167,113 @@ struct CpeMatch {
     version_end_excluding: Option<String>,
 }
 
+/// How an installed version must relate to a range bound to be inside the range.
+#[derive(Debug, Clone, Copy)]
+enum Relation {
+    AtLeast,
+    Above,
+    AtMost,
+    Below,
+}
+
+impl Relation {
+    /// Whether the installed version, ordered `order` against the bound, is inside.
+    fn holds(self, order: Ordering) -> bool {
+        match self {
+            Self::AtLeast => order.is_ge(),
+            Self::Above => order.is_gt(),
+            Self::AtMost => order.is_le(),
+            Self::Below => order.is_lt(),
+        }
+    }
+
+    /// The symbol written when the relation holds, and when it does not.
+    fn symbols(self) -> (&'static str, &'static str) {
+        match self {
+            Self::AtLeast => (">=", "<"),
+            Self::Above => (">", "<="),
+            Self::AtMost => ("<=", ">"),
+            Self::Below => ("<", ">="),
+        }
+    }
+}
+
 impl CpeMatch {
-    /// Whether this match covers `installed`, or `None` when that cannot be told.
-    fn covers(&self, name: &Cpe<'_>, installed: &str) -> Option<bool> {
+    /// Whether this match covers `installed`.
+    fn covers(&self, name: &Cpe<'_>, installed: &str) -> Match {
         let version = unescape(name.version);
         let update = unescape(name.update);
         let any_update = matches!(&*update, "*" | "");
-        if !matches!(&*version, "*" | "-") {
+        if version == "-" {
+            return Match::Unknown("the match's version is - (not applicable)".to_owned());
+        }
+        if version != "*" {
             let named = if any_update || update == "-" {
                 version.into_owned()
             } else {
                 format!("{version}{update}")
             };
-            return covers_named(&named, any_update, installed);
+            return match covers_named(&named, any_update, installed) {
+                Some(true) => Match::InRange(format!("the match names {named}")),
+                Some(false) => Match::OutOfRange(format!("{installed} is not {named}")),
+                None => Match::Unknown(format!("cannot tell {installed} from {named}")),
+            };
         }
         // An update of every version (`*:beta`) is not a range this can test.
         if !any_update && update != "-" {
-            return None;
+            return Match::Unknown(format!("the match names update {update} of every version"));
         }
-        // Whether each bound given puts `installed` outside, or `None` where it does not
-        // compare. One bound that excludes it is enough, whatever the others say.
-        let check = |bound: &Option<String>, is_outside: fn(Ordering) -> bool| {
-            bound
-                .as_deref()
-                .map(|b| compare(installed, b).map(is_outside))
-        };
-        let verdicts = [
-            check(&self.version_start_including, Ordering::is_lt),
-            check(&self.version_start_excluding, Ordering::is_le),
-            check(&self.version_end_including, Ordering::is_gt),
-            check(&self.version_end_excluding, Ordering::is_ge),
+        let bounds = [
+            (
+                "versionStartIncluding",
+                &self.version_start_including,
+                Relation::AtLeast,
+            ),
+            (
+                "versionStartExcluding",
+                &self.version_start_excluding,
+                Relation::Above,
+            ),
+            (
+                "versionEndIncluding",
+                &self.version_end_including,
+                Relation::AtMost,
+            ),
+            (
+                "versionEndExcluding",
+                &self.version_end_excluding,
+                Relation::Below,
+            ),
         ];
-        let mut given = verdicts.iter().flatten();
-        if given.clone().any(|o| *o == Some(true)) {
-            return Some(false);
+        // One bound that excludes the version is enough, whatever the others say.
+        let mut inside = Vec::new();
+        let mut unclear = None;
+        for (key, bound, relation) in bounds {
+            let Some(bound) = bound else {
+                continue;
+            };
+            let (holds, fails) = relation.symbols();
+            match compare(installed, bound) {
+                Some(order) if !relation.holds(order) => {
+                    return Match::OutOfRange(format!("{installed} {fails} {key} {bound}"));
+                }
+                Some(_) => inside.push(format!("{installed} {holds} {key} {bound}")),
+                None => {
+                    unclear = unclear.or_else(|| {
+                        Some(format!("{installed} does not compare with {key} {bound}"))
+                    });
+                }
+            }
         }
-        given.all(Option::is_some).then_some(true)
+        match unclear {
+            Some(why) => Match::Unknown(why),
+            None if inside.is_empty() => {
+                Match::InRange("every version (* without bounds)".to_owned())
+            }
+            None => Match::InRange(inside.join(" and ")),
+        }
     }
 }
-
 /// Whether a match naming the version `named` covers `installed`: the same version, any update
 /// of it when `any_update`, and `None` when `installed` cannot be read as a version. A name
 /// without digits (`cvs`, `nightly`) is a snapshot, never a release that is installed.
@@ -371,6 +484,13 @@ mod tests {
     use proptest::prelude::*;
     use serde_json::Value;
     use serde_json::json;
+
+    impl Matches {
+        /// Whether the CVE stays a candidate for a component whose advisory is not in KEV.
+        fn may_affect(&self, product: &Product, version: &str) -> bool {
+            !matches!(self.verdict(product, version), Match::OutOfRange(_))
+        }
+    }
 
     fn nodes(nodes: &Value) -> Matches {
         let record = json!({"id": "CVE-1", "configurations": [{"nodes": nodes}]});
@@ -597,6 +717,117 @@ mod tests {
         ]));
         assert!(on_windows.may_affect(&product("openssl"), "3.6.4"));
         assert!(!on_windows.may_affect(&product("openssl"), "3.7.0"));
+    }
+
+    #[test]
+    fn verdicts_say_why() {
+        let openssl = product("openssl");
+        let bounded = record(&[json!({
+            "vulnerable": true,
+            "criteria": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*",
+            "versionStartIncluding": "3.6.0",
+            "versionEndExcluding": "3.6.5",
+        })]);
+        assert_eq!(
+            bounded.verdict(&openssl, "3.6.4"),
+            Match::InRange(
+                "3.6.4 >= versionStartIncluding 3.6.0 and 3.6.4 < versionEndExcluding 3.6.5"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            bounded.verdict(&openssl, "3.6.5"),
+            Match::OutOfRange("3.6.5 >= versionEndExcluding 3.6.5".to_owned())
+        );
+        assert_eq!(
+            bounded.verdict(&openssl, "3.6.5-1"),
+            Match::Unknown("3.6.5-1 does not compare with versionEndExcluding 3.6.5".to_owned())
+        );
+        let excluding = record(&[json!({
+            "vulnerable": true,
+            "criteria": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*",
+            "versionStartExcluding": "1.0",
+            "versionEndIncluding": "1.1",
+        })]);
+        assert_eq!(
+            excluding.verdict(&openssl, "1.0"),
+            Match::OutOfRange("1.0 <= versionStartExcluding 1.0".to_owned())
+        );
+        assert_eq!(
+            excluding.verdict(&openssl, "1.2"),
+            Match::OutOfRange("1.2 > versionEndIncluding 1.1".to_owned())
+        );
+        assert_eq!(
+            record(&[vulnerable("cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*")])
+                .verdict(&openssl, "3.6.4"),
+            Match::InRange("every version (* without bounds)".to_owned())
+        );
+        assert_eq!(
+            named("8.1.2").verdict(&product("ffmpeg"), "8.1.3"),
+            Match::OutOfRange("8.1.3 is not 8.1.2".to_owned())
+        );
+        assert_eq!(
+            record(&[]).verdict(&openssl, "3.6.4"),
+            Match::Unknown("no CPE match names openssl".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_version_of_dash_is_unknown() {
+        let na = record(&[json!({
+            "vulnerable": true,
+            "criteria": "cpe:2.3:a:openssl:openssl:-:*:*:*:*:*:*:*",
+            "versionEndExcluding": "1.0",
+        })]);
+        assert_eq!(
+            na.verdict(&product("openssl"), "3.6.4"),
+            Match::Unknown("the match's version is - (not applicable)".to_owned()),
+            "not ruled out by its bound"
+        );
+    }
+
+    #[test]
+    fn an_and_configuration_leaves_the_platform_to_the_agent() {
+        let record = json!({"id": "CVE-1", "configurations": [{"operator": "AND", "nodes": [
+            {"operator": "OR", "cpeMatch": [{
+                "vulnerable": true,
+                "criteria": "cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*",
+                "versionEndExcluding": "3.7.0",
+            }]},
+            {"operator": "OR", "cpeMatch": [
+                {"vulnerable": false, "criteria": "cpe:2.3:o:microsoft:windows:-:*:*:*:*:*:*:*"}
+            ]},
+        ]}]});
+        let matches = Matches::parse(&RawValue::from_string(record.to_string()).unwrap());
+        assert_eq!(
+            matches.verdict(&product("openssl"), "3.6.4"),
+            Match::InRange(
+                "3.6.4 < versionEndExcluding 3.7.0; its configuration ANDs other CPEs (a \
+                 platform): judge them"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            matches.verdict(&product("openssl"), "3.7.0"),
+            Match::OutOfRange("3.7.0 >= versionEndExcluding 3.7.0".to_owned())
+        );
+        assert_eq!(
+            matches.verdict(&product("microsoft:windows"), "11"),
+            Match::OutOfRange(
+                "names microsoft:windows only as not vulnerable: the platform of other software"
+                    .to_owned()
+            )
+        );
+
+        let one_node = json!({"id": "CVE-2", "configurations": [{"nodes": [
+            {"operator": "AND", "cpeMatch": [
+                vulnerable("cpe:2.3:a:openssl:openssl:*:*:*:*:*:*:*:*"),
+                {"vulnerable": false, "criteria": "cpe:2.3:o:apple:macos:-:*:*:*:*:*:*:*"},
+            ]},
+        ]}]});
+        let matches = Matches::parse(&RawValue::from_string(one_node.to_string()).unwrap());
+        let verdict = matches.verdict(&product("openssl"), "3.6.4");
+        assert!(verdict.why().ends_with("judge them"), "{verdict:?}");
     }
 
     #[test]
