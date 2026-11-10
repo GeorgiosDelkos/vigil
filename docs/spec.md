@@ -195,12 +195,11 @@ Known gaps, accepted for now:
   (`inventory/homebrew.rs`, decided 2026-11-10). An entry is added only when the product is in
   NVD's CPE dictionary and its CVEs show it is the same software; one formula can map to
   several products where NVD files its CVEs under more than one name (`curl` and `libcurl`,
-  `jpeg-xl` and `libjxl`). Names with no such product stay unchecked and reported, as the
-  2026-11-10 sweep found for `actionlint`, `fftw`, `gitleaks`, `libassuan`, `npth`, `pinentry`,
-  `libsm`, `libxau`, `libxaw`, `libxmu`, `xorgproto` and others. Some are left out on purpose
-  although a near name exists: `ggml` (NVD has only `llama.cpp`, numbered by build), `libomp`
-  (only Intel's `openmp`), `gpgmepp` (the C++ binding, not `gpgme`), `sdl2-compat` (its
-  `2.32.x` would fall in SDL 2's ranges) and `python-tk` (`tkinter`, filed under `python`).
+  `jpeg-xl` and `libjxl`). Names with no such product are looked up as they are, and step 4
+  reports the ones NVD does not know, as the 2026-11-10 sweep found for `actionlint`, `fftw`,
+  `gitleaks`, `libassuan`, `npth`, `pinentry`, `libsm`, `libxau`, `libxaw`, `libxmu`,
+  `xorgproto` and others; those are not checked. The names left out on purpose although a near
+  NVD name exists (`ggml`, `libomp`, `sdl2-compat`, ...) are listed, with why, on the table.
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the login shell's `PATH` (`$SHELL -lc`), as the agent adapters do.
 

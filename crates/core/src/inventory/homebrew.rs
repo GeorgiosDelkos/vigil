@@ -66,7 +66,7 @@ const FORMULA_ALIASES: &[(&str, &[&str])] = &[
     // CVE-2024-28182, in the nghttp2 library.
     ("libnghttp2", &["nghttp2"]),
     // libpq ships with PostgreSQL and its CVEs (CVE-2021-23222, CVE-2024-10977) are filed
-    // under `postgresql`.
+    // under `postgresql`, so the server's CVEs come along too; the agent rules those out.
     ("libpq", &["postgresql"]),
     ("little-cms2", &["little_cms"]),
     // `mbed:mbedtls` is in the dictionary with no CVEs; Mbed TLS's 73 are under `mbed_tls`,
@@ -329,7 +329,15 @@ mod tests {
                 assert!(pair[0].0 < pair[1].0, "{} before {}", pair[0].0, pair[1].0);
             }
             for (brew, nvd) in aliases {
+                assert!(
+                    !brew.contains('@'),
+                    "{brew}: products drops @version before the search, so this key never matches"
+                );
                 assert!(!nvd.is_empty(), "{brew} has no product");
+                assert!(
+                    nvd.windows(2).all(|p| p[0] < p[1]),
+                    "{brew}: products sorted and unique, so none is added twice"
+                );
                 for product in *nvd {
                     assert!(product.parse::<Product>().is_ok(), "{brew}: {product}");
                 }
