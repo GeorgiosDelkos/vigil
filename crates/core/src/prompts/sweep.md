@@ -21,17 +21,17 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 
 ## Version matches
 
-There is no shell for this: you cannot run scripts or programs (no Python, no `jq`), and you
-need none. Do not write a matcher. Vigil has already compared every installed version with
-every advisory's affected versions, in each ecosystem's own version ordering (SemVer for
-crates.io and npm, PEP 440 for PyPI, NVD's CPE ranges), and left out the advisories that
-cannot affect any component. What is left are candidates, and each `components` entry says
-where its version fell:
+You cannot run scripts or programs (no Python, no `jq`), and you need none: at most the few
+listing commands named below. Do not write a matcher. Vigil has already compared every
+installed version with every advisory's affected versions (SemVer for crates.io, npm, Go and
+GitHub Actions, PEP 440 for PyPI, plain dotted numbers for RubyGems, NVD's CPE ranges), and
+left out the advisories that cannot affect any component. What is left are candidates, and
+each `components` entry says where its version fell:
 
 - `in_range`: the version is inside an affected range or listed as affected; `why` names the
   range. Confirm it against the record, then judge whether the advisory applies.
 - `unknown`: Vigil could not place the version with certainty (a version or bound it cannot
-  read, a GIT range, a CPE match without a version); `why` says what. Read the record and
+  read, a GIT range, a CPE match whose version is `-`); `why` says what. Read the record and
   decide yourself.
 - `out_of_range`: only on advisories in CISA KEV (on every advisory when the catalog could
   not be read). Vigil keeps those even when the version is outside, so that a wrong range

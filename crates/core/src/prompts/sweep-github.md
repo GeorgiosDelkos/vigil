@@ -40,8 +40,8 @@ and need none.
 
 There is no shell for this: you cannot run scripts or programs (no Python, no `jq`), and you
 need none. Do not write a matcher. Vigil has already compared every dependency's version with
-every advisory's affected versions, in each ecosystem's own version ordering (SemVer for
-crates.io and npm, PEP 440 for PyPI), and left out the advisories that cannot affect any
+every advisory's affected versions (SemVer for crates.io, npm, Go and GitHub Actions, PEP 440
+for PyPI, plain dotted numbers for RubyGems), and left out the advisories that cannot affect any
 dependency. What is left are candidates, and each `components` entry says where its version
 fell:
 

@@ -432,9 +432,9 @@ The rule is conservative: anything not read with certainty is `unknown`, never
   over the `affected` entries for the component's ecosystem and name (PyPI names normalized,
   crates.io `-` and `_` alike): `SEMVER` and `ECOSYSTEM` ranges with `introduced` (`0` before
   every version), `fixed`, `last_affected` and `limit`, plus the explicit `versions` list.
-  Versions compare as SemVer 2.0 for crates.io, npm and every `SEMVER` range (a Go version
-  loses its `v`), as PEP 440 for PyPI, and in other ecosystems only when both sides are
-  plain dotted numbers. `GIT` ranges, unreadable versions or bounds (a manifest range such
+  Versions compare as SemVer 2.0 for crates.io, npm, Go (a Go version loses its `v`),
+  GitHub Actions and every `SEMVER` range, as PEP 440 for PyPI, and for RubyGems only when
+  both sides are plain dotted numbers. `GIT` ranges, unreadable versions or bounds (a manifest range such
   as `^1.2.0`), two events at one version, a range without `introduced`, and a record whose
   entries never name the component are `unknown`. OS packages are queried by version, so
   OSV's answer is `in_range`.
