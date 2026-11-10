@@ -70,11 +70,14 @@ export type Finding = {
 };
 
 /** One item of the list: an installed component with its open findings, or an issue. The
- * lead's name, version, place and fix are the item's, and Fix runs the lead's key. */
+ * lead's version, place and fix are the item's, and Fix runs the lead's key. */
 export type Listed = {
   /** Its id in the list; it stays while findings in it are dismissed. */
   readonly id: string;
   readonly target: string;
+  /** The component's name (a Homebrew formula's own, which can hold several products), or the
+   * issue's subject. */
+  readonly name: string;
   readonly lead: Finding;
   /** The other findings in the same component, ranked; empty for an issue. */
   readonly others: readonly Finding[];

@@ -168,7 +168,7 @@ function Urgent(props: { item: Listed; onOpen: () => void }) {
       <span class="glow" style={{ "--c": neon(f()) }} />
       <span>
         <b>
-          {f().lead.name}
+          {f().name}
           <Show when={f().lead.version}>{(v) => ` ${v()}`}</Show>
         </b>
         <small>

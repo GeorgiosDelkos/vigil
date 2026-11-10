@@ -92,6 +92,7 @@ export function component(
   return {
     id,
     target: "This Mac",
+    name: lead.name,
     lead,
     others,
     severity: lead.severity,
@@ -101,7 +102,7 @@ export function component(
     new: lead.new,
     advisory_count: grouped ? `${findings.length} advisories` : null,
     fix_scope: grouped
-      ? `This fix is for the component, ${lead.name} ${lead.version ?? ""}, which all ${findings.length} advisories are in; the next sweep checks each of them again.`
+      ? `This fix is for the component, ${changes.name ?? lead.name} ${lead.version ?? ""}, which all ${findings.length} advisories are in; the next sweep checks each of them again.`
       : null,
     ...changes,
   };

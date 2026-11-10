@@ -405,7 +405,7 @@ function Rows(props: {
               <Glyph severity={item.severity} />
               <span class="what">
                 <span class="t">
-                  {item.lead.name}
+                  {item.name}
                   <Show when={item.lead.version}>{(v) => <span class="ver">{v()}</span>}</Show>
                 </span>
                 <Show when={about(item) !== "" || tagged(item)}>
@@ -563,7 +563,7 @@ function Detail(props: {
           <Glyph severity={props.item.severity} />
           <div class="dtitle">
             <h2>
-              {lead().name}
+              {props.item.name}
               <Show when={lead().version}>{(v) => <span class="ver"> {v()}</span>}</Show>
             </h2>
             <Show when={about(props.item)}>{(text) => <span class="id">{text()}</span>}</Show>

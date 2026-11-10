@@ -549,6 +549,20 @@ describe("a component", () => {
     expect(names()).toEqual(["ffmpeg", "default_branch_protection"]);
   });
 
+  it("goes by the name Rust gives it, a formula's over its product's", async () => {
+    const curl = component("c-curl", [
+      advisory("l", { name: "libcurl", version: "8.11.0" }),
+      advisory("c", { name: "curl", version: "8.11.0" }),
+    ]);
+    shown = { ...grouped({ ...curl, name: "curl" }) };
+    answer();
+    await openList();
+    expect(await screen.findByText("curl")).toBeTruthy();
+    expect(screen.queryByText("libcurl")).toBeNull();
+    fireEvent.click(screen.getByText("curl"));
+    expect((await screen.findByRole("heading")).textContent).toBe("curl 8.11.0");
+  });
+
   it("is what the main view counts and names first", async () => {
     shown = grouped();
     answer();
