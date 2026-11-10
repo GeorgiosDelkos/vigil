@@ -86,7 +86,8 @@ fn collects_every_source() {
     sandbox.tool("uv", r"printf 'ruff v0.6.9\n- ruff\n'");
     // `pipx` is deliberately missing: a tool that is not installed is listed, not an error.
     // Homebrew has the `python3` on PATH's version (after its `_1` revision is dropped), which
-    // is then listed once, as the formula's. nvm has the `node` on PATH's version, which is then listed once, as nvm's, and another.
+    // is then listed once, as the formula's. nvm has the `node` on PATH's version, which is
+    // then listed once, as nvm's, and another.
     for version in ["v22.1.0", "v20.0.0"] {
         fs::create_dir_all(sandbox.path().join(".nvm/versions/node").join(version)).unwrap();
     }

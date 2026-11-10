@@ -142,9 +142,9 @@ rest still count. A tool that is not installed is skipped, not an error.
 | Homebrew formulae and casks, dependencies included | `brew info --json=v2 --installed` | NVD product: name without `@version`, through a small alias table checked against NVD (`node` -> `node.js`, `gh` -> `github:cli`); a name that is not a valid product is reported |
 | Rust toolchains | `rustup toolchain list`, `rustup run <toolchain> rustc --version` | NVD product `rust` |
 | Cargo-installed binaries | `cargo install --list` | OSV `crates.io` |
-| Node.js | `node --version` | NVD product `node.js`; left out when another component has its version (below) |
+| Node.js | `node --version` | NVD product `node.js`; left out when another component has the same product and version (below) |
 | Global npm packages | `npm ls -g --json --depth=0` | OSV `npm` |
-| Python | `python3 --version` | NVD product `python`; left out when another component has its version (below) |
+| Python | `python3 --version` | NVD product `python`; left out when another component has the same product and version (below) |
 | Node.js and Python versions kept by version managers | the version folders: nvm `versions/node/v*` under `$NVM_DIR`, else under both `$XDG_CONFIG_HOME/nvm` and `~/.nvm`, fnm `node-versions/v*` under `$FNM_DIR`, else under each of `$XDG_DATA_HOME/fnm` (`~/.local/share/fnm`), `~/.fnm`, `~/Library/Application Support/fnm`, Volta `$VOLTA_HOME/tools/image/node/*` (`~/.volta`), asdf `$ASDF_DATA_DIR/installs/{nodejs,python}/*` (`~/.asdf`), pyenv `$PYENV_ROOT/versions/*` (`~/.pyenv`) | NVD product `node.js` or `python` |
 | uv and pipx tools | `uv tool list`, `pipx list --json` | OSV `PyPI` |
 | Project lockfiles under `mac.project_dirs` | `Cargo.lock`, `package-lock.json` and `npm-shrinkwrap.json` (v2/v3), `uv.lock`, `poetry.lock` | OSV by ecosystem |
@@ -180,10 +180,14 @@ when any other component, in practice a version manager's version or a Homebrew 
 names the tool that removes or upgrades it, and its key does not change with `PATH`. The
 accepted downside: a separate install at the same version (the nodejs.org installer's
 `/usr/local/bin/node` next to Homebrew's `node`) is reported only after the other copy is gone
-or upgraded. The `PATH` finding's key (`node`, `python`) goes away once: its advisories stay
-reported under the other entry's key, so a dismissal made of the `PATH` finding before this
-change no longer matches, and the finding is shown again under that key unless it was
-dismissed there too.
+or upgraded. The `PATH` finding's key (`node`, `python`) goes away once; its advisories stay
+reported under the other entry's key. A dismissal made only of the `PATH` finding does not
+carry over. For a Homebrew formula nothing reappears, since the formula's finding was already
+reported next to the `PATH` one; a version manager's finding, new with that reader, is shown
+even if the `PATH` one was dismissed. The reverse is accepted too: when only the formula's copy
+was dismissed, the advisory leaves the report and the `PATH` key is listed as resolved on the
+first sweep after this change, since both were the same install and the dismissal stands for
+it. Keeping the `PATH` key open would mean merging keys between inventory and dismissals.
 
 Known gaps, accepted for now:
 

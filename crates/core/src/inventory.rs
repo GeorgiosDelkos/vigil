@@ -27,7 +27,8 @@ use crate::package::Package;
 #[derive(Debug, Default)]
 pub struct Inventory {
     /// Installed components, in collection order. The same component appears once per place it
-    /// was found.
+    /// was found, except the `node` or `python3` on `PATH`, which is left out when another place
+    /// has the same product and version.
     pub components: Vec<Component>,
     /// Sources or files that could not be read, names that cannot be looked up, and notes on
     /// sources that were still read (see [`InventoryError::is_failure`]).
@@ -99,10 +100,10 @@ impl Inventory {
 }
 
 /// Drops the `node` or `python3` on `PATH` when any other component (in practice a version
-/// manager's or a Homebrew formula's) has the same product at the same version. It is most likely that
-/// install, reached through the manager's shim or Homebrew's `bin` folder on `PATH`. The other
-/// entry is the one kept: it names the tool that removes or upgrades the version, and its
-/// finding key does not change with the `PATH` Vigil started with.
+/// manager's or a Homebrew formula's) has the same product at the same version. The `PATH` one
+/// is most likely that install, reached through the manager's shim or Homebrew's `bin` folder
+/// on `PATH`. The other entry is the one kept: it names the tool that removes or upgrades the
+/// version, and its finding key does not change with the `PATH` Vigil started with.
 ///
 /// The accepted downside: a separate install at the same version (the nodejs.org installer's
 /// `/usr/local/bin/node` next to Homebrew's `node` at that version) is reported only once the
