@@ -139,12 +139,12 @@ rest still count. A tool that is not installed is skipped, not an error.
 | Source | Command or file | Looked up as |
 |---|---|---|
 | macOS | `sw_vers -productVersion` | NVD product `apple:macos` |
-| Homebrew formulae and casks, dependencies included | `brew info --json=v2 --installed` | NVD product: name without `@version`, through a small alias table checked against NVD (`node` -> `node.js`, `gh` -> `github:cli`); a name that is not a valid product is reported |
+| Homebrew formulae and casks, dependencies included | `brew info --json=v2 --installed` | NVD products: name without `@version`, through a small alias table checked against NVD (`node` -> `node.js`, `gh` -> `github:cli`, `webp` -> `libwebp`, `curl` -> `curl` and `libcurl`); a name that is not a valid product is reported |
 | Rust toolchains | `rustup toolchain list`, `rustup run <toolchain> rustc --version` | NVD product `rust` |
 | Cargo-installed binaries | `cargo install --list` | OSV `crates.io` |
-| Node.js | `node --version` | NVD product `node.js` |
+| Node.js | `node --version` | NVD product `node.js`; left out when another component has the same product and version (below) |
 | Global npm packages | `npm ls -g --json --depth=0` | OSV `npm` |
-| Python | `python3 --version` | NVD product `python` |
+| Python | `python3 --version` | NVD product `python`; left out when another component has the same product and version (below) |
 | Node.js and Python versions kept by version managers | the version folders: nvm `versions/node/v*` under `$NVM_DIR`, else under both `$XDG_CONFIG_HOME/nvm` and `~/.nvm`, fnm `node-versions/v*` under `$FNM_DIR`, else under each of `$XDG_DATA_HOME/fnm` (`~/.local/share/fnm`), `~/.fnm`, `~/Library/Application Support/fnm`, Volta `$VOLTA_HOME/tools/image/node/*` (`~/.volta`), asdf `$ASDF_DATA_DIR/installs/{nodejs,python}/*` (`~/.asdf`), pyenv `$PYENV_ROOT/versions/*` (`~/.pyenv`) | NVD product `node.js` or `python` |
 | uv and pipx tools | `uv tool list`, `pipx list --json` | OSV `PyPI` |
 | Project lockfiles under `mac.project_dirs` | `Cargo.lock`, `package-lock.json` and `npm-shrinkwrap.json` (v2/v3), `uv.lock`, `poetry.lock` | OSV by ecosystem |
@@ -168,16 +168,26 @@ versions; pyenv's free-threaded `3.13.1t` is read as `3.13.1`. Symlinks (pyenv-v
 virtualenvs), fnm's `.downloads`, asdf's `ref-` builds, pyenv's `-dev` builds and its other
 distributions (`pypy3.10-7.3.15`, `anaconda3-2024.06`) are skipped. Each version is found in `version_manager` with the manager and the folder, shown
 as "nvm /Users/me/.nvm/versions/node/v22.22.2"; the folder is in the finding key, so two
-versions are two findings and removing one keeps the other's key. When the `node` or `python3`
-on `PATH` has the same product and version as a manager's entry it is reported once, as the
-manager's: that names the tool that removes it, and its key does not change with `PATH`. A
-separate install at the same version is then reported only after the manager's copy is gone.
-Such a `PATH` finding's key changes once, from `node` to the manager's folder, so a dismissal
-of it made before this change no longer matches and the finding is shown again.
-The sweep's fix for such a version removes it with the manager (`nvm uninstall 22.22.2`,
-after sourcing `nvm.sh`; Volta has no command for it, so its folder goes to the Trash), installing a fixed version
-first if none is installed and moving the default off it; switching the default alone is not
-a fix.
+versions are two findings and removing one keeps the other's key. The sweep's fix for such a
+version removes it with the manager (`nvm uninstall 22.22.2`, after sourcing `nvm.sh`; Volta
+has no command for it, so its folder goes to the Trash), installing a fixed version first if
+none is installed and moving the default off it; switching the default alone is not a fix.
+
+The `node` and `python3` on `PATH` (decided 2026-11-10, extended to Homebrew the same day):
+when any other component, in practice a version manager's version or a Homebrew formula
+(`python@3.14` 3.14.6 next to a `python3` 3.14.6), has the same product and version, the
+`PATH` one is most likely that install and is reported once, as the other entry. That entry
+names the tool that removes or upgrades it, and its key does not change with `PATH`. The
+accepted downside: a separate install at the same version (the nodejs.org installer's
+`/usr/local/bin/node` next to Homebrew's `node`) is reported only after the other copy is gone
+or upgraded. The `PATH` finding's key (`node`, `python`) goes away once; its advisories stay
+reported under the other entry's key. A dismissal made only of the `PATH` finding does not
+carry over. For a Homebrew formula nothing reappears, since the formula's finding was already
+reported next to the `PATH` one; a version manager's finding, new with that reader, is shown
+even if the `PATH` one was dismissed. The reverse is accepted too: when only the formula's copy
+was dismissed, the advisory leaves the report and the `PATH` key is listed as resolved on the
+first sweep after this change, since both were the same install and the dismissal stands for
+it. Keeping the `PATH` key open would mean merging keys between inventory and dismissals.
 
 Known gaps, accepted for now:
 
@@ -191,6 +201,15 @@ Known gaps, accepted for now:
 - A Homebrew name that is a valid CPE name but the wrong product gets no CVEs and no warning.
   Step 4 checks each product with no CVEs against NVD's CPE dictionary (an unknown answer is
   asked again after 30 days) and reports the ones NVD does not know.
+- Homebrew names are matched to NVD products by name and an alias table
+  (`inventory/homebrew.rs`, decided 2026-11-10). An entry is added only when the product is in
+  NVD's CPE dictionary and its CVEs show it is the same software; one formula can map to
+  several products where NVD files its CVEs under more than one name (`curl` and `libcurl`,
+  `jpeg-xl` and `libjxl`). Names with no such product are looked up as they are, and step 4
+  reports the ones NVD does not know, as the 2026-11-10 sweep found for `actionlint`, `fftw`,
+  `gitleaks`, `libassuan`, `npth`, `pinentry`, `libsm`, `libxau`, `libxaw`, `libxmu`,
+  `xorgproto` and others; those are not checked. The names left out on purpose although a near
+  NVD name exists (`ggml`, `libomp`, `sdl2-compat`, ...) are listed, with why, on the table.
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the login shell's `PATH` (`$SHELL -lc`), as the agent adapters do.
 
