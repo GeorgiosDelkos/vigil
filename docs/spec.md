@@ -139,7 +139,7 @@ rest still count. A tool that is not installed is skipped, not an error.
 | Source | Command or file | Looked up as |
 |---|---|---|
 | macOS | `sw_vers -productVersion` | NVD product `apple:macos` |
-| Homebrew formulae and casks, dependencies included | `brew info --json=v2 --installed` | NVD product: name without `@version`, through a small alias table checked against NVD (`node` -> `node.js`, `gh` -> `github:cli`); a name that is not a valid product is reported |
+| Homebrew formulae and casks, dependencies included | `brew info --json=v2 --installed` | NVD products: name without `@version`, through a small alias table checked against NVD (`node` -> `node.js`, `gh` -> `github:cli`, `webp` -> `libwebp`, `curl` -> `curl` and `libcurl`); a name that is not a valid product is reported |
 | Rust toolchains | `rustup toolchain list`, `rustup run <toolchain> rustc --version` | NVD product `rust` |
 | Cargo-installed binaries | `cargo install --list` | OSV `crates.io` |
 | Node.js | `node --version` | NVD product `node.js` |
@@ -191,6 +191,16 @@ Known gaps, accepted for now:
 - A Homebrew name that is a valid CPE name but the wrong product gets no CVEs and no warning.
   Step 4 checks each product with no CVEs against NVD's CPE dictionary (an unknown answer is
   asked again after 30 days) and reports the ones NVD does not know.
+- Homebrew names are matched to NVD products by name and an alias table
+  (`inventory/homebrew.rs`, decided 2026-11-10). An entry is added only when the product is in
+  NVD's CPE dictionary and its CVEs show it is the same software; one formula can map to
+  several products where NVD files its CVEs under more than one name (`curl` and `libcurl`,
+  `jpeg-xl` and `libjxl`). Names with no such product stay unchecked and reported, as the
+  2026-11-10 sweep found for `actionlint`, `fftw`, `gitleaks`, `libassuan`, `npth`, `pinentry`,
+  `libsm`, `libxau`, `libxaw`, `libxmu`, `xorgproto` and others. Some are left out on purpose
+  although a near name exists: `ggml` (NVD has only `llama.cpp`, numbered by build), `libomp`
+  (only Intel's `openmp`), `gpgmepp` (the C++ binding, not `gpgme`), `sdl2-compat` (its
+  `2.32.x` would fall in SDL 2's ranges) and `python-tk` (`tkinter`, filed under `python`).
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the login shell's `PATH` (`$SHELL -lc`), as the agent adapters do.
 
