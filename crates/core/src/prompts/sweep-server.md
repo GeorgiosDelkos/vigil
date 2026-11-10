@@ -11,10 +11,11 @@ You have no access to the server and need none.
   packages built from that source package (`os_package`), or a lockfile path on the server.
 - `advisories.jsonl`: advisories that name those components, one per line: `id`, `aliases`,
   `summary`, the source's `severity`, what is `affected`, `known_exploited` (CISA KEV), the
-  `components` it was fetched for, and `record`, the path of the full advisory. For OS
-  packages OSV already matched the installed version, so a listed advisory affects it unless
-  its record says the issue is not fixed anywhere and minor, or applies only to a
-  configuration the server does not use.
+  `components` it is a candidate for, and `record`, the path of the full advisory. Each entry
+  of `components` is `{"component": "c23", "match": "in_range", "why": "..."}`: how the
+  installed version was placed (see "Version matches"). For OS packages OSV already matched
+  the installed version, so a listed advisory affects it unless its record says the issue is
+  not fixed anywhere and minor, or applies only to a configuration the server does not use.
 - `records/<source>-<id>.json`: the full advisory. Open it when the index line is not enough.
 - `server/system.json`: the server's `os_release` fields, the `osv_ecosystem` its packages were
   looked up in, and the running `kernel` (`uname -srm`). The kernel packages in the inventory
@@ -30,11 +31,28 @@ You have no access to the server and need none.
   finding; mention in an issue on the file only what is plainly unsupported or end of life.
 - `findings.schema.json`: the exact shape of the file you write.
 
+## Version matches
+
+There is no shell for this: you cannot run scripts or programs (no Python, no `jq`), and you
+need none. Do not write a matcher. OSV matched the OS packages' versions, and Vigil compared
+every lockfile package's version with each advisory's affected versions in its ecosystem's
+own ordering, leaving out the advisories that cannot affect any component. What is left are
+candidates, and each `components` entry says where its version fell:
+
+- `in_range`: the version is inside an affected range, listed as affected, or matched by OSV;
+  `why` says which. Confirm it against the record, then judge whether the advisory applies.
+- `unknown`: Vigil could not place the version with certainty (a version or bound it cannot
+  read, a GIT range); `why` says what. Read the record and decide yourself.
+- `out_of_range`: only on advisories in CISA KEV (on every advisory when the catalog could
+  not be read). Vigil keeps those even when the version is outside, so that a wrong range
+  cannot hide an exploited issue. Check the record; usually the version is not affected.
+
 ## What to do
 
 1. For each advisory, decide whether it affects the installed version of one of its
-   components. Compare the version with the affected ranges, and read the full record when
-   the ranges are missing or unclear.
+   candidate components. A version in range is not yet a finding: judge whether the
+   advisory applies (the right package, a configuration the server uses). Read the full
+   record when the index line is not enough.
 2. Review the server's exposure: services listening on all addresses (`0.0.0.0`, `[::]`) that
    look like they should be local (databases, caches, admin panels, the docker API), container
    images that are old or use a `latest` tag, and a running kernel older than the installed

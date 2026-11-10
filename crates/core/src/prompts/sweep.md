@@ -11,20 +11,43 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   and the version's `path`).
 - `advisories.jsonl`: advisories that name those components, one per line: `id`, `aliases`,
   `summary`, the source's `severity`, what is `affected` (OSV ranges and explicit versions, or
-  NVD configurations), `known_exploited` (CISA KEV), the `components` it was fetched for,
-  and `record`, the path of the full advisory.
+  NVD configurations), `known_exploited` (CISA KEV), the `components` it is a candidate
+  for, and `record`, the path of the full advisory. Each entry of `components` is
+  `{"component": "c23", "match": "in_range", "why": "2.88.1 < versionEndExcluding 2.89.0"}`:
+  how Vigil's own version comparison placed that component (see "Version matches").
 - `records/<source>-<id>.json` (`osv-GHSA-...json`, `nvd-CVE-...json`): the full advisory.
   Open it when the index line is not enough to decide.
 - `findings.schema.json`: the exact shape of the file you write.
 
+## Version matches
+
+There is no shell for this: you cannot run scripts or programs (no Python, no `jq`), and you
+need none. Do not write a matcher. Vigil has already compared every installed version with
+every advisory's affected versions, in each ecosystem's own version ordering (SemVer for
+crates.io and npm, PEP 440 for PyPI, NVD's CPE ranges), and left out the advisories that
+cannot affect any component. What is left are candidates, and each `components` entry says
+where its version fell:
+
+- `in_range`: the version is inside an affected range or listed as affected; `why` names the
+  range. Confirm it against the record, then judge whether the advisory applies.
+- `unknown`: Vigil could not place the version with certainty (a version or bound it cannot
+  read, a GIT range, a CPE match without a version); `why` says what. Read the record and
+  decide yourself.
+- `out_of_range`: only on advisories in CISA KEV (on every advisory when the catalog could
+  not be read). Vigil keeps those even when the version is outside, so that a wrong range
+  cannot hide an exploited issue. Check the record; usually the version is not affected.
+
 ## What to do
 
-For each advisory, decide whether it affects an installed version of one of its components.
-Compare the installed version with the affected ranges, and read the full record when the
-ranges are missing, unclear, or describe a configuration. You may inspect this machine to
-decide (read files, where allowed, run listing commands: `brew info`, `brew list`, `npm ls`,
-`npm view`), but do not change anything: no installs, upgrades, edits or deletions. Fixing
-comes later, and only after the user approves it.
+For each advisory, decide whether it affects an installed version of one of its candidate
+components. A version in range is not yet a finding: judge whether the advisory applies.
+Is the component really the advisory's product (an NVD product name can belong to another
+program)? When `why` says the configuration ANDs other CPEs, is the platform this Mac? Does
+the record limit the issue to a feature, configuration or build that is not in use? Read the
+full record when the index line is not enough. You may read files on this machine; where your
+agent allows them you may also run the listing commands `brew info`, `brew list`, `npm ls` and
+`npm view`, and nothing else. Do not change anything: no installs, upgrades, edits or
+deletions. Fixing comes later, and only after the user approves it.
 
 Write `findings.json` in this folder, following `findings.schema.json`:
 
