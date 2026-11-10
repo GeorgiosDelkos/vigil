@@ -66,14 +66,20 @@ fn layouts(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<Layout> {
         dir,
         product,
     };
-    // nvm: `$NVM_DIR`, which install.sh sets to `$XDG_CONFIG_HOME/nvm` or `~/.nvm`; versions
-    // from Node 0.12 on are in `versions/node/v<version>`. Older ones (in `$NVM_DIR` itself)
-    // and io.js are not read.
+    // nvm: `$NVM_DIR`, which install.sh sets to `$XDG_CONFIG_HOME/nvm` or `~/.nvm` and writes
+    // into the shell profile; versions from Node 0.12 on are in `versions/node/v<version>`.
+    // Older ones (in `$NVM_DIR` itself) and io.js are not read. Without `NVM_DIR` (an app
+    // started at login does not read `.zshrc`) both defaults are read: the variable that picked
+    // one at install time may be unset too, and a missing folder gives nothing.
     // https://github.com/nvm-sh/nvm/blob/4e8758a801eea9479b32a904f31093e410ddaba4/install.sh#L35-L45
     // https://github.com/nvm-sh/nvm/blob/4e8758a801eea9479b32a904f31093e410ddaba4/nvm.sh#L1132-L1170
-    let nvm = env("NVM_DIR")
-        .or_else(|| env("XDG_CONFIG_HOME").map(|d| d.join("nvm")))
-        .unwrap_or_else(|| home.join(".nvm"));
+    let nvm = env("NVM_DIR").map_or_else(
+        || {
+            let xdg = env("XDG_CONFIG_HOME").map(|d| d.join("nvm"));
+            xdg.into_iter().chain([home.join(".nvm")]).collect()
+        },
+        |dir| vec![dir],
+    );
     // Volta: `$VOLTA_HOME` or `~/.volta`, versions in `tools/image/node/<version>`.
     // https://github.com/volta-cli/volta/blob/5eedd5fb2f682baceb47a242289111fcd79435a5/crates/volta-layout/src/v4.rs#L7-L42
     // https://github.com/volta-cli/volta/blob/5eedd5fb2f682baceb47a242289111fcd79435a5/crates/volta-core/src/layout/mod.rs#L23-L32
@@ -90,10 +96,13 @@ fn layouts(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<Layout> {
     // https://github.com/pyenv/pyenv/blob/9e40c078c0f86eae0d96e114269e934681745625/libexec/pyenv-versions#L43
     let pyenv = env("PYENV_ROOT").unwrap_or_else(|| home.join(".pyenv"));
 
-    let mut layouts = vec![layout(Manager::Nvm, nvm.join("versions/node"), "node.js")];
-    if let Some(fnm) = fnm_dir(home, &env) {
-        layouts.push(layout(Manager::Fnm, fnm, "node.js"));
-    }
+    let nvm = nvm
+        .into_iter()
+        .map(|dir| layout(Manager::Nvm, dir.join("versions/node"), "node.js"));
+    let fnm = fnm_dirs(home, &env)
+        .into_iter()
+        .map(|dir| layout(Manager::Fnm, dir, "node.js"));
+    let mut layouts: Vec<Layout> = nvm.chain(fnm).collect();
     layouts.extend([
         layout(Manager::Volta, volta.join("tools/image/node"), "node.js"),
         layout(Manager::Asdf, asdf.join("installs/nodejs"), "node.js"),
@@ -103,23 +112,31 @@ fn layouts(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<Layout> {
     layouts
 }
 
-/// fnm's `node-versions` folder: under `$FNM_DIR`, else the first of these that exists:
-/// `$XDG_DATA_HOME/fnm` (`~/.local/share/fnm`), `~/.fnm`, `~/Library/Application Support/fnm`.
-/// Versions are in `node-versions/v<version>`.
+/// fnm's `node-versions` folders: under `$FNM_DIR`, else under each of `$XDG_DATA_HOME/fnm`
+/// (`~/.local/share/fnm`), `~/.fnm` and `~/Library/Application Support/fnm`. Versions are in
+/// `node-versions/v<version>`.
+///
+/// fnm itself uses the first of those that exists, but it creates the first one on any run,
+/// before an install, and `fnm env` writes `FNM_DIR` into `.zshrc`, which an app started at
+/// login does not read. So each is read, and a missing one gives nothing.
 // https://github.com/Schniz/fnm/blob/07f13237ae208f531f8ea88d4cfde3160c22f99a/src/directories.rs#L47-L69
 // https://github.com/Schniz/fnm/blob/07f13237ae208f531f8ea88d4cfde3160c22f99a/src/config.rs#L143-L154
-fn fnm_dir(home: &Path, env: &impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
-    let base = env("FNM_DIR").or_else(|| {
-        let data = env("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
-        [
-            data.join("fnm"),
-            home.join(".fnm"),
-            home.join("Library/Application Support/fnm"),
-        ]
+fn fnm_dirs(home: &Path, env: &impl Fn(&str) -> Option<PathBuf>) -> Vec<PathBuf> {
+    let bases = env("FNM_DIR").map_or_else(
+        || {
+            let data = env("XDG_DATA_HOME").unwrap_or_else(|| home.join(".local/share"));
+            vec![
+                data.join("fnm"),
+                home.join(".fnm"),
+                home.join("Library/Application Support/fnm"),
+            ]
+        },
+        |dir| vec![dir],
+    );
+    bases
         .into_iter()
-        .find(|dir| dir.exists())
-    })?;
-    Some(base.join("node-versions"))
+        .map(|base| base.join("node-versions"))
+        .collect()
 }
 
 /// One component per version folder in `layout.dir`, sorted by folder name. A missing folder
@@ -161,22 +178,34 @@ fn read_versions(layout: &Layout) -> Result<Vec<Component>, InventoryError> {
         .collect())
 }
 
-/// The version a folder name gives after `prefix`, when it is one: a digit first, then only
-/// letters, digits, `.`, `-` and `+` (`22.1.0`, `3.13.0rc1`, `3.13t`, `3.14-dev`).
+/// The version a folder name gives after `prefix`, when it is one: a release of numbers and
+/// dots, then an optional pre-release of lowercase letters and digits (`22.1.0`, `3.13.1`,
+/// `3.15.0a1`, `3.14.0rc1`). pyenv's free-threaded builds (`3.13.1t`) are the same Python
+/// release, so the `t` is dropped: advisories and `python3 --version` name `3.13.1`.
 ///
-/// Every other name is skipped. fnm's `.downloads` is not an install. asdf's `ref-<git ref>`
-/// builds and pyenv's other distributions (`pypy3.10-7.3.15`, `graalpy-24.1`,
-/// `anaconda3-2024.06`) name no version of the runtime itself: the first two are other
-/// implementations, and a conda folder gives the distribution's release, not the version of
-/// the Python inside. Reading those would take running them, which this module never does;
-/// they are left out, a gap the spec records.
+/// Every other name is skipped. fnm's `.downloads` is not an install. pyenv's `3.14-dev` is
+/// built from a branch, and asdf's `ref-<git ref>` from a commit, so neither names a release.
+/// pyenv's other distributions (`pypy3.10-7.3.15`, `graalpy-24.1`, `anaconda3-2024.06`) name
+/// no version of the reference Python: the first two are other implementations, and a conda
+/// folder gives the distribution's release, not the version of the Python inside. Reading
+/// those would take running them, which this module never does; they are left out, a gap the
+/// spec records.
 fn version<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
-    let version = name.strip_prefix(prefix)?;
-    let starts_with_digit = version.starts_with(|c: char| c.is_ascii_digit());
-    let plain = version
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '+'));
-    (starts_with_digit && plain).then_some(version)
+    let name = name.strip_prefix(prefix)?;
+    let version = name.strip_suffix('t').unwrap_or(name);
+    let release_end = version
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(version.len());
+    let (release, pre) = version.split_at(release_end);
+    let release_ok = release
+        .split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()));
+    let letters = pre.trim_end_matches(|c: char| c.is_ascii_digit());
+    // `pre` starts with the first character that is not a digit or a dot, so `letters` is
+    // empty only when `pre` is; ending in a digit is what needs checking.
+    let pre_ok = pre.is_empty()
+        || (letters.len() < pre.len() && letters.bytes().all(|b| b.is_ascii_lowercase()));
+    (release_ok && pre_ok).then_some(version)
 }
 
 /// Drops the `node` or `python3` on `PATH` when a version manager has the same product at the
@@ -319,41 +348,48 @@ mod tests {
     }
 
     #[test]
-    fn nvm_under_xdg_config_home() {
+    fn without_nvm_dir_both_nvm_defaults_are_read() {
         let tmp = tempfile::tempdir().unwrap();
         let config = tmp.path().join("config");
         mkdir(&config.join("nvm/versions/node/v22.1.0"));
-        mkdir(&tmp.path().join(".nvm/versions/node/v1.0.0"));
-        let found = found(tmp.path(), &[("XDG_CONFIG_HOME", config)]);
+        mkdir(&tmp.path().join(".nvm/versions/node/v20.0.0"));
         assert_eq!(
-            found,
-            ["node.js 22.1.0 [nvm ~/config/nvm/versions/node/v22.1.0]"]
+            found(tmp.path(), &[("XDG_CONFIG_HOME", config.clone())]),
+            [
+                "node.js 22.1.0 [nvm ~/config/nvm/versions/node/v22.1.0]",
+                "node.js 20.0.0 [nvm ~/.nvm/versions/node/v20.0.0]",
+            ]
+        );
+        // An empty `$XDG_CONFIG_HOME/nvm` does not hide `~/.nvm`.
+        fs::remove_dir_all(config.join("nvm/versions/node/v22.1.0")).unwrap();
+        assert_eq!(
+            found(tmp.path(), &[("XDG_CONFIG_HOME", config)]),
+            ["node.js 20.0.0 [nvm ~/.nvm/versions/node/v20.0.0]"]
         );
     }
 
     #[test]
-    fn fnm_uses_the_first_base_folder_that_exists() {
+    fn every_fnm_base_folder_is_read() {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
-        let base = |dir: &str, version: &str| mkdir(&home.join(dir).join(version));
-        assert_eq!(fnm_dir(home, &|_| None), None, "fnm is not installed");
-
-        base("Library/Application Support/fnm/node-versions", "v18.0.0");
-        assert_eq!(
-            found(home, &[]),
-            ["node.js 18.0.0 [fnm ~/Library/Application Support/fnm/node-versions/v18.0.0]"]
-        );
-        base(".fnm/node-versions", "v20.0.0");
-        assert_eq!(
-            found(home, &[]),
-            ["node.js 20.0.0 [fnm ~/.fnm/node-versions/v20.0.0]"]
-        );
-        base("data/fnm/node-versions", "v22.0.0");
+        // fnm creates its first base folder on any run, before an install.
+        mkdir(&home.join("data/fnm"));
+        for dir in [
+            "Library/Application Support/fnm/node-versions/v18.0.0",
+            ".fnm/node-versions/v20.0.0",
+        ] {
+            mkdir(&home.join(dir));
+        }
         let data = [("XDG_DATA_HOME", home.join("data"))];
         assert_eq!(
             found(home, &data),
-            ["node.js 22.0.0 [fnm ~/data/fnm/node-versions/v22.0.0]"]
+            [
+                "node.js 20.0.0 [fnm ~/.fnm/node-versions/v20.0.0]",
+                "node.js 18.0.0 [fnm ~/Library/Application Support/fnm/node-versions/v18.0.0]",
+            ]
         );
+        mkdir(&home.join("data/fnm/node-versions/v22.0.0"));
+        assert_eq!(found(home, &data).len(), 3);
     }
 
     #[test]
@@ -363,9 +399,14 @@ mod tests {
         let pyenv = home.join(".pyenv/versions");
         for name in [
             "3.13.1",
-            "3.13t",
-            "3.14-dev",
+            "3.13.2t",
+            "3.15.0a1",
             "3.13.0rc1",
+            "3.14-dev",
+            "3.13t-dev",
+            "3..1",
+            "3.1rc",
+            "3.1RC1",
             "pypy3.10-7.3.15",
             "anaconda3-2024.06",
             "graalpy-24.1.0",
@@ -389,8 +430,8 @@ mod tests {
             [
                 "python 3.13.0rc1 [pyenv ~/.pyenv/versions/3.13.0rc1]",
                 "python 3.13.1 [pyenv ~/.pyenv/versions/3.13.1]",
-                "python 3.13t [pyenv ~/.pyenv/versions/3.13t]",
-                "python 3.14-dev [pyenv ~/.pyenv/versions/3.14-dev]",
+                "python 3.13.2 [pyenv ~/.pyenv/versions/3.13.2t]",
+                "python 3.15.0a1 [pyenv ~/.pyenv/versions/3.15.0a1]",
             ]
         );
     }

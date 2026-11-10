@@ -43,8 +43,8 @@ impl Inventory {
     /// Runs read-only listing commands (`sw_vers`, `brew`, `rustup`, `cargo`, `npm`, `node`,
     /// `python3`, `uv`, `pipx`) found on `PATH`, each from `/` with a one-minute limit, lists
     /// the folders where version managers (nvm, fnm, volta, asdf, pyenv) keep Node.js and
-    /// Python versions, and walks `project_dirs`. Blocks until all of them finish; `brew info` alone can take
-    /// several seconds.
+    /// Python versions, and walks `project_dirs`. Blocks until all of them finish; `brew info`
+    /// alone can take several seconds.
     pub fn collect_mac(project_dirs: &[PathBuf]) -> Self {
         let mut inventory = Self::default();
         toolchains::macos(&mut inventory);
@@ -405,10 +405,9 @@ mod tests {
             manager: Manager::Pyenv,
             path: "/Users/me/.pyenv/versions/3.13.1".into(),
         };
-        assert_eq!(
-            serde_json::to_string(&found_in).unwrap(),
-            r#"{"kind":"version_manager","manager":"pyenv","path":"/Users/me/.pyenv/versions/3.13.1"}"#
-        );
+        let json = r#"{"kind":"version_manager","manager":"pyenv","#.to_owned()
+            + r#""path":"/Users/me/.pyenv/versions/3.13.1"}"#;
+        assert_eq!(serde_json::to_string(&found_in).unwrap(), json);
     }
 
     #[test]
