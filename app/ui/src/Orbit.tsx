@@ -204,7 +204,8 @@ function Progress(props: { status: Sweeping; now: Date }) {
   );
 }
 
-/** The tags' severity names. "med" is short so three tags fit beside a long target name. */
+/** The tags' severity names. "med" is short so three tags fit on one line beside a name; a
+ * fourth wraps. */
 const TAG: Readonly<Record<Severity, string>> = {
   critical: "critical",
   high: "high",
@@ -229,24 +230,22 @@ function rowStatus(target: TargetLine): string {
   if (target.swept === null) {
     return "not swept yet";
   }
-  if (target.open === 0) {
-    return "clear";
-  }
   const parts = mix(target).map((m) => `${m.count} ${m.severity}`);
-  return `${target.open} open: ${parts.join(", ")}`;
+  const open = target.open > 0 ? `${target.open} open: ${parts.join(", ")}` : "clear";
+  return target.checked === null ? open : `${open}, ${target.checked}`;
 }
 
 /** One row per target, with its open findings as labelled tags and a bar split by severity.
  * Every bar is the full width, so it shows the mix within its target, not its size beside the
  * others (the owner's choice, 2026-11-10). During a sweep the rows dim: their counts are from
- * the last sweep. */
+ * the last sweep. Past three rows the card scrolls, so the vortex keeps its room. */
 function TargetRows(props: {
   targets: readonly TargetLine[];
   sweeping: boolean;
   onOpen: () => void;
 }) {
   return (
-    <div class="trows glass" classList={{ dim: props.sweeping }}>
+    <div class="trows glass" classList={{ stale: props.sweeping }}>
       {/* Keyed by position, so a refetch during a sweep keeps the rows and their focus. */}
       <Index each={props.targets}>
         {(t) => (

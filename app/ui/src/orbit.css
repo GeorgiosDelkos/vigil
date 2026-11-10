@@ -283,13 +283,17 @@
 .orbit .trows {
   margin: 10px 16px 0;
   display: grid;
+  /* About three rows; more scroll inside the card. overflow also clips a hovered row to the
+     card's rounded corners. */
+  max-height: 228px;
+  overflow-y: auto;
 }
 .orbit .trows:hover {
   background: rgba(255, 255, 255, 0.05);
 }
 .orbit .trow {
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto auto;
+  grid-template-columns: 16px minmax(64px, 1fr) minmax(0, auto) auto;
   gap: 2px 12px;
   align-items: center;
   padding: 11px 14px 12px;
@@ -306,8 +310,14 @@
 .orbit .trow:hover {
   background: rgba(255, 255, 255, 0.04);
 }
-.orbit .trow .icon {
+/* Every part has its cell: rows are name and tags, then the checked line, then the bar. The
+   icon and chevron span the first two, centred like the urgent row's. */
+.orbit .trow .icon,
+.orbit .trow .go {
   grid-row: 1 / 3;
+}
+.orbit .trow .icon {
+  grid-column: 1;
   width: 16px;
   height: 16px;
   fill: none;
@@ -321,17 +331,21 @@
   white-space: nowrap;
 }
 .orbit .tname {
+  grid-area: 1 / 2;
   font-size: 13px;
   font-weight: 600;
 }
 /* Its own line under the name and tags, so the tags never cut it short. */
 .orbit .tsub {
-  grid-column: 2 / -1;
+  grid-area: 2 / 2 / 3 / 4;
   color: var(--n-ink2);
   font-size: 11px;
 }
 .orbit .tags {
+  grid-area: 1 / 3;
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 4px;
 }
 .orbit .stag {
@@ -348,12 +362,13 @@
   --c: var(--n-green);
 }
 .orbit .trow .go {
+  grid-column: 4;
   color: rgba(242, 244, 255, 0.5);
   font-size: 18px;
 }
 /* Full width in every row: the bar shows the mix within a target, not its size. */
 .orbit .tbar {
-  grid-column: 2 / -1;
+  grid-area: 3 / 2 / 4 / -1;
   margin-top: 8px;
   display: flex;
   gap: 2px;
@@ -370,8 +385,8 @@
 .orbit .tbar.ok {
   background: color-mix(in srgb, var(--n-green) 45%, transparent);
 }
-.orbit .trows.dim .tags,
-.orbit .trows.dim .tbar {
+.orbit .trows.stale .tags,
+.orbit .trows.stale .tbar {
   opacity: 0.4;
 }
 

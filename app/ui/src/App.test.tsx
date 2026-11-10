@@ -95,14 +95,22 @@ const context = {
   stroke: () => undefined,
 };
 
-/** The tags on the target row named `name`, and its bar's segments as count and colour. */
-function targetRow(name: RegExp): { tags: string[]; bar: string[] } {
+/** The target row named `name`: its checked line, tags, bar segments as count and colour, and
+ * whether its bar is the all-clear green. */
+function targetRow(name: RegExp): {
+  sub: string;
+  tags: string[];
+  bar: string[];
+  clear: boolean;
+} {
   const button = screen.getByRole("button", { name });
   return {
+    sub: button.querySelector(".tsub")?.textContent ?? "",
     tags: [...button.querySelectorAll(".stag")].map((t) => t.textContent ?? ""),
     bar: [...button.querySelectorAll<HTMLElement>(".tbar i")].map(
       (i) => `${i.style.flexGrow} ${i.style.getPropertyValue("--c")}`,
     ),
+    clear: button.querySelector(".tbar.ok") !== null,
   };
 }
 
@@ -950,7 +958,11 @@ describe("the main view", () => {
       all_clear: true,
       target_count: "3 targets",
       schedule: "every 6 hours",
-      targets: overview().targets.map((t) => ({ ...t, swept: "2026-11-06T11:00:00Z" })),
+      targets: overview().targets.map((t) => ({
+        ...t,
+        swept: "2026-11-06T11:00:00Z",
+        checked: "12 components checked",
+      })),
       fixed: [
         {
           key: "f",
@@ -969,7 +981,12 @@ describe("the main view", () => {
     expect(document.querySelector(".orbit.green")).not.toBeNull();
     expect(screen.getByText("1 fixed in the last 30 days")).toBeTruthy();
     expect(screen.getByText("3 targets · every 6 hours")).toBeTruthy();
-    expect(targetRow(/^This Mac/)).toEqual({ tags: ["clear"], bar: [] });
+    expect(targetRow(/^This Mac/)).toEqual({
+      sub: "12 components checked",
+      tags: ["clear"],
+      bar: [],
+      clear: true,
+    });
   });
 
   it("opens the list from the count, and goes back with Back or Escape", async () => {
@@ -998,7 +1015,7 @@ describe("the main view", () => {
     expect(await screen.findByTitle("Show details")).toBeTruthy();
   });
 
-  it("shows each target's findings as dots by severity, worst first", async () => {
+  it("shows each target's findings as labelled tags and a bar, worst first", async () => {
     const swept = "2026-11-06T11:00:00Z";
     const line = overview().targets[0];
     if (line === undefined) {
@@ -1012,33 +1029,52 @@ describe("the main view", () => {
           label: "web",
           kind: "server",
           swept,
-          counts: { critical: 1, high: 5, medium: 2, low: 0 },
-          open: 8,
+          checked: "139 components checked",
+          counts: { critical: 1, high: 5, medium: 2, low: 1 },
+          open: 9,
         },
-        { ...line, label: "me/app", kind: "repo", swept },
-        { ...line, label: "This Mac", swept: null },
+        { ...line, label: "me/app", kind: "repo", swept, checked: "3 components checked" },
+        { ...line, label: "This Mac", swept: null, checked: null },
       ],
     };
     answer();
     render(() => <App />);
     await screen.findByTitle("Show details");
     expect(targetRow(/^web/)).toEqual({
-      tags: ["1 critical", "5 high", "2 med"],
-      bar: ["1 #ff3b3b", "5 #ff8a1f", "2 #ffe14a"],
+      sub: "139 components checked",
+      tags: ["1 critical", "5 high", "2 med", "1 low"],
+      bar: ["1 #ff3b3b", "5 #ff8a1f", "2 #ffe14a", "1 #8fa2ff"],
+      clear: false,
     });
     expect(
-      screen.getByRole("button", { name: "web, 8 open: 1 critical, 5 high, 2 medium" }),
+      screen.getByRole("button", {
+        name: "web, 9 open: 1 critical, 5 high, 2 medium, 1 low, 139 components checked",
+      }),
     ).toBeTruthy();
-    expect(targetRow(/^me\/app/)).toEqual({ tags: ["clear"], bar: [] });
-    expect(screen.getByRole("button", { name: "me/app, clear" })).toBeTruthy();
-    expect(targetRow(/^This Mac/)).toEqual({ tags: [], bar: [] });
+    expect(targetRow(/^me\/app/)).toEqual({
+      sub: "3 components checked",
+      tags: ["clear"],
+      bar: [],
+      clear: true,
+    });
+    expect(
+      screen.getByRole("button", { name: "me/app, clear, 3 components checked" }),
+    ).toBeTruthy();
+    expect(targetRow(/^This Mac/)).toEqual({
+      sub: "not swept yet",
+      tags: [],
+      bar: [],
+      clear: false,
+    });
     expect(screen.getByRole("button", { name: "This Mac, not swept yet" })).toBeTruthy();
-    expect(document.querySelector(".trows.dim")).toBeNull();
+    expect(document.querySelector(".trows.stale")).toBeNull();
 
-    shown = sweeping(false);
+    // A sweep keeps the last counts in place, faded.
+    shown = { ...sweeping(false), targets: shown.targets };
     handlers.get("changed")?.({ payload: null });
     await screen.findByText("sweeping This Mac");
-    expect(document.querySelector(".trows.dim")).not.toBeNull();
+    expect(document.querySelector(".trows.stale")).not.toBeNull();
+    expect(targetRow(/^web/).tags).toEqual(["1 critical", "5 high", "2 med", "1 low"]);
   });
 
   it("shows why the last sweep failed", async () => {
