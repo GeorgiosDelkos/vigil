@@ -22,8 +22,9 @@
   color: var(--n-ink);
   overflow: hidden;
 }
-.pop.on-orbit > .banner {
-  margin: 10px 14px 0;
+.pop.on-orbit > .banner,
+.orbit > .banner {
+  margin: var(--space-12) var(--space-12) 0;
 }
 
 .orbit {
@@ -85,36 +86,36 @@
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.11),
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
-  border-radius: 16px;
+  border-radius: var(--radius-10);
 }
 .orbit .glass:hover {
   background: rgba(255, 255, 255, 0.08);
 }
 
+/* The edges of the list views, inside the popover's 1 pixel border: cards at 12, the header's
+   text and the bar at 24. */
 .orbit-top {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 12px 0 18px;
+  gap: var(--space-8);
+  padding: var(--space-12) var(--space-24) 0;
 }
 .orbit-top b {
-  font: 600 11px var(--ui);
+  font: 600 var(--text-11) / var(--leading-11) var(--ui);
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: rgba(242, 244, 255, 0.7);
 }
 .orbit-when {
   margin-left: auto;
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--n-ink2);
 }
 .orbit-top .menu {
-  top: 30px;
+  top: calc(100% + var(--space-4));
   bottom: auto;
   z-index: 2;
-}
-.orbit > .banner {
-  margin: 8px 14px 0;
 }
 
 .orbit .stage {
@@ -134,30 +135,29 @@
   position: relative;
   display: grid;
   justify-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   max-width: 190px;
-  padding: 6px;
+  padding: var(--space-8);
   border: 0;
-  border-radius: 16px;
+  border-radius: var(--radius-10);
   background: none;
   color: var(--n-ink);
   text-align: center;
   cursor: pointer;
 }
+/* One size for the count, the percentage and the word: the largest that leaves 8 between the
+   centre and the cards in the shortest stage, a failed sweep's banner above three target rows
+   (the owner asked on 2026-11-10; 92 overlapped the urgent card there). */
 .orbit .centre .n {
-  font: 400 92px/0.85 var(--ui);
+  font: 400 48px/0.85 var(--ui);
   text-shadow:
     0 0 18px rgba(62, 240, 255, 0.55),
     0 0 42px rgba(155, 92, 255, 0.45);
 }
-.orbit .centre .n.percent {
-  font-size: 66px;
-}
 .orbit .centre .n.percent small {
-  font-size: 34px;
+  font-size: 24px;
 }
 .orbit .centre .n.word {
-  font-size: 60px;
   text-shadow:
     0 0 18px rgba(61, 255, 168, 0.55),
     0 0 42px rgba(62, 240, 255, 0.35);
@@ -170,31 +170,34 @@
     0 0 42px rgba(155, 92, 255, 0.35);
 }
 .orbit .centre .l {
-  font: 500 12px var(--ui);
+  font: 500 var(--text-12) / var(--leading-12) var(--ui);
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: rgba(242, 244, 255, 0.7);
 }
 .orbit .centre .kev-pill {
-  margin-top: 10px;
-  font: 700 10px/1 var(--ui);
+  margin-top: var(--space-4);
+  font: 700 var(--text-11) / var(--leading-11) var(--ui);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: #fff;
-  padding: 5px 9px;
-  border-radius: 999px;
+  padding: var(--space-4) var(--space-8);
+  border-radius: var(--radius-full);
   background: rgba(255, 46, 136, 0.22);
   box-shadow:
     inset 0 0 0 1px rgba(255, 46, 136, 0.7),
     0 0 18px rgba(255, 46, 136, 0.6);
 }
 
+/* The urgent card and the target rows use the lists' row template (style.css): 12 padding, a
+   24 marker column and a 12 gap, so names start at 60 inside the border as a list row's do,
+   and the chevrons end where a list row's age does. */
 .orbit .urgent {
-  margin: 0 16px;
-  padding: 12px 14px;
+  margin: 0 var(--space-12);
+  padding: var(--space-12);
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
-  gap: 12px;
+  grid-template-columns: var(--space-24) minmax(0, 1fr) auto;
+  gap: var(--space-12);
   align-items: center;
   text-align: left;
   font: inherit;
@@ -202,8 +205,8 @@
 }
 .orbit .urgent .glow {
   justify-self: center;
-  width: 10px;
-  height: 10px;
+  width: var(--space-12);
+  height: var(--space-12);
   border-radius: 50%;
   background: var(--c);
   box-shadow:
@@ -213,7 +216,8 @@
 .orbit .urgent b {
   display: block;
   font-weight: 600;
-  font-size: 13.5px;
+  font-size: var(--text-13);
+  line-height: var(--leading-13);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -221,7 +225,8 @@
 .orbit .urgent small {
   display: block;
   color: var(--n-ink2);
-  font-size: 11.5px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -229,26 +234,29 @@
 .orbit .urgent small::first-letter {
   text-transform: uppercase;
 }
-.orbit .urgent .go {
+.orbit .go {
   color: rgba(242, 244, 255, 0.5);
-  font-size: 18px;
+  font-size: var(--text-20);
+  line-height: var(--leading-20);
 }
 .orbit .orbit-hint {
-  margin: 0 18px;
+  margin: 0 var(--space-24);
   color: var(--n-ink2);
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   text-align: center;
 }
 
 .orbit .progress p {
-  margin: 10px 16px 0;
+  margin: var(--space-8) var(--space-24) 0;
   color: var(--n-ink2);
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
 }
 .orbit .neon-bar {
-  margin: 0 16px;
-  height: 4px;
-  border-radius: 4px;
+  margin: 0 var(--space-24);
+  height: var(--space-4);
+  border-radius: var(--radius-full);
   background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
 }
@@ -259,26 +267,23 @@
   box-shadow: 0 0 12px var(--n-cyan);
 }
 
-/* The target rows share the urgent row's edges and columns (16px marker, 12px gap, 14px
-   padding), so names, chevrons and both cards line up. */
 .orbit .trows {
-  margin: 10px 16px 0;
+  margin: var(--space-12) var(--space-12) 0;
   display: grid;
-  /* About three rows; more scroll inside the card. overflow also clips a hovered row to the
-     card's rounded corners. */
+  /* Three rows of 100 (see .trow); more scroll inside the card. overflow also clips a hovered
+     row to the card's rounded corners. */
   max-height: 300px;
   overflow-y: auto;
 }
 .orbit .trows:hover {
   background: rgba(255, 255, 255, 0.05);
 }
+/* The target rows (style.css), as buttons in neon: the chevron takes the last column, centred
+   on the whole row, so the lines below the name stop short of it. Each line keeps its line
+   height and cuts long text short, so every row is 100 high: padding 8 + 20 + 16 + counts 8 +
+   32 + bar 4 + 4 + padding 8. */
 .orbit .trow {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
-  grid-template-rows: 18px 16px 34px 8px;
-  column-gap: 12px;
-  align-items: center;
-  padding: 11px 14px 13px;
+  grid-template-rows: var(--leading-13) var(--leading-11) auto auto;
   border: 0;
   background: none;
   color: inherit;
@@ -288,89 +293,37 @@
 }
 /* Inside the row: the card scrolls, which clips anything drawn outside it. */
 .orbit .trow:focus-visible {
-  outline-offset: -2px;
-}
-.orbit .trow + .trow {
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  outline-offset: calc(-1 * var(--stroke-2));
 }
 .orbit .trow:hover {
   background: rgba(255, 255, 255, 0.04);
 }
-/* Every part has its cell, the same in every row: name, checked line, counts, bar. The icon
-   sits by the name and checked lines like the urgent row's dot; the chevron is centred on the
-   whole row. */
 .orbit .trow .icon {
-  grid-area: 1 / 1 / 3 / 2;
-  width: 16px;
-  height: 16px;
-  fill: none;
   stroke: rgba(242, 244, 255, 0.7);
+}
+.orbit .trow .go {
+  grid-area: 1 / 3 / 5 / 4;
+}
+.orbit .tsub,
+.orbit .tcounts,
+.orbit .tbar {
+  grid-column: 2;
 }
 .orbit .tname,
 .orbit .tsub {
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.orbit .tname {
-  grid-area: 1 / 2;
-  font-size: 13px;
-  font-weight: 600;
-}
 .orbit .tsub {
-  grid-area: 2 / 2;
   color: var(--n-ink2);
-  font-size: 11px;
-}
-.orbit .trow .go {
-  grid-area: 1 / 3 / 5 / 4;
-  color: rgba(242, 244, 255, 0.5);
-  font-size: 18px;
-}
-/* Four equal columns, one per severity, so a count never moves. */
-.orbit .tcounts {
-  grid-area: 3 / 2;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  column-gap: 8px;
-}
-.orbit .tcount {
-  display: grid;
-  gap: 1px;
-  white-space: nowrap;
-}
-.orbit .tcount b {
-  font-size: 14px;
-  line-height: 1;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  color: var(--c);
-}
-.orbit .tcount small {
-  font-size: 10.5px;
-  line-height: 1.2;
-  color: color-mix(in srgb, var(--c) 70%, white);
 }
 /* Dimmed but readable: about 4.5:1 on the popover's ground. */
 .orbit .tcount.zero b,
 .orbit .tcount.zero small {
   color: rgba(242, 244, 255, 0.55);
 }
-/* Full width in every row: the bar shows the mix within a target, not its size. */
-.orbit .tbar {
-  grid-area: 4 / 2;
-  align-self: end;
-  display: flex;
-  gap: 2px;
-  height: 4px;
-  border-radius: 2px;
-  overflow: hidden;
-  background: rgba(255, 255, 255, 0.06);
-}
 .orbit .tbar i {
-  flex-basis: 0;
-  background: var(--c);
   box-shadow: 0 0 8px var(--c);
 }
 .orbit .tbar.ok {
@@ -383,17 +336,18 @@
 }
 
 .orbit-foot {
-  margin-top: 14px;
+  margin-top: var(--space-12);
   display: flex;
-  gap: 8px;
-  padding: 0 16px 16px;
+  gap: var(--space-8);
+  padding: 0 var(--space-12) var(--space-12);
 }
 .orbit-btn {
   flex: 1;
-  font: 600 13px var(--ui);
+  height: var(--control-32);
+  font: 600 var(--text-13) / 1 var(--ui);
   border: 0;
-  border-radius: 12px;
-  padding: 10px 12px;
+  border-radius: var(--radius-10);
+  padding: 0 var(--space-12);
   cursor: pointer;
   color: var(--n-ink);
   background: rgba(255, 255, 255, 0.07);

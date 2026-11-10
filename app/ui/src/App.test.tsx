@@ -37,6 +37,19 @@ function row(label: string): HTMLElement {
   return screen.getByText(label, { selector: ".t" }).closest(".row") as HTMLElement;
 }
 
+/** The target row named `label` in the list's Targets tab. */
+function listTarget(label: string): HTMLElement {
+  return screen.getByText(label, { selector: ".tname" }).closest(".trow") as HTMLElement;
+}
+
+/** A target row's count columns as number and word, dimmed ones in brackets. */
+function counts(target: HTMLElement): string[] {
+  return [...target.querySelectorAll(".tcount")].map((c) => {
+    const text = `${c.querySelector("b")?.textContent ?? ""} ${c.querySelector("small")?.textContent ?? ""}`;
+    return c.classList.contains("zero") ? `(${text})` : text;
+  });
+}
+
 /** The names on the finding rows, top to bottom. */
 function names(): string[] {
   return [...document.querySelectorAll("button.row .t")].map(
@@ -106,10 +119,7 @@ function targetRow(name: RegExp): {
   const button = screen.getByRole("button", { name });
   return {
     sub: button.querySelector(".tsub")?.textContent ?? "",
-    counts: [...button.querySelectorAll(".tcount")].map((c) => {
-      const text = `${c.querySelector("b")?.textContent ?? ""} ${c.querySelector("small")?.textContent ?? ""}`;
-      return c.classList.contains("zero") ? `(${text})` : text;
-    }),
+    counts: counts(button),
     bar: [...button.querySelectorAll<HTMLElement>(".tbar i")].map(
       (i) => `${i.style.flexGrow} ${i.style.getPropertyValue("--c")}`,
     ),
@@ -376,16 +386,26 @@ describe("the popover", () => {
   });
 
   it("shows all clear once a sweep found nothing", async () => {
+    const empty = overview();
     shown = overview({
       last_swept: "2026-11-06T11:00:00Z",
       first_sweep_hint: null,
       dismissed: 2,
       all_clear: true,
+      targets: empty.targets.map((t) => ({ ...t, swept: "2026-11-06T11:00:00Z" })),
     });
     answer();
     await openList();
     expect(await screen.findByText("All clear")).toBeTruthy();
     expect(screen.getByText(/2 dismissed/)).toBeTruthy();
+    // Its targets are the shared target rows: four dimmed zeros and the green bar.
+    expect(counts(listTarget("This Mac"))).toEqual([
+      "(0 critical)",
+      "(0 high)",
+      "(0 medium)",
+      "(0 low)",
+    ]);
+    expect(listTarget("This Mac").querySelector(".tbar.ok")).not.toBeNull();
   });
 });
 
@@ -774,28 +794,66 @@ describe("the tabs", () => {
           open: 0,
           dismissed: 0,
         },
+        {
+          label: "db",
+          kind: "server",
+          swept: "2026-11-06T11:00:00Z",
+          checked: "9 components checked",
+          counts: { critical: 1, high: 0, medium: 2, low: 0 },
+          open: 3,
+          dismissed: 0,
+        },
       ],
     };
     answer();
     await openList();
     fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
+    // Several severities are named worst first, in the main view's words.
+    expect(listTarget("db").querySelector(".sr-only")?.textContent).toBe(
+      "3 open: 1 critical, 2 medium",
+    );
     expect(
-      within(row("This Mac")).getByText(/42 components checked · swept .* ago · 1 dismissed/),
+      within(listTarget("This Mac")).getByText(
+        /42 components checked · swept .* ago · 1 dismissed/,
+      ),
     ).toBeTruthy();
-    // Only the severities it has, each named, and the open count in words.
-    expect(row("This Mac").querySelector(".sevs")?.textContent).toBe("6 high");
-    expect(row("This Mac").querySelector(".open")?.textContent).toBe("6 open");
-    expect(row("web").textContent).not.toContain("dismissed");
-    expect(row("web").querySelector(".sevs")).toBeNull();
-    expect(row("web").querySelector(".open svg")).not.toBeNull();
-    expect(row("web").querySelector(".open")?.textContent).toBe(" clear");
-    // Glyphs beside the words are hidden from screen readers, so each severity is read once.
-    expect(within(row("This Mac")).queryByRole("img", { name: "high" })).toBeNull();
+    // Every severity in its column, as on the main view, and the ones it has named in words.
+    expect(counts(listTarget("This Mac"))).toEqual([
+      "(0 critical)",
+      "6 high",
+      "(0 medium)",
+      "(0 low)",
+    ]);
+    expect(listTarget("This Mac").querySelector(".sr-only")?.textContent).toBe("6 open: 6 high");
+    expect(listTarget("This Mac").querySelector(".tbar i")?.getAttribute("style")).toContain(
+      "--high",
+    );
+    expect(listTarget("This Mac").querySelector(".open")?.textContent).toBe("6 open");
+    expect(listTarget("web").textContent).not.toContain("dismissed");
+    expect(listTarget("web").querySelector(".sr-only")?.textContent).toBe("clear");
+    expect(listTarget("web").querySelector(".tbar.ok")).not.toBeNull();
+    expect(listTarget("web").querySelector(".open svg")).not.toBeNull();
+    expect(listTarget("web").querySelector(".open")?.textContent).toBe(" clear");
+    // The drawn counts are hidden from screen readers, so each severity is read once.
+    expect(listTarget("This Mac").querySelector(".tcounts")?.getAttribute("aria-hidden")).toBe(
+      "true",
+    );
     // Long lists scroll in their own focusable pane, under the summary and tabs.
     expect(screen.getByRole("list", { name: "Targets" }).classList.contains("pane")).toBe(true);
     expect(screen.getByRole("list", { name: "Targets" }).tabIndex).toBe(0);
-    expect(within(row("me/app")).getByText("not swept yet")).toBeTruthy();
-    expect(row("me/app").querySelector(".open")?.textContent).toBe("");
+    expect(
+      within(listTarget("me/app")).getByText("not swept yet", { selector: ".tsub" }),
+    ).toBeTruthy();
+    expect(counts(listTarget("me/app"))).toEqual([
+      "(– critical)",
+      "(– high)",
+      "(– medium)",
+      "(– low)",
+    ]);
+    expect(listTarget("me/app").querySelector(".sr-only")?.textContent).toBe("not swept yet");
+    expect(listTarget("me/app").querySelector(".open")?.textContent).toBe("");
+    // The status is in the sentence, so the drawn one is not read a second time.
+    expect(listTarget("This Mac").querySelector(".open")?.getAttribute("aria-hidden")).toBe("true");
   });
 });
 

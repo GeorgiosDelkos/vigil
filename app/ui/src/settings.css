@@ -5,18 +5,16 @@
 .settings-view {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--space-12);
   min-height: 0;
   flex: 1;
 }
 .settings-view .nav {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
-  align-items: center;
-  padding: 2px 4px 0;
 }
 .navtitle {
-  font: 600 13px/1 var(--ui);
+  font: 600 var(--text-13) / var(--leading-13) var(--ui);
 }
 .navside {
   justify-self: end;
@@ -24,24 +22,24 @@
 .savedtag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 8px 3px 6px;
-  border-radius: 999px;
-  font: 600 10.5px/1 var(--ui);
+  gap: var(--space-4);
+  padding: 0 var(--space-8) 0 var(--space-4);
+  border-radius: var(--radius-full);
+  font: 600 var(--text-11) / var(--leading-11) var(--ui);
   color: var(--ok);
   background: rgba(79, 209, 139, 0.12);
   animation: pop-in 180ms ease-out;
 }
 .savedtag .icon {
-  width: 11px;
-  height: 11px;
+  width: var(--space-12);
+  height: var(--space-12);
   stroke-width: 2;
 }
 
 .page {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: var(--space-16);
 }
 .page.enter {
   animation: slide-in 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -49,21 +47,22 @@
 .block {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: var(--space-8);
 }
 .label {
-  margin: 0 12px;
-  font: 600 10.5px/1.2 var(--ui);
+  margin: 0 var(--space-12);
+  font: 600 var(--text-11) / var(--leading-11) var(--ui);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--l3);
 }
 
-/* Icon tiles: one hue per section, lit from above. */
+/* Icon tiles: one hue per section, lit from above. Rows, headers and the status card all fill
+   the row template's 24 icon column, so a title starts where row text does. */
 .tile {
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
+  width: var(--space-24);
+  height: var(--space-24);
+  border-radius: var(--radius-6);
   display: grid;
   place-items: center;
   flex: none;
@@ -74,18 +73,7 @@
     0 1px 2px rgba(0, 0, 0, 0.35);
 }
 .tile .icon {
-  width: 14px;
-  height: 14px;
   stroke-width: 1.7;
-}
-.tile.big {
-  width: 38px;
-  height: 38px;
-  border-radius: 10px;
-}
-.tile.big .icon {
-  width: 21px;
-  height: 21px;
 }
 .tile.agent {
   --tile-top: #8a78f0;
@@ -124,9 +112,9 @@
 .hero {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px;
-  border-radius: 14px;
+  gap: var(--space-12);
+  padding: var(--space-12);
+  border-radius: var(--radius-10);
   background:
     radial-gradient(120% 140% at 0% 0%, rgba(245, 192, 68, 0.13), transparent 60%), var(--group);
   box-shadow: inset 0 0 0 0.5px var(--hair);
@@ -137,14 +125,14 @@
 }
 .hero-title {
   display: block;
-  font: 600 15px/1.2 var(--ui);
+  font: 600 var(--text-15) / var(--leading-15) var(--ui);
   letter-spacing: -0.01em;
   text-wrap: balance;
 }
 .hero-sub {
   display: block;
-  margin-top: 3px;
-  font-size: 11.5px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l2);
 }
 
@@ -152,20 +140,19 @@
 .head {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-12);
   /* 12 pixels: the inner edge of the cards below, so the tile lines up with their text. */
-  padding: 2px 12px;
+  padding: 0 var(--space-12);
 }
 .head h1 {
   margin: 0;
-  font: 600 16px/1.2 var(--ui);
+  font: 600 var(--text-15) / var(--leading-15) var(--ui);
   letter-spacing: -0.01em;
 }
 .blurb {
   display: block;
-  margin-top: 2px;
-  font-size: 11.5px;
-  line-height: 1.35;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l2);
   text-wrap: pretty;
 }
@@ -173,35 +160,31 @@
   min-width: 0;
 }
 
-/* Rows */
+/* Rows: the row template of the popover's lists (style.css), at least a tile row's height so
+   rows with and without a tile match. */
 .srow {
   position: relative;
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  gap: 10px;
+  grid-template-columns: var(--space-24) minmax(0, 1fr) auto;
+  gap: var(--space-12);
   align-items: center;
   width: 100%;
-  min-height: 40px;
-  padding: 7px 12px;
+  min-height: calc(var(--space-24) + 2 * var(--space-8));
+  padding: var(--space-8) var(--space-12);
   border: 0;
   background: transparent;
   text-align: left;
-  font-size: 12.5px;
-}
-.srow.nav-row {
-  grid-template-columns: 24px minmax(0, 1fr) auto;
+  font-size: var(--text-13);
+  line-height: var(--leading-13);
 }
 .srow + .srow::before {
   content: "";
   position: absolute;
   top: 0;
-  left: 40px;
+  left: calc(var(--space-12) + var(--space-24) + var(--space-12));
   right: 0;
   height: 0.5px;
   background: var(--hair);
-}
-.srow.nav-row + .srow.nav-row::before {
-  left: 46px;
 }
 button.srow {
   transition: background 120ms;
@@ -224,8 +207,7 @@ button.srow:active:not(:disabled) {
 }
 .srow .s {
   display: block;
-  margin-top: 1px;
-  font: 10.5px/1.3 var(--ui);
+  font: var(--text-11) / var(--leading-11) var(--ui);
   color: var(--l3);
   overflow-wrap: anywhere;
 }
@@ -234,32 +216,19 @@ button.srow:active:not(:disabled) {
   place-items: center;
   color: var(--l2);
 }
-.lead-icon .icon {
-  width: 15px;
-  height: 15px;
-}
 .srow.add {
   color: var(--run);
-  grid-template-columns: 18px minmax(0, 1fr);
 }
 .srow.add .lead-icon {
   color: var(--run);
 }
-.srow.account {
-  grid-template-columns: 28px minmax(0, 1fr) auto;
-  padding-block: 10px;
-}
-.srow.account .lead-icon .icon {
-  width: 18px;
-  height: 18px;
-}
 .avatar {
-  width: 28px;
-  height: 28px;
+  width: var(--space-24);
+  height: var(--space-24);
   border-radius: 50%;
   display: grid;
   place-items: center;
-  font: 700 12px/1 var(--ui);
+  font: 700 var(--text-12) / 1 var(--ui);
   color: #fff;
   background: linear-gradient(135deg, #6e9bff, #8a78f0);
 }
@@ -271,13 +240,12 @@ button.srow:active:not(:disabled) {
 .sum {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: var(--l3);
-  font-size: 12px;
-}
-.sum {
+  gap: var(--space-4);
   min-width: 0;
   max-width: 180px;
+  color: var(--l3);
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
 }
 .sum .val {
   min-width: 0;
@@ -289,34 +257,34 @@ button.srow:active:not(:disabled) {
   color: var(--medium);
 }
 .sum .dot {
-  width: 6px;
-  height: 6px;
+  width: var(--space-8);
+  height: var(--space-8);
   border-radius: 50%;
   background: var(--medium);
   box-shadow: 0 0 0 3px rgba(245, 192, 68, 0.16);
 }
 .sum .icon {
-  width: 12px;
-  height: 12px;
+  width: var(--space-12);
+  height: var(--space-12);
   transform: rotate(180deg);
 }
 
-/* Controls */
+/* Controls. The switch is 32 by 20: a 16 thumb inset 2, moving 12. */
 .switch {
   position: relative;
-  width: 30px;
-  height: 18px;
-  border-radius: 999px;
+  width: var(--space-32);
+  height: calc(var(--space-16) + 2 * var(--space-2));
+  border-radius: var(--radius-full);
   background: rgba(255, 255, 255, 0.16);
   transition: background 160ms;
 }
 .switch::after {
   content: "";
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
+  top: var(--space-2);
+  left: var(--space-2);
+  width: var(--space-16);
+  height: var(--space-16);
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -326,12 +294,13 @@ button.srow:active:not(:disabled) {
   background: var(--ok);
 }
 .switch.on::after {
-  transform: translateX(12px);
+  transform: translateX(var(--space-12));
 }
+/* A status badge: the tags' size (style.css), round. */
 .state {
-  font: 600 10.5px/1 var(--ui);
-  padding: 3px 7px;
-  border-radius: 999px;
+  font: 600 var(--text-11) / var(--leading-11) var(--ui);
+  padding: 0 var(--space-8);
+  border-radius: var(--radius-full);
   white-space: nowrap;
 }
 .state.ok {
@@ -349,8 +318,8 @@ button.srow:active:not(:disabled) {
 .group.pad {
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 10px 12px;
+  gap: var(--space-12);
+  padding: var(--space-12);
 }
 .group.scroll {
   overflow-y: auto;
@@ -360,8 +329,7 @@ button.srow:active:not(:disabled) {
   display: grid;
 }
 .seg.wide button {
-  font-size: 12px;
-  padding: 6px 10px;
+  padding: 0 var(--space-12);
 }
 .seg.wide button.on {
   background: rgba(255, 255, 255, 0.13);
@@ -373,8 +341,9 @@ button.srow:active:not(:disabled) {
 .field-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
+  gap: var(--space-8);
+  font-size: var(--text-13);
+  line-height: var(--leading-13);
   transition: opacity 140ms;
 }
 .field-row > span:first-child {
@@ -384,12 +353,13 @@ button.srow:active:not(:disabled) {
   opacity: 0.45;
 }
 .field {
-  font: 12px var(--ui);
+  height: var(--control-28);
+  font: var(--text-12) var(--ui);
   color: var(--l1);
   background: rgba(0, 0, 0, 0.3);
   border: 0.5px solid var(--l4);
-  border-radius: 7px;
-  padding: 6px 8px;
+  border-radius: var(--radius-6);
+  padding: 0 var(--space-8);
   color-scheme: dark;
   user-select: text;
 }
@@ -410,31 +380,32 @@ button.srow:active:not(:disabled) {
 }
 .inline-add {
   display: flex;
-  gap: 8px;
+  gap: var(--space-8);
   align-items: center;
 }
 .dim {
   color: var(--l2);
 }
 .note {
-  margin: 0 12px;
-  font-size: 11px;
-  line-height: 1.4;
+  margin: 0 var(--space-12);
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
   color: var(--l3);
 }
 .empty {
   margin: 0;
-  padding: 18px 12px;
-  border-radius: 13px;
+  padding: var(--space-16) var(--space-12);
+  border-radius: var(--radius-10);
   text-align: center;
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l3);
   background: var(--group);
   box-shadow: inset 0 0 0 0.5px var(--hair);
 }
 .btn.small {
-  padding: 4px 8px;
-  font-size: 11.5px;
+  height: var(--control-24);
+  padding: 0 var(--space-8);
 }
 .link {
   border: 0;
@@ -448,17 +419,18 @@ button.srow:active:not(:disabled) {
 .footer {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: var(--space-8);
 }
 .foot-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  padding: 8px;
+  gap: var(--space-8);
+  height: var(--control-28);
+  padding: 0 var(--space-8);
   border: 0;
-  border-radius: 10px;
-  font: 500 11.5px/1 var(--ui);
+  border-radius: var(--radius-6);
+  font: 500 var(--text-12) / 1 var(--ui);
   color: var(--l2);
   background: var(--group);
   box-shadow: inset 0 0 0 0.5px var(--hair);
@@ -469,10 +441,6 @@ button.srow:active:not(:disabled) {
 }
 .foot-btn:disabled {
   opacity: 0.6;
-}
-.foot-btn .icon {
-  width: 13px;
-  height: 13px;
 }
 .spin,
 .still {
@@ -486,21 +454,23 @@ button.srow:active:not(:disabled) {
 .tools {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-  gap: 6px;
+  gap: var(--space-8);
 }
 .tool {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 6px 9px;
-  border-radius: 9px;
+  gap: var(--space-8);
+  height: var(--control-28);
+  padding: 0 var(--space-8);
+  border-radius: var(--radius-6);
   background: var(--group);
   box-shadow: inset 0 0 0 0.5px var(--hair);
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
 }
 .tool i {
-  width: 6px;
-  height: 6px;
+  width: var(--space-8);
+  height: var(--space-8);
   border-radius: 50%;
   flex: none;
   background: var(--ok);
@@ -516,19 +486,20 @@ button.srow:active:not(:disabled) {
 
 /* NVD's two rate limits */
 .rates {
-  gap: 8px;
+  gap: var(--space-8);
 }
 .rate {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) 22px;
-  gap: 10px;
+  grid-template-columns: 88px minmax(0, 1fr) var(--space-24);
+  gap: var(--space-12);
   align-items: center;
-  font-size: 11.5px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l3);
 }
 .rate .meter {
-  height: 6px;
-  border-radius: 999px;
+  height: var(--space-4);
+  border-radius: var(--radius-full);
   background: rgba(255, 255, 255, 0.06);
   overflow: hidden;
 }
@@ -553,7 +524,7 @@ button.srow:active:not(:disabled) {
 @keyframes slide-in {
   from {
     opacity: 0.4;
-    transform: translateX(14px);
+    transform: translateX(var(--space-16));
   }
 }
 @keyframes pop-in {
@@ -590,8 +561,8 @@ button.srow:active:not(:disabled) {
 .fld {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 12px;
+  gap: var(--space-8);
+  padding: var(--space-12);
 }
 .fld + .fld {
   border-top: 0.5px solid var(--hair);
@@ -600,43 +571,38 @@ button.srow:active:not(:disabled) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  min-height: 18px;
+  gap: var(--space-8);
 }
 .fld-head label {
-  font: 500 12.5px/1.2 var(--ui);
+  font: 500 var(--text-13) / var(--leading-13) var(--ui);
   color: var(--l1);
 }
 .fld-hint {
-  margin: -2px 0 2px;
-  font-size: 11px;
-  line-height: 1.4;
+  margin: 0;
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
   color: var(--l2);
   text-wrap: pretty;
 }
 .fld-path {
   min-width: 0;
-  font: 10.5px/1.3 var(--ui);
+  font: var(--text-11) / var(--leading-11) var(--ui);
   color: var(--l2);
   overflow-wrap: anywhere;
   user-select: text;
 }
 .fld-foot {
   margin: 0;
-  padding: 9px 12px;
+  padding: var(--space-8) var(--space-12);
   border-top: 0.5px solid var(--hair);
   background: rgba(0, 0, 0, 0.14);
-  font-size: 11px;
-  line-height: 1.4;
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
   color: var(--l2);
 }
 .fld-custom {
   display: flex;
-  gap: 6px;
-}
-.fld-custom .btn {
-  height: 30px;
-  padding-block: 0;
+  gap: var(--space-8);
 }
 .menu-pick {
   position: relative;
@@ -648,9 +614,9 @@ button.srow:active:not(:disabled) {
    outline from style.css and only tints the edge. */
 .menu-pick select,
 .fld-custom .field {
-  height: 30px;
+  height: var(--control-28);
   border: 0;
-  border-radius: 8px;
+  border-radius: var(--radius-6);
   background: rgba(0, 0, 0, 0.22);
   box-shadow: inset 0 0 0 1px var(--l3);
   transition:
@@ -661,6 +627,7 @@ button.srow:active:not(:disabled) {
 .fld-custom .field:focus-visible {
   box-shadow: inset 0 0 0 1px var(--run);
 }
+/* The right padding leaves room for the chevron: 8 either side of its 12. */
 .menu-pick select {
   appearance: none;
   width: 100%;
@@ -668,9 +635,9 @@ button.srow:active:not(:disabled) {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
-  padding: 0 28px 0 10px;
+  padding: 0 calc(2 * var(--space-8) + var(--space-12)) 0 var(--space-8);
   color: var(--l1);
-  font: 12.5px var(--ui);
+  font: var(--text-12) var(--ui);
   color-scheme: dark;
 }
 .menu-pick select:hover:not(:disabled, :focus-visible) {
@@ -679,10 +646,10 @@ button.srow:active:not(:disabled) {
 }
 .menu-pick .icon {
   position: absolute;
-  right: 10px;
+  right: var(--space-8);
   top: 50%;
-  width: 11px;
-  height: 11px;
+  width: var(--space-12);
+  height: var(--space-12);
   transform: translateY(-50%) rotate(-90deg);
   color: var(--l3);
   pointer-events: none;

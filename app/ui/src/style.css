@@ -2,6 +2,66 @@
    blurs the desktop behind it). Text uses four brightness levels of white, groups are inset
    lists with hairline dividers, and severity has its own shape and colour. One fixed dark
    look, as the HUD material is dark in both appearances. */
+:root {
+  color-scheme: dark;
+  --tint: rgba(16, 18, 25, 0.38);
+  --edge: rgba(255, 255, 255, 0.1);
+  --group: rgba(255, 255, 255, 0.045);
+  --hair: rgba(255, 255, 255, 0.075);
+  --l1: rgba(255, 255, 255, 0.92);
+  --l2: rgba(255, 255, 255, 0.62);
+  --l3: rgba(255, 255, 255, 0.4);
+  --l4: rgba(255, 255, 255, 0.22);
+  --critical: #ff5a52;
+  --high: #ff8a3d;
+  --medium: #f5c044;
+  --low: #a9b4c4;
+  --ok: #4fd18b;
+  --run: #6e9bff;
+  --kev: #ff4d6d;
+  --ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+
+  /* The size scale: every size in style.css, settings.css and orbit.css is one of these, a
+     hairline, or a structural size listed in scale.test.ts, which fails on any other pixel
+     value. The owner asked for one scale on 2026-11-10, after elements that should line up
+     sat 1 to 3 pixels apart.
+
+     The layout it gives, measured inside the popover's 1 pixel border (so one more from the
+     window's edge): cards sit at 12; headings, labels and bars at 24; a row's text at 60 (card
+     12, row padding 12, icon column 24, gap 12), in every list. */
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  /* Off the 4 pixel grid, only beside hairlines: the segmented control's inset, the gaps
+     between bar segments, the switch's thumb inset, and centring a 16 pixel icon on a 20
+     pixel line. */
+  --space-2: 2px;
+  /* Each type size with the line height that keeps its lines on the 4 pixel grid. */
+  --text-11: 11px;
+  --leading-11: 16px;
+  --text-12: 12px;
+  --leading-12: 16px;
+  --text-13: 13px;
+  --leading-13: 20px;
+  --text-15: 15px;
+  --leading-15: 20px;
+  --text-20: 20px;
+  --leading-20: 24px;
+  /* Controls (buttons, fields, menu items, tags) take 6; containers (cards, groups, menus,
+     banners) and the largest controls take 10. */
+  --radius-6: 6px;
+  --radius-10: 10px;
+  --radius-full: 999px;
+  --control-24: 24px;
+  --control-28: 28px;
+  --control-32: 32px;
+  /* The focus ring, the spinner's ring and the sweep bar's target marks. */
+  --stroke-2: 2px;
+}
+
 /* IBM Plex Sans, the one typeface for all of Vigil's text: the owner chose it on 2026-11-10
    over Sora, Geist and Chakra Petch, and asked for one font everywhere, code included. IBM's own
    split web fonts from @ibm/plex-sans 1.1.0 (https://github.com/IBM/plex/tree/
@@ -102,26 +162,6 @@
     U+EFCC, U+FEFF, U+FFFD;
 }
 
-:root {
-  color-scheme: dark;
-  --tint: rgba(16, 18, 25, 0.38);
-  --edge: rgba(255, 255, 255, 0.1);
-  --group: rgba(255, 255, 255, 0.045);
-  --hair: rgba(255, 255, 255, 0.075);
-  --l1: rgba(255, 255, 255, 0.92);
-  --l2: rgba(255, 255, 255, 0.62);
-  --l3: rgba(255, 255, 255, 0.4);
-  --l4: rgba(255, 255, 255, 0.22);
-  --critical: #ff5a52;
-  --high: #ff8a3d;
-  --medium: #f5c044;
-  --low: #a9b4c4;
-  --ok: #4fd18b;
-  --run: #6e9bff;
-  --kev: #ff4d6d;
-  --ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
-}
-
 * {
   box-sizing: border-box;
 }
@@ -131,7 +171,7 @@ body {
   height: 100%;
   background: transparent;
   overflow: hidden;
-  font: 13px/1.38 var(--ui);
+  font: var(--text-13) / var(--leading-13) var(--ui);
   color: var(--l1);
   -webkit-font-smoothing: antialiased;
   user-select: none;
@@ -147,16 +187,16 @@ button {
 button:focus-visible,
 input:focus-visible,
 select:focus-visible {
-  outline: 2px solid var(--run);
-  outline-offset: 2px;
+  outline: var(--stroke-2) solid var(--run);
+  outline-offset: var(--stroke-2);
 }
 
 .pop {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: var(--space-12);
+  padding: var(--space-12);
   background: var(--tint);
   border: 1px solid var(--edge);
   border-radius: 20px;
@@ -164,22 +204,25 @@ select:focus-visible {
   overflow-y: auto;
 }
 .quiet {
-  margin: 4px 8px;
+  margin: var(--space-4) var(--space-12);
   color: var(--l3);
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
 }
 .hint {
-  margin: 0 6px;
+  margin: 0 var(--space-12);
   color: var(--l3);
-  font-size: 11.5px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
 }
 .banner {
   margin: 0;
-  padding: 7px 10px;
-  border-radius: 10px;
-  font-size: 12px;
+  padding: var(--space-8) var(--space-12);
+  border-radius: var(--radius-10);
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   display: flex;
-  gap: 6px;
+  gap: var(--space-8);
   align-items: baseline;
 }
 .banner.bad {
@@ -194,26 +237,29 @@ select:focus-visible {
   margin-left: auto;
 }
 
-/* Summary */
+/* Summary: its own lines sit at the headings' edge; its groups are cards like the others. */
 .summary {
   display: grid;
-  gap: 10px;
-  padding: 6px 6px 2px;
+  gap: var(--space-12);
+}
+.summary > :not(.group) {
+  margin-inline: var(--space-12);
 }
 .headline {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-12);
 }
 .headline h1 {
   margin: 0;
-  font: 600 17px/1.2 var(--ui);
+  font: 600 var(--text-15) / var(--leading-15) var(--ui);
   letter-spacing: -0.01em;
 }
 .sub {
-  margin: 2px 0 0;
-  font-size: 11.5px;
+  margin: 0;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l2);
   overflow-wrap: anywhere;
 }
@@ -223,12 +269,13 @@ select:focus-visible {
 .pill {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-8);
+  height: var(--control-28);
   border: 0;
-  border-radius: 999px;
-  padding: 6px 11px 6px 9px;
+  border-radius: var(--radius-full);
+  padding: 0 var(--space-12) 0 var(--space-8);
   background: rgba(255, 255, 255, 0.1);
-  font: 500 12px/1 var(--ui);
+  font: 500 var(--text-12) / 1 var(--ui);
   white-space: nowrap;
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.14);
 }
@@ -237,16 +284,16 @@ select:focus-visible {
 }
 .bar {
   display: flex;
-  gap: 2px;
-  height: 6px;
-  border-radius: 999px;
+  gap: var(--space-2);
+  height: var(--space-4);
+  border-radius: var(--radius-full);
   overflow: hidden;
   background: rgba(255, 255, 255, 0.07);
 }
 .bar i {
   display: block;
   flex-basis: 0;
-  border-radius: 999px;
+  border-radius: var(--radius-full);
 }
 .bar .critical {
   background: var(--critical);
@@ -264,15 +311,16 @@ select:focus-visible {
 .legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
-  font-size: 11.5px;
+  gap: var(--space-4) var(--space-12);
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l2);
   font-variant-numeric: tabular-nums;
 }
 .legend span {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-4);
 }
 .legend .none {
   opacity: 0.45;
@@ -282,10 +330,10 @@ select:focus-visible {
   font-weight: 600;
 }
 
-/* Severity glyphs and icons */
+/* Severity glyphs and icons: 16 by default, 12 beside small text, 24 for the all-clear seal. */
 .sev {
-  width: 14px;
-  height: 14px;
+  width: var(--space-16);
+  height: var(--space-16);
   flex: none;
 }
 .sev.critical {
@@ -301,8 +349,8 @@ select:focus-visible {
   color: var(--low);
 }
 .icon {
-  width: 14px;
-  height: 14px;
+  width: var(--space-16);
+  height: var(--space-16);
   flex: none;
   fill: none;
   stroke: currentColor;
@@ -311,15 +359,13 @@ select:focus-visible {
   stroke-linejoin: round;
 }
 .icon.wrench {
-  width: 10px;
-  height: 10px;
+  width: var(--space-12);
+  height: var(--space-12);
   fill: currentColor;
   stroke: none;
 }
 .icon.done {
   stroke: var(--ok);
-  width: 16px;
-  height: 16px;
 }
 .icon .done-disc {
   fill: rgba(79, 209, 139, 0.16);
@@ -328,37 +374,36 @@ select:focus-visible {
 .icon.wait {
   stroke: var(--l4);
   stroke-dasharray: 2 2.4;
-  width: 16px;
-  height: 16px;
 }
 .icon.check {
   stroke: var(--ok);
   stroke-width: 2;
-  width: 22px;
-  height: 22px;
+  width: var(--space-24);
+  height: var(--space-24);
 }
 
-/* Segmented control */
+/* Segmented control: 24 high buttons inset 2 in a 28 high track, the height of a button. */
 .seg {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: 1fr;
-  padding: 2px;
-  border-radius: 9px;
+  padding: var(--space-2);
+  border-radius: var(--radius-10);
   background: rgba(255, 255, 255, 0.06);
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.08);
 }
 .seg button {
+  height: var(--control-24);
   border: 0;
   background: transparent;
   color: var(--l2);
-  font: 500 11.5px/1 var(--ui);
-  padding: 6px 4px;
-  border-radius: 7px;
+  font: 500 var(--text-12) / 1 var(--ui);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-6);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: var(--space-4);
   white-space: nowrap;
 }
 .seg button[aria-selected="true"] {
@@ -376,7 +421,7 @@ select:focus-visible {
 
 /* Grouped inset lists */
 .group {
-  border-radius: 13px;
+  border-radius: var(--radius-10);
   background: var(--group);
   box-shadow: inset 0 0 0 0.5px var(--hair);
   overflow: hidden;
@@ -400,55 +445,34 @@ select:focus-visible {
   min-height: 96px;
   overflow-y: auto;
 }
-.legend .glyph {
-  display: inline-flex;
-}
 .tagline {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 6px;
+  gap: var(--space-4) var(--space-8);
   align-items: center;
 }
+
+/* The row template every list shares (findings, targets, fixes, fix and sweep steps,
+   advisories, settings): a 24 icon column, a 12 gap, then the text, and an optional last
+   column at the right edge. A divider starts where the text does. */
 .row {
   position: relative;
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
-  gap: 4px 10px;
+  grid-template-columns: var(--space-24) minmax(0, 1fr) auto;
+  gap: 0 var(--space-12);
   align-items: start;
+  justify-items: start;
   width: 100%;
-  padding: 9px 11px;
+  padding: var(--space-8) var(--space-12);
   border: 0;
   background: transparent;
   text-align: left;
-}
-.row.static {
-  grid-template-columns: 22px minmax(0, 1fr) auto;
-}
-.target .open {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  line-height: 22px;
-  font-size: 11.5px;
-  color: var(--l2);
-  white-space: nowrap;
-}
-.target .open b {
-  color: var(--l1);
-  font-weight: 600;
-}
-.target .open .icon {
-  color: var(--ok);
-}
-.sevs {
-  gap: 4px 10px;
-  font-size: 11px;
 }
 .row + .row::before {
   content: "";
   position: absolute;
   top: 0;
-  left: 35px;
+  left: calc(var(--space-12) + var(--space-24) + var(--space-12));
   right: 0;
   height: 0.5px;
   background: var(--hair);
@@ -456,42 +480,49 @@ select:focus-visible {
 button.row:hover {
   background: rgba(255, 255, 255, 0.05);
 }
-.row > .sev {
-  margin-top: 1px;
+/* Centred in the icon column and on the title's 20 pixel line. */
+.row > .sev,
+.row > .icon {
+  justify-self: center;
+  margin-top: var(--space-2);
 }
 .what {
   display: grid;
-  gap: 2px;
   min-width: 0;
+}
+.row > .what {
+  justify-self: stretch;
 }
 .t {
   font-weight: 600;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 0 var(--space-8);
   align-items: baseline;
   overflow-wrap: anywhere;
 }
 .ver {
-  font: 500 11px/1 var(--ui);
+  font: 500 var(--text-11) / 1 var(--ui);
   color: var(--l3);
 }
 .id {
-  font: 500 11px/1.3 var(--ui);
+  font: 500 var(--text-11) / var(--leading-11) var(--ui);
   color: var(--l2);
   overflow-wrap: anywhere;
 }
 .where {
-  font-size: 11.5px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l3);
   overflow-wrap: anywhere;
 }
 .fix,
 .fixline {
-  font-size: 11.5px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l2);
   display: flex;
-  gap: 5px;
+  gap: var(--space-4);
   align-items: baseline;
 }
 .fix .icon,
@@ -503,18 +534,19 @@ button.row:hover {
 }
 .age {
   /* The title's line height, so the age sits level with it on every row. */
-  line-height: 18px;
-  font-size: 11px;
+  line-height: var(--leading-13);
+  font-size: var(--text-11);
   color: var(--l3);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* Tags and status badges share one size: 11 pixel text on a 16 pixel line. */
 .tag {
-  font: 600 9.5px/1 var(--ui);
+  font: 600 var(--text-11) / var(--leading-11) var(--ui);
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  padding: 3px 5px;
-  border-radius: 5px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-6);
   white-space: nowrap;
 }
 .tag.kev {
@@ -526,76 +558,184 @@ button.row:hover {
   color: var(--run);
   background: rgba(110, 155, 255, 0.14);
 }
-.ticon {
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+
+/* Target rows, in the list's Targets tab and on the main view (orbit.css): the row template
+   with every part in its own cell, the same in every row. Line 1 is the name and, at the right,
+   its status; line 2 what was checked and when; then the counts 8 below and the bar 4 below
+   them, both across the full width. In the list the name and line 2 wrap and the row grows;
+   the main view fixes each row at 100. */
+.trow {
+  position: relative;
   display: grid;
-  place-items: center;
-  background: rgba(255, 255, 255, 0.08);
+  grid-template-columns: var(--space-24) minmax(0, 1fr) auto;
+  column-gap: var(--space-12);
+  align-items: center;
+  width: 100%;
+  padding: var(--space-8) var(--space-12);
+}
+.trow + .trow::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: calc(var(--space-12) + var(--space-24) + var(--space-12));
+  right: 0;
+  height: 0.5px;
+  background: var(--hair);
+}
+/* Centred on the name and checked lines together. */
+.trow > .icon {
+  grid-area: 1 / 1 / 3 / 2;
+  justify-self: center;
   color: var(--l2);
+}
+.tname,
+.tsub {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.tname {
+  grid-area: 1 / 2;
+  font-size: var(--text-13);
+  line-height: var(--leading-13);
+  font-weight: 600;
+}
+.tsub {
+  grid-area: 2 / 2 / 3 / 4;
+  color: var(--l3);
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
+}
+/* Level with the name's first line when the name wraps. */
+.target .open {
+  grid-area: 1 / 3;
+  align-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-size: var(--text-12);
+  line-height: var(--leading-13);
+  color: var(--l2);
+  white-space: nowrap;
+}
+.target .open b {
+  color: var(--l1);
+  font-weight: 600;
+}
+.target .open .icon {
+  color: var(--ok);
+}
+/* Four equal columns, one per severity, so a count never moves. */
+.tcounts {
+  grid-area: 3 / 2 / 4 / 4;
+  margin-top: var(--space-8);
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  column-gap: var(--space-8);
+}
+.tcount {
+  display: grid;
+  white-space: nowrap;
+}
+/* 15 pixel figures on the 16 pixel line of the 11 size: digits have no descenders, and the
+   tighter line keeps a main-view row at exactly 100, three to its 300 card. */
+.tcount b {
+  font-size: var(--text-15);
+  line-height: var(--leading-11);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--c);
+}
+.tcount small {
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
+  color: color-mix(in srgb, var(--c) 70%, white);
+}
+.tcount.zero b,
+.tcount.zero small {
+  color: var(--l2);
+}
+/* Full width in every row: the bar shows the mix within a target, not its size. */
+.tbar {
+  grid-area: 4 / 2 / 5 / 4;
+  margin-top: var(--space-4);
+  display: flex;
+  gap: var(--space-2);
+  height: var(--space-4);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+}
+.tbar i {
+  flex-basis: 0;
+  background: var(--c);
+}
+.tbar.ok {
+  background: color-mix(in srgb, var(--ok) 45%, transparent);
 }
 
 /* Detail */
 .detail-view {
   display: grid;
-  gap: 10px;
+  gap: var(--space-12);
 }
 .nav {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 2px 6px 0;
+  min-height: var(--control-24);
+  padding: 0 var(--space-12);
 }
 .back {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-4);
   border: 0;
   background: none;
   color: var(--l2);
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   padding: 0;
 }
 .back:hover {
   color: var(--l1);
 }
 kbd {
-  font: 500 10px/1 var(--ui);
+  font: 500 var(--text-11) / var(--leading-11) var(--ui);
   color: var(--l3);
   border: 0.5px solid var(--l4);
-  border-radius: 4px;
-  padding: 2px 4px;
+  border-radius: var(--radius-6);
+  padding: 0 var(--space-4);
 }
 .detail {
   display: grid;
-  gap: 10px;
-  padding: 11px 12px 12px;
+  gap: var(--space-12);
+  padding: var(--space-12);
 }
 .dhead {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr) auto;
-  gap: 8px;
+  grid-template-columns: var(--space-24) minmax(0, 1fr) auto;
+  gap: var(--space-12);
   align-items: start;
 }
 .dhead .sev {
-  margin-top: 2px;
+  justify-self: center;
+  margin-top: var(--space-2);
 }
 .dtitle {
   display: grid;
-  gap: 3px;
 }
 .dtitle h2 {
   margin: 0;
-  font: 600 14px/1.25 var(--ui);
+  font: 600 var(--text-15) / var(--leading-15) var(--ui);
   overflow-wrap: anywhere;
 }
 .meta {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 5px 12px;
+  gap: var(--space-4) var(--space-12);
   margin: 0;
-  font-size: 11.5px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
 }
 .meta dt {
   color: var(--l3);
@@ -609,16 +749,17 @@ kbd {
 }
 .why {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l2);
   user-select: text;
 }
 .cmd {
   margin: 0;
-  font: 500 11px/1.5 var(--ui);
+  font: 500 var(--text-11) / var(--leading-11) var(--ui);
   background: rgba(0, 0, 0, 0.35);
-  border-radius: 8px;
-  padding: 8px 10px;
+  border-radius: var(--radius-6);
+  padding: var(--space-8) var(--space-12);
   box-shadow: inset 0 0 0 0.5px var(--hair);
   overflow-x: auto;
   white-space: pre;
@@ -627,26 +768,29 @@ kbd {
 .cmd .p {
   color: var(--l3);
 }
-/* A component's advisories under its detail, each collapsed to its severity and ids. */
+/* A component's advisories under its detail, each collapsed to its severity and ids. The
+   card's 4 and the summary's 8 make 12, so the rows keep the row template's edges. */
 .advs {
   list-style: none;
   margin: 0;
-  padding: 4px;
+  padding: var(--space-4);
   display: grid;
-  gap: 2px;
 }
 .adv summary {
   display: grid;
   /* One row, whichever tags an advisory has. */
-  grid-template-columns: 14px minmax(0, 1fr);
+  grid-template-columns: var(--space-24) minmax(0, 1fr);
   grid-auto-flow: column;
   grid-auto-columns: auto;
-  gap: 8px;
+  gap: var(--space-12);
   align-items: center;
-  padding: 7px 8px;
-  border-radius: 8px;
+  padding: var(--space-8);
+  border-radius: var(--radius-6);
   cursor: pointer;
   list-style: none;
+}
+.adv summary .sev {
+  justify-self: center;
 }
 .adv summary::-webkit-details-marker {
   display: none;
@@ -656,51 +800,56 @@ kbd {
   background: rgba(255, 255, 255, 0.05);
 }
 .adv-sev {
-  font: 600 9.5px/1 var(--ui);
+  font: 600 var(--text-11) / var(--leading-11) var(--ui);
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--l3);
 }
 .adv-body {
   display: grid;
-  gap: 8px;
-  padding: 8px 8px 10px 30px;
+  gap: var(--space-8);
+  padding: var(--space-8) var(--space-8) var(--space-12)
+    calc(var(--space-8) + var(--space-24) + var(--space-12));
 }
 .evidence {
   margin: 0;
-  font-size: 11px;
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
   color: var(--l3);
   overflow-wrap: anywhere;
   user-select: text;
 }
 .confirm {
   display: grid;
-  gap: 8px;
+  gap: var(--space-8);
 }
 .confirm p,
 .confirm label {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l2);
 }
 .confirm input {
-  font: 12px var(--ui);
+  height: var(--control-28);
+  font: var(--text-12) var(--ui);
   color: var(--l1);
   background: rgba(0, 0, 0, 0.3);
   border: 0.5px solid var(--l4);
-  border-radius: 7px;
-  padding: 6px 8px;
+  border-radius: var(--radius-6);
+  padding: 0 var(--space-8);
 }
 .dacts {
   display: flex;
-  gap: 6px;
+  gap: var(--space-8);
   flex-wrap: wrap;
 }
 .btn {
+  height: var(--control-28);
   border: 0;
-  border-radius: 8px;
-  padding: 7px 11px;
-  font: 500 12px/1 var(--ui);
+  border-radius: var(--radius-6);
+  padding: 0 var(--space-12);
+  font: 500 var(--text-12) / 1 var(--ui);
   background: rgba(255, 255, 255, 0.1);
 }
 .btn:hover {
@@ -719,7 +868,7 @@ kbd {
 
 /* Sweeping */
 .pct {
-  font: 600 20px/1 var(--ui);
+  font: 600 var(--text-20) / var(--leading-20) var(--ui);
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.01em;
   color: var(--l1);
@@ -732,8 +881,8 @@ kbd {
 }
 .sweep-bar {
   position: relative;
-  height: 6px;
-  border-radius: 3px;
+  height: var(--space-4);
+  border-radius: var(--radius-full);
   overflow: hidden;
   background: rgba(255, 255, 255, 0.16);
   box-shadow: inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
@@ -741,7 +890,7 @@ kbd {
 .sweep-bar-fill {
   position: absolute;
   inset: 0 auto 0 0;
-  border-radius: 3px;
+  border-radius: var(--radius-full);
   background: linear-gradient(90deg, #4b74ea, var(--run));
   box-shadow: 0 0 10px -2px rgba(110, 155, 255, 0.7);
 }
@@ -774,14 +923,13 @@ kbd {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 2px;
+  width: var(--stroke-2);
   margin-left: -1px;
   background: rgba(255, 255, 255, 0.5);
 }
 .step-text {
   display: grid;
   min-width: 0;
-  gap: 1px;
 }
 .fix-title {
   margin: 0;
@@ -819,7 +967,8 @@ ol.steps {
 }
 .step-detail {
   font-weight: 400;
-  font-size: 11px;
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
   color: var(--l2);
   overflow-wrap: anywhere;
 }
@@ -833,25 +982,31 @@ ol.steps {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-12);
 }
 .busy-foot .hint {
   margin: 0;
 }
+/* The row template, centred: a step is one line, or two while it runs. */
 .step {
   position: relative;
   display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto;
-  gap: 10px;
-  padding: 8px 11px;
+  grid-template-columns: var(--space-24) minmax(0, 1fr) auto;
+  gap: var(--space-12);
+  padding: var(--space-8) var(--space-12);
   align-items: center;
-  font-size: 12px;
+  justify-items: center;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
+}
+.step > :not(:first-child) {
+  justify-self: stretch;
 }
 .step + .step::before {
   content: "";
   position: absolute;
   top: 0;
-  left: 37px;
+  left: calc(var(--space-12) + var(--space-24) + var(--space-12));
   right: 0;
   height: 0.5px;
   background: var(--hair);
@@ -867,13 +1022,15 @@ ol.steps {
 }
 .st {
   color: var(--l3);
-  font-size: 11px;
+  font-size: var(--text-11);
+  line-height: var(--leading-11);
+  text-align: right;
 }
 .spin {
-  width: 14px;
-  height: 14px;
+  width: var(--space-16);
+  height: var(--space-16);
   border-radius: 50%;
-  border: 2px solid rgba(110, 155, 255, 0.25);
+  border: var(--stroke-2) solid rgba(110, 155, 255, 0.25);
   border-top-color: var(--run);
   flex: none;
 }
@@ -892,18 +1049,23 @@ ol.steps {
 .clear {
   display: grid;
   justify-items: center;
-  gap: 8px;
-  padding: 16px 4px 4px;
+  gap: var(--space-8);
+  padding-top: var(--space-16);
   text-align: center;
 }
-.clear > .group {
+.clear > .group,
+.clear > .label {
   justify-self: stretch;
   text-align: left;
-  margin-top: 6px;
+  margin-top: var(--space-8);
+}
+/* A label sits 8 above its card, as in settings. */
+.clear > .label + .group {
+  margin-top: 0;
 }
 .seal {
-  width: 46px;
-  height: 46px;
+  width: 48px;
+  height: 48px;
   border-radius: 50%;
   display: grid;
   place-items: center;
@@ -918,11 +1080,12 @@ ol.steps {
 }
 .clear h1 {
   margin: 0;
-  font: 600 16px/1.2 var(--ui);
+  font: 600 var(--text-15) / var(--leading-15) var(--ui);
 }
 .clear p {
   margin: 0;
-  font-size: 12px;
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l2);
   max-width: 34ch;
 }
@@ -932,19 +1095,21 @@ ol.steps {
   margin-top: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 2px 6px;
-  font-size: 11.5px;
+  gap: var(--space-8);
+  padding: 0 var(--space-12);
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
   color: var(--l3);
 }
 .agent {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-8);
 }
+/* Status dots, here and in settings, are 8. */
 .live {
-  width: 6px;
-  height: 6px;
+  width: var(--space-8);
+  height: var(--space-8);
   border-radius: 50%;
   background: var(--ok);
   box-shadow: 0 0 6px var(--ok);
@@ -962,18 +1127,14 @@ ol.steps {
   color: var(--l2);
   display: inline-grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 6px;
+  width: var(--control-24);
+  height: var(--control-24);
+  border-radius: var(--radius-6);
   padding: 0;
 }
 .ghost:hover {
   background: rgba(255, 255, 255, 0.08);
   color: var(--l1);
-}
-.ghost .icon {
-  width: 15px;
-  height: 15px;
 }
 .menu-wrap {
   position: relative;
@@ -981,28 +1142,33 @@ ol.steps {
 .menu {
   position: absolute;
   right: 0;
-  bottom: 30px;
-  min-width: 190px;
+  bottom: calc(100% + var(--space-4));
+  min-width: 192px;
   display: grid;
-  padding: 5px;
-  border-radius: 10px;
+  padding: var(--space-4);
+  border-radius: var(--radius-10);
   background: rgba(36, 38, 48, 0.96);
   box-shadow:
     0 12px 30px rgba(0, 0, 0, 0.5),
     inset 0 0 0 0.5px rgba(255, 255, 255, 0.12);
-  font-size: 12.5px;
+  font-size: var(--text-13);
+  line-height: var(--leading-13);
   color: var(--l1);
 }
 .menu button,
 .menu .menuitem {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: var(--space-8);
+  height: var(--control-28);
   border: 0;
   background: none;
   text-align: left;
-  padding: 6px 8px;
-  border-radius: 6px;
+  padding: 0 var(--space-8);
+  border-radius: var(--radius-6);
+}
+.menu .menuitem input {
+  margin: 0;
 }
 .menu button:hover,
 .menu .menuitem:hover {
@@ -1013,12 +1179,12 @@ ol.steps {
   border: 0;
   height: 0.5px;
   background: var(--hair);
-  margin: 4px 6px;
+  margin: var(--space-4) var(--space-8);
 }
 .banner .pr {
   display: block;
-  margin-top: 4px;
-  font: 11px/1.3 var(--ui);
+  margin-top: var(--space-4);
+  font: var(--text-11) / var(--leading-11) var(--ui);
   overflow-wrap: anywhere;
   user-select: text;
 }
@@ -1027,7 +1193,7 @@ ol.steps {
 .fixed-row .pr,
 .row .pr {
   /* Secondary, like the summary above it: the URL is there to copy, not to read first. */
-  font: 11px/1.3 var(--ui);
+  font: var(--text-11) / var(--leading-11) var(--ui);
   color: var(--l3);
   overflow-wrap: anywhere;
   user-select: text;

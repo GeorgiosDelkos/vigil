@@ -6,6 +6,8 @@ export default defineConfig({
   plugins: [solid()],
   server: { port: 5173, strictPort: true },
   build: { target: "safari16" },
-  // Component tests render into jsdom, with the Tauri modules mocked in each test file.
-  test: { environment: "jsdom" },
+  // Component tests render into jsdom, with the Tauri modules mocked in each test file. Vitest
+  // turns CSS into an empty module unless included, which `?raw` does not escape; scale.test.ts
+  // reads the stylesheets as text.
+  test: { environment: "jsdom", css: { include: /\.css\?raw$/ } },
 });
