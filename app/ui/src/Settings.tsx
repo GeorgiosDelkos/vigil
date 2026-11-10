@@ -179,7 +179,7 @@ function Overview(props: {
   return (
     <div class="page">
       <div class={`hero ${props.view.ready ? "ready" : "needs"}`}>
-        <span class="tile big shield" aria-hidden="true">
+        <span class="tile shield" aria-hidden="true">
           <Icon name="shield" />
         </span>
         <span class="what">
@@ -241,7 +241,7 @@ function Page(props: { line: SectionLine; children: JSX.Element }) {
   return (
     <div class="page enter">
       <div class="head">
-        <span class={`tile big ${props.line.id}`} aria-hidden="true">
+        <span class={`tile ${props.line.id}`} aria-hidden="true">
           <Icon name={page().icon} />
         </span>
         <span class="what">

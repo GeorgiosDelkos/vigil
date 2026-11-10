@@ -57,8 +57,8 @@
   color: var(--l3);
 }
 
-/* Icon tiles: one hue per section, lit from above. A row's tile fills the row template's 24
-   icon column; a header's is 32. */
+/* Icon tiles: one hue per section, lit from above. Rows, headers and the status card all fill
+   the row template's 24 icon column, so a title starts where row text does. */
 .tile {
   width: var(--space-24);
   height: var(--space-24);
@@ -74,11 +74,6 @@
 }
 .tile .icon {
   stroke-width: 1.7;
-}
-.tile.big {
-  width: var(--space-32);
-  height: var(--space-32);
-  border-radius: var(--radius-10);
 }
 .tile.agent {
   --tile-top: #8a78f0;
