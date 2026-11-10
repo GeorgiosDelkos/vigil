@@ -59,8 +59,9 @@ fn version_prefix(manager: VersionManager) -> &'static str {
 /// Each manager's folders, found as the manager finds them. `env` reads an environment
 /// variable.
 fn layouts(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<Layout> {
-    // An empty value means unset to the managers. A relative one is resolved against the
-    // shell's working folder, which Vigil does not know, so both fall back to the defaults.
+    // An empty or relative value names no folder Vigil can find: a relative one is resolved
+    // against the working folder of the shell that set it, which Vigil does not know. Both
+    // fall back to the defaults.
     let env = |name: &str| env(name).filter(|p| p.is_absolute());
     let layout = |manager, dir: PathBuf, product| Layout {
         manager,
