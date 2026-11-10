@@ -43,10 +43,11 @@ use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
 use crate::lifecycle::StateError;
 use crate::paths::DataDir;
+use crate::prompts;
+use crate::prompts::Prompt;
 use crate::server;
 use crate::sweep;
 use crate::sweep::Lock;
-use crate::sweep::Prompt;
 use crate::sweep::SweepError;
 
 /// Ends the heredoc that carries a command to a server's `sh`. Quoted, so this Mac's shell
@@ -376,7 +377,7 @@ pub fn run_fix(
     let stamp = format!("{}-{}", started.strftime("%Y%m%dT%H%M%SZ"), plan.key);
     let dir = sweep::create_unique_dir(&fixes, &stamp)?;
     let prompt =
-        sweep::prompt(data_dir, Prompt::Fix, &plan.target)?.replace("{{access}}", &plan.access);
+        prompts::render(data_dir, Prompt::Fix, &plan.target)?.replace("{{access}}", &plan.access);
     let brief = serde_json::to_string_pretty(&plan.brief).expect("a JSON value serializes");
     for (name, text) in [
         ("PROMPT.md", prompt.as_str()),

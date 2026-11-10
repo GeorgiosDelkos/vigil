@@ -34,6 +34,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
         with:
           submodules: true
+          # The whole history: the prompt tests check their hash list against every past
+          # version of the built-in prompts (crates/core/src/prompts.rs).
+          fetch-depth: 0
           persist-credentials: false
       - name: Install ${{ matrix.toolchain }}
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master

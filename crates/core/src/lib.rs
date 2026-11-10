@@ -24,6 +24,7 @@ mod matching;
 mod package;
 mod paths;
 mod popover;
+mod prompts;
 mod server;
 mod settings;
 mod settings_view;

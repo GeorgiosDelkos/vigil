@@ -15,7 +15,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::thread;
@@ -67,38 +66,11 @@ use crate::matching;
 use crate::matching::Linked;
 use crate::matching::Match;
 use crate::matching::OsvRecord;
+use crate::paths;
 use crate::paths::DataDir;
+use crate::prompts;
+use crate::prompts::Prompt;
 use crate::server;
-
-/// Which built-in prompt a target uses. Each is copied to the data directory's `prompts/`
-/// folder on first use, so the user can edit it.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum Prompt {
-    Mac,
-    GitHub,
-    Server,
-    Fix,
-}
-
-impl Prompt {
-    fn file_name(self) -> &'static str {
-        match self {
-            Self::Mac => "sweep.md",
-            Self::GitHub => "sweep-github.md",
-            Self::Server => "sweep-server.md",
-            Self::Fix => "fix.md",
-        }
-    }
-
-    fn default_text(self) -> &'static str {
-        match self {
-            Self::Mac => include_str!("prompts/sweep.md"),
-            Self::GitHub => include_str!("prompts/sweep-github.md"),
-            Self::Server => include_str!("prompts/sweep-server.md"),
-            Self::Fix => include_str!("prompts/fix.md"),
-        }
-    }
-}
 
 /// How often [`Lock::acquire`] tries, and how long it waits between tries. Arbitrary: 100 ms in
 /// all is far longer than starting a process takes, and nothing a user would notice.
@@ -373,6 +345,11 @@ pub fn sweep(
     }
     let dir = create_sweep_dir(&sweeps, Timestamp::now())?;
     let running = cancel::mark_running(&dir)?;
+    // After the sweep folder exists, so a failure to create it does not lose the one note an
+    // edited prompt gets. A sweep that ends without a report (cancelled, a target error, or no
+    // target run) still loses it; the `.default.md` file it points to stays as the lasting
+    // record.
+    prompts::update(data_dir, &mut notes);
 
     let feeds = Feeds::new(data_dir, nvd_access(&mut notes));
     let kev = match feeds.kev() {
@@ -700,7 +677,7 @@ impl Shared<'_> {
                 components,
             })
             .collect();
-        let prompt = prompt(self.data_dir, collected.prompt, &collected.title)?;
+        let prompt = prompts::render(self.data_dir, collected.prompt, &collected.title)?;
         let contents = bundle::Contents {
             prompt: &prompt,
             components: &collected.components,
@@ -1215,27 +1192,6 @@ fn target_name(inventory: &Inventory) -> String {
         )
 }
 
-/// The user's copy of `kind`'s prompt, created from the built-in one on first use, with the
-/// target filled in.
-pub(crate) fn prompt(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<String, SweepError> {
-    let dir = data_dir.prompts_dir();
-    let path = dir.join(kind.file_name());
-    let template = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(&dir)
-                .and_then(|()| fs::write(&path, kind.default_text()))
-                .map_err(|source| SweepError::Write {
-                    path: path.clone(),
-                    source,
-                })?;
-            kind.default_text().to_owned()
-        }
-        Err(source) => return Err(SweepError::Read { path, source }),
-    };
-    Ok(template.replace("{{target}}", target))
-}
-
 /// Writes the report files, or notes in the report why they could not be written: the verdict
 /// is worth more than its files, so a report that cannot be saved is still returned.
 fn save_report(dir: &Path, report: &mut Report) {
@@ -1260,19 +1216,7 @@ fn write_report(dir: &Path, report: &Report) -> Result<(), SweepError> {
         ("report.json", json),
     ] {
         let path = dir.join(name);
-        let partial = dir.join(format!(".{name}.partial"));
-        let written = fs::File::create(&partial)
-            .and_then(|mut file| {
-                file.write_all(text.as_bytes())?;
-                file.sync_data()
-            })
-            .and_then(|()| fs::rename(&partial, &path));
-        if let Err(source) = written {
-            // Best effort: the error below is what matters, and a leftover partial file is
-            // harmless, since readers open only `report.json` and `report.md`.
-            drop(fs::remove_file(&partial));
-            return Err(SweepError::Write { path, source });
-        }
+        paths::replace_file(&path, &text).map_err(|source| SweepError::Write { path, source })?;
     }
     Ok(())
 }
@@ -2389,28 +2333,6 @@ mod tests {
             matches!(&err, SweepError::Write { path, .. } if *path == first),
             "{err:?}"
         );
-    }
-
-    #[test]
-    fn prompt_is_copied_once_then_read() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data = DataDir::new(tmp.path());
-        let text = prompt(&data, Prompt::Mac, "this Mac").unwrap();
-        assert!(
-            text.starts_with("# Vulnerability sweep: this Mac"),
-            "{text}"
-        );
-        let path = tmp.path().join("prompts/sweep.md");
-        fs::write(&path, "Mine: {{target}}").unwrap();
-        assert_eq!(prompt(&data, Prompt::Mac, "x").unwrap(), "Mine: x");
-
-        // A template that exists but cannot be read is an error, not a reason to overwrite it.
-        // Write-only, so overwriting would succeed if the code tried.
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o200)).unwrap();
-        let result = prompt(&data, Prompt::Mac, "x");
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(matches!(result, Err(SweepError::Read { .. })), "{result:?}");
-        assert_eq!(fs::read_to_string(&path).unwrap(), "Mine: {{target}}");
     }
 
     #[test]

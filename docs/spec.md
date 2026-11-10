@@ -71,6 +71,7 @@ Core modules (one concept each):
   config.toml
   report.html (the HTML report, replaced each time it is asked for)
   prompts/{sweep,sweep-github,sweep-server,fix}.md
+  prompts/<name>.default.md (the built-in prompt when it last differed from a copy the user edited)
   feeds/osv/<id>.json, feeds/nvd/<product>.json
   state/.lock, state/dismissals.json, state/fixes.jsonl
   sweeps/.lock
@@ -415,6 +416,35 @@ The prompt argument is one line pointing at `PROMPT.md` in the bundle, so the re
 file the user can read and edit (`prompts/sweep.md` in the data dir, copied from the built-in
 default on first use). The agent's stdout and stderr go to `agent-<attempt>.log` beside the
 bundle.
+
+Prompt updates (decided 2026-11-10): an improved built-in prompt must reach existing installs
+without overwriting what the user wrote. At the start of each sweep, under the sweeps lock,
+each copy in `prompts/` is checked:
+
+- byte for byte the current built-in prompt: left alone, not rewritten;
+- byte for byte an older built-in version: never edited, so replaced by the current built-in
+  prompt, written to a temporary name, synced and renamed;
+- anything else: edited by the user, so kept. The current built-in prompt is written beside it
+  as `<name>.default.md` to compare, and the sweep's reports note it under "Not checked"
+  (`problems`), once: when that file is first written or its text changes;
+- missing: left for the first use to create, as before.
+
+"An older built-in version" is a match against the hash (64-bit FNV-1a) of every version of
+the prompt in the git history, listed in `crates/core/src/prompts.rs`. The alternative was a
+sidecar recording the hash of the version copied; the list was chosen because it needs no
+state the user can lose, and it recognises the copies of installs made before this change,
+which have no sidecar. Its cost: each change to a built-in prompt adds its hash to the list,
+which a test enforces with a message saying what to add. SHA-256 was weighed and not used:
+no adversary picks the files compared, and `sha2` would be a new dependency of the core.
+The report problems were chosen as the channel because the sweep is where the prompt is used
+and they already carry the sweep's other notes (dismissals unreadable, an interrupted
+sweep's cleanup); the settings view has no place for notices. They reach `vigil sweep`'s
+output, `report.md` and `report.json`, but the menu-bar app shows no report problems yet, so
+an app-only user finds the note only there and in the `.default.md` file. The note says the
+built-in prompt may be newer, not that it is: without a record of the version the user
+started from, an edit of the current version looks the same as an edit of an old one. Not
+handled: a fix run does not update `fix.md` itself, the next sweep does; and an edit saved in
+the instant between the check and the rename is replaced.
 
 ### Bundle and findings (decided 2026-11-05)
 
