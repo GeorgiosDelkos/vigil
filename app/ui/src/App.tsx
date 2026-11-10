@@ -14,6 +14,7 @@ import {
 
 import {
   SEVERITIES,
+  type Finding,
   type FixDone,
   type FixedItem,
   type FixState,
@@ -117,8 +118,8 @@ export function App() {
   }, 4_000);
   onCleanup(() => clearInterval(poll));
 
-  const listed = () => overview()?.findings ?? [];
-  const chosen = createMemo(() => listed().find((o) => o.key === selected()) ?? null);
+  const listed = () => overview()?.items ?? [];
+  const chosen = createMemo(() => listed().find((o) => o.id === selected()) ?? null);
 
   const run = (action: () => Promise<unknown>) => {
     setError(null);
@@ -292,7 +293,7 @@ function Summary(props: { overview: Overview; now: Date; onSweep: () => void }) 
         </button>
       </div>
       <Show when={failed()}>{(f) => <p class="banner bad">Last sweep: {f().error}</p>}</Show>
-      <Show when={props.overview.findings.length > 0}>
+      <Show when={props.overview.items.length > 0}>
         <div
           class="bar"
           role="img"
@@ -321,7 +322,7 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
   const tabs = (): [Tab, string, number][] => [
     ["needs", "Needs you", props.overview.needs_you],
     ["targets", "Targets", props.overview.targets.length],
-    ["all", "All open", props.overview.findings.length],
+    ["all", "All open", props.overview.items.length],
     ["fixed", "Fixed", props.overview.fixed.length],
   ];
   return (
@@ -379,41 +380,44 @@ function fixLabel(state: FixState): string {
   return state.pull_request === null ? "Fix reported" : "Pull request open";
 }
 
-/** Whether a row shows any tag: exploited, new, or what a fix came to. */
+/** Whether a row shows any tag: exploited, new, or what its lead's fix came to. */
 function tagged(item: Listed): boolean {
-  return item.known_exploited || item.new || item.fix_state !== null;
+  return item.known_exploited || item.new || item.lead.fix_state !== null;
+}
+
+/** What a row says it is about: how many advisories a component has, or its advisory ids. */
+function about(item: Listed): string {
+  return item.advisory_count ?? item.lead.advisories.join(" · ");
 }
 
 function Rows(props: {
   items: readonly Listed[];
   now: Date;
   empty: string;
-  onOpen: (key: string) => void;
+  onOpen: (id: string) => void;
 }) {
   return (
     <Show when={props.items.length > 0} fallback={<p class="quiet">{props.empty}</p>}>
       <div class="group list pane">
         <For each={props.items}>
           {(item) => (
-            <button type="button" class="row" onClick={() => props.onOpen(item.key)}>
+            <button type="button" class="row" onClick={() => props.onOpen(item.id)}>
               <Glyph severity={item.severity} />
               <span class="what">
                 <span class="t">
                   {item.name}
-                  <Show when={item.version}>{(v) => <span class="ver">{v()}</span>}</Show>
+                  <Show when={item.lead.version}>{(v) => <span class="ver">{v()}</span>}</Show>
                 </span>
-                <Show when={item.advisories.length > 0 || tagged(item)}>
+                <Show when={about(item) !== "" || tagged(item)}>
                   <span class="tagline">
-                    <Show when={item.advisories.length > 0}>
-                      <span class="id">{item.advisories.join(" · ")}</span>
-                    </Show>
+                    <Show when={about(item)}>{(text) => <span class="id">{text()}</span>}</Show>
                     <Show when={item.known_exploited}>
                       <span class="tag kev">Exploited</span>
                     </Show>
                     <Show when={item.new && !item.known_exploited}>
                       <span class="tag new">New</span>
                     </Show>
-                    <Show when={item.fix_state}>
+                    <Show when={item.lead.fix_state}>
                       {(state) => (
                         <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>
                       )}
@@ -422,11 +426,11 @@ function Rows(props: {
                 </Show>
                 <span class="where">
                   {item.target}
-                  <Show when={item.place}> · {item.place}</Show>
+                  <Show when={item.lead.place}> · {item.lead.place}</Show>
                 </span>
                 <span class="fix">
                   <Icon name="wrench" />
-                  {item.fix}
+                  {item.lead.fix}
                 </span>
               </span>
               <span class="age">
@@ -518,6 +522,7 @@ function Nav(props: { onBack: () => void }) {
   );
 }
 
+/** An item's detail: what it is and where, its one fix, and for a component each advisory. */
 function Detail(props: {
   item: Listed;
   now: Date;
@@ -525,25 +530,31 @@ function Detail(props: {
   onBack: () => void;
   onError: (error: string) => void;
 }) {
-  const [preview, setPreview] = createSignal<FixPreview | null>(null);
+  const lead = () => props.item.lead;
+  const single = () => props.item.others.length === 0;
+  // The preview keeps the key it was asked for: dismissing the lead while it shows makes
+  // another finding the lead, and Run fix must still run the fix shown.
+  const [preview, setPreview] = createSignal<{ key: string; shown: FixPreview } | null>(null);
   const [dismissing, setDismissing] = createSignal(false);
-  const [reason, setReason] = createSignal("");
   const askFix = () => {
-    invoke<FixPreview>("fix_preview", { key: props.item.key })
-      .then(setPreview)
+    const key = lead().key;
+    invoke<FixPreview>("fix_preview", { key })
+      .then((shown) => setPreview({ key, shown }))
       .catch((e: unknown) => props.onError(String(e)));
   };
   // The preview's `found` pins the fix to the one shown: Rust refuses it if a sweep changed
   // the finding since.
-  const runFix = (shown: FixPreview) => {
-    invoke("fix", { key: props.item.key, found: shown.found }).catch((e: unknown) =>
+  const runFix = (asked: { key: string; shown: FixPreview }) => {
+    invoke("fix", { key: asked.key, found: asked.shown.found }).catch((e: unknown) =>
       props.onError(String(e)),
     );
   };
-  const dismiss = (event: SubmitEvent) => {
-    event.preventDefault();
-    invoke("dismiss", { key: props.item.key, reason: reason() })
-      .then(() => props.onBack())
+  // Dismissing one of a component's advisories keeps the detail open on the rest; Rust's next
+  // overview leaves the dismissed one out. The last one gone, the item is gone, so back.
+  const dismiss = (key: string, reason: string) => {
+    const last = single();
+    invoke("dismiss", { key, reason })
+      .then(() => last && props.onBack())
       .catch((e: unknown) => props.onError(String(e)));
   };
 
@@ -556,11 +567,9 @@ function Detail(props: {
           <div class="dtitle">
             <h2>
               {props.item.name}
-              <Show when={props.item.version}>{(v) => <span class="ver"> {v()}</span>}</Show>
+              <Show when={lead().version}>{(v) => <span class="ver"> {v()}</span>}</Show>
             </h2>
-            <Show when={props.item.advisories.length > 0}>
-              <span class="id">{props.item.advisories.join(" · ")}</span>
-            </Show>
+            <Show when={about(props.item)}>{(text) => <span class="id">{text()}</span>}</Show>
           </div>
           <Show when={props.item.known_exploited}>
             <span class="tag kev">Exploited</span>
@@ -575,7 +584,7 @@ function Detail(props: {
           <dt>Where</dt>
           <dd>
             {props.item.target}
-            <Show when={props.item.place}> · {props.item.place}</Show>
+            <Show when={lead().place}> · {lead().place}</Show>
           </dd>
           <Show when={props.item.first_seen}>
             {(seen) => (
@@ -585,50 +594,30 @@ function Detail(props: {
               </>
             )}
           </Show>
-          <dt>Key</dt>
-          <dd class="mono">{props.item.key}</dd>
+          <Show when={single()}>
+            <dt>Key</dt>
+            <dd class="mono">{lead().key}</dd>
+          </Show>
         </dl>
-        <Show when={props.item.explanation}>
-          <p class="why">{props.item.explanation}</p>
+        <Show when={single() && lead().explanation}>
+          <p class="why">{lead().explanation}</p>
         </Show>
         <p class="fixline">
           <Icon name="wrench" />
-          {props.item.fix}
+          {lead().fix}
         </p>
-        <Show when={props.item.commands.length > 0}>
-          <pre class="cmd">
-            <For each={props.item.commands}>
-              {(c) => (
-                <span>
-                  <span class="p">$ </span>
-                  {c}
-                  {"\n"}
-                </span>
-              )}
-            </For>
-          </pre>
-        </Show>
+        <Commands commands={lead().commands} />
         <Switch>
           <Match when={preview()}>
             {(p) => (
               <div class="confirm">
                 <p>
-                  Run this fix on <b>{p().destination}</b> with {p().agent}, with full access?
+                  Run this fix on <b>{p().shown.destination}</b> with {p().shown.agent}, with full
+                  access?
                 </p>
-                <p class="fixline">{p().summary}</p>
-                <Show when={p().commands.length > 0}>
-                  <pre class="cmd" aria-label="Commands the fix runs">
-                    <For each={p().commands}>
-                      {(c) => (
-                        <span>
-                          <span class="p">$ </span>
-                          {c}
-                          {"\n"}
-                        </span>
-                      )}
-                    </For>
-                  </pre>
-                </Show>
+                <Show when={props.item.fix_scope}>{(scope) => <p>{scope()}</p>}</Show>
+                <p class="fixline">{p().shown.summary}</p>
+                <Commands commands={p().shown.commands} label="Commands the fix runs" />
                 <div class="dacts">
                   <button
                     type="button"
@@ -646,39 +635,142 @@ function Detail(props: {
             )}
           </Match>
           <Match when={dismissing()}>
-            <form class="confirm" onSubmit={dismiss}>
-              <label for="reason">Why does this not apply?</label>
-              <input
-                id="reason"
-                value={reason()}
-                onInput={(e) => setReason(e.currentTarget.value)}
-                placeholder="Not reachable: we never parse untrusted images"
-                required
-              />
-              <div class="dacts">
-                <button type="submit" class="btn primary">
-                  Dismiss
-                </button>
-                <button type="button" class="btn" onClick={() => setDismissing(false)}>
-                  Cancel
-                </button>
-              </div>
-            </form>
+            <DismissForm
+              id="reason"
+              onDismiss={(reason) => dismiss(lead().key, reason)}
+              onCancel={() => setDismissing(false)}
+            />
           </Match>
           <Match when={true}>
             <div class="dacts">
               <button type="button" class="btn primary" disabled={props.busy} onClick={askFix}>
                 Fix…
               </button>
-              <button type="button" class="btn" onClick={() => setDismissing(true)}>
-                Dismiss…
-              </button>
+              {/* A component's advisories are dismissed one by one, below. */}
+              <Show when={single()}>
+                <button type="button" class="btn" onClick={() => setDismissing(true)}>
+                  Dismiss…
+                </button>
+              </Show>
             </div>
           </Match>
         </Switch>
       </div>
+      <Show when={!single()}>
+        <ul class="group advs" aria-label="Advisories">
+          <For each={[lead(), ...props.item.others]}>
+            {(finding) => (
+              <Advisory finding={finding} onDismiss={(reason) => dismiss(finding.key, reason)} />
+            )}
+          </For>
+        </ul>
+      </Show>
       <p class="hint">A fix runs only after you confirm it, with full access, and is recorded.</p>
     </section>
+  );
+}
+
+/** One advisory of a component, collapsed to its severity and ids; opened, what it means,
+ * what the agent checked, its key, and Dismiss. */
+function Advisory(props: { finding: Finding; onDismiss: (reason: string) => void }) {
+  const [dismissing, setDismissing] = createSignal(false);
+  const f = () => props.finding;
+  return (
+    <li>
+      <details class="adv">
+        <summary>
+          <Glyph severity={f().severity} />
+          <span class="id">{f().advisories.join(" · ")}</span>
+          <Show when={f().known_exploited}>
+            <span class="tag kev">Exploited</span>
+          </Show>
+          <Show when={f().fix_state}>
+            {(state) => <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>}
+          </Show>
+          <span class="adv-sev">{f().severity}</span>
+        </summary>
+        <div class="adv-body">
+          <Show when={f().explanation}>
+            <p class="why">{f().explanation}</p>
+          </Show>
+          <Show when={f().evidence}>
+            <p class="evidence">{f().evidence}</p>
+          </Show>
+          <dl class="meta">
+            <dt>Key</dt>
+            <dd class="mono">{f().key}</dd>
+          </dl>
+          <Show
+            when={dismissing()}
+            fallback={
+              <div class="dacts">
+                <button type="button" class="btn" onClick={() => setDismissing(true)}>
+                  Dismiss…
+                </button>
+              </div>
+            }
+          >
+            <DismissForm
+              id={`reason-${f().key}`}
+              onDismiss={(reason) => props.onDismiss(reason)}
+              onCancel={() => setDismissing(false)}
+            />
+          </Show>
+        </div>
+      </details>
+    </li>
+  );
+}
+
+/** Asks why a finding does not apply, and dismisses it with that reason. */
+function DismissForm(props: {
+  id: string;
+  onDismiss: (reason: string) => void;
+  onCancel: () => void;
+}) {
+  const [reason, setReason] = createSignal("");
+  const submit = (event: SubmitEvent) => {
+    event.preventDefault();
+    props.onDismiss(reason());
+  };
+  return (
+    <form class="confirm" onSubmit={submit}>
+      <label for={props.id}>Why does this not apply?</label>
+      <input
+        id={props.id}
+        value={reason()}
+        onInput={(e) => setReason(e.currentTarget.value)}
+        placeholder="Not reachable: we never parse untrusted images"
+        required
+      />
+      <div class="dacts">
+        <button type="submit" class="btn primary">
+          Dismiss
+        </button>
+        <button type="button" class="btn" onClick={() => props.onCancel()}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** A fix's exact commands, one per line after a prompt; nothing when there are none. */
+function Commands(props: { commands: readonly string[]; label?: string }) {
+  return (
+    <Show when={props.commands.length > 0}>
+      <pre class="cmd" aria-label={props.label}>
+        <For each={props.commands}>
+          {(c) => (
+            <span>
+              <span class="p">$ </span>
+              {c}
+              {"\n"}
+            </span>
+          )}
+        </For>
+      </pre>
+    </Show>
   );
 }
 

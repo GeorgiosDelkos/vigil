@@ -18,6 +18,7 @@ use vigil_core::FixState;
 use vigil_core::History;
 use vigil_core::Inventory;
 use vigil_core::Latest;
+use vigil_core::Listed;
 use vigil_core::LoadConfigError;
 use vigil_core::NvdAccess;
 use vigil_core::OsvQuery;
@@ -29,6 +30,7 @@ use vigil_core::SshConn;
 use vigil_core::SweepError;
 use vigil_core::Targets;
 use vigil_core::dismiss;
+use vigil_core::items;
 use vigil_core::latest;
 use vigil_core::plan_fix;
 use vigil_core::report_markdown;
@@ -171,7 +173,7 @@ fn main() -> anyhow::Result<()> {
                     print(&serde_json::to_string(target).context("write JSON")?);
                 }
             } else {
-                print(&findings_text(&all));
+                print(&findings_text(all));
             }
         }
         Command::Report { open } => {
@@ -272,10 +274,12 @@ fn fix_line(state: &FixState) -> String {
     }
 }
 
-/// The open and fixed findings per target, one line each, most severe first.
-fn findings_text(all: &[Latest]) -> String {
+/// The open items and fixed findings per target, most severe first, as the popover groups
+/// them: a component with several findings is a line with its one fix, then a line per
+/// finding with its key.
+fn findings_text(all: Vec<Latest>) -> String {
     let mut out = String::new();
-    for target in all {
+    for mut target in all {
         let Some(swept) = target.swept else {
             out.push_str(&format!("{}: no sweep with a verdict yet\n", target.target));
             continue;
@@ -288,25 +292,58 @@ fn findings_text(all: &[Latest]) -> String {
             0 => String::new(),
             n => format!(", {n} fixed"),
         };
+        let listed = items(&target.target, std::mem::take(&mut target.open));
         out.push_str(&format!(
             "{} (swept {swept}): {} open{fixed}{dismissed}\n",
             target.target,
-            target.open.len()
+            listed.len()
         ));
-        for open in &target.open {
-            out.push_str(&format!(
-                "  {:<8} {}  {}\n           fix: {}\n",
-                open.severity, open.key, open.title, open.fix
-            ));
-            if let Some(state) = &open.fix_state {
-                out.push_str(&format!("           {}\n", fix_line(state)));
-            }
+        for item in &listed {
+            out.push_str(&item_text(item));
         }
         for fixed in &target.fixed {
             out.push_str(&format!(
                 "  fixed    {}  {}\n           at {}: {}\n",
                 fixed.key, fixed.title, fixed.fixed_at, fixed.summary
             ));
+        }
+    }
+    out
+}
+
+/// One item's lines: a finding or issue with its key, title and fix; or a component with its
+/// worst severity, how many advisories, its one fix, and each finding's severity, key and
+/// advisories.
+fn item_text(item: &Listed) -> String {
+    let lead = &item.lead;
+    if item.others.is_empty() {
+        let mut out = format!(
+            "  {:<8} {}  {}\n           fix: {}\n",
+            lead.severity, lead.key, lead.title, lead.fix
+        );
+        if let Some(state) = &lead.fix_state {
+            out.push_str(&format!("           {}\n", fix_line(state)));
+        }
+        return out;
+    }
+    let count = item
+        .advisory_count
+        .as_deref()
+        .expect("listed sets advisory_count whenever others is non-empty");
+    let version = lead.version.as_deref().unwrap_or_default();
+    let mut out = format!(
+        "  {:<8} {} {version}, {}: {count}\n           fix: {}\n",
+        item.severity, item.name, lead.place, lead.fix
+    );
+    for finding in item.findings() {
+        out.push_str(&format!(
+            "           {:<8} {}  {}\n",
+            finding.severity,
+            finding.key,
+            finding.advisories.join(", ")
+        ));
+        if let Some(state) = &finding.fix_state {
+            out.push_str(&format!("                    {}\n", fix_line(state)));
         }
     }
     out
@@ -611,6 +648,7 @@ mod tests {
             title: "curl is old".to_owned(),
             name: "curl".to_owned(),
             version: Some("8.0.0".to_owned()),
+            component: None,
             advisories: Vec::new(),
             place: String::new(),
             known_exploited: false,
@@ -643,7 +681,7 @@ mod tests {
             fixed: vec![fixed],
             dismissed: 0,
         };
-        let text = findings_text(&[latest]);
+        let text = findings_text(vec![latest]);
         assert!(
             text.contains("mac (swept 2026-11-05T11:00:00Z): 1 open, 1 fixed"),
             "{text}"
@@ -655,6 +693,55 @@ mod tests {
         assert!(
             text.contains("fixed    0000000000000002  zlib is old"),
             "{text}"
+        );
+    }
+
+    #[test]
+    fn a_component_with_several_findings_shows_its_fix_once_and_each_key() {
+        let at = "2026-11-05T11:00:00Z".parse().unwrap();
+        let finding = |key: &str, severity, advisory: &str| Open {
+            key: key.parse().unwrap(),
+            severity,
+            title: format!("{advisory} in ffmpeg 8.1.2, Homebrew formula ffmpeg"),
+            name: "ffmpeg".to_owned(),
+            version: Some("8.1.2".to_owned()),
+            component: None,
+            advisories: vec![advisory.to_owned()],
+            place: "Homebrew formula ffmpeg".to_owned(),
+            known_exploited: false,
+            confidence: None,
+            evidence: String::new(),
+            explanation: String::new(),
+            fix: "Upgrade ffmpeg.".to_owned(),
+            steps: Vec::new(),
+            commands: Vec::new(),
+            first_seen: None,
+            new: false,
+            fix_state: None,
+        };
+        let mut lead = finding("0000000000000001", Severity::Critical, "CVE-1");
+        lead.fix_state = Some(FixState::NotHeld { at });
+        let item = Listed {
+            id: "00000000000000ff".to_owned(),
+            target: "This Mac".to_owned(),
+            name: "ffmpeg".to_owned(),
+            lead,
+            others: vec![finding("0000000000000002", Severity::Low, "CVE-2")],
+            severity: Severity::Critical,
+            known_exploited: false,
+            needs_you: true,
+            first_seen: None,
+            new: false,
+            advisory_count: Some("2 advisories".to_owned()),
+            fix_scope: None,
+        };
+        assert_eq!(
+            item_text(&item),
+            "  critical ffmpeg 8.1.2, Homebrew formula ffmpeg: 2 advisories\n\
+             \x20          fix: Upgrade ffmpeg.\n\
+             \x20          critical 0000000000000001  CVE-1\n\
+             \x20                   still found after a fix at 2026-11-05T11:00:00Z\n\
+             \x20          low      0000000000000002  CVE-2\n"
         );
     }
 

@@ -131,6 +131,32 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   from (`found` in the record), never by comparing clocks; the last run of a key in
   `state/fixes.jsonl` decides, in file order. `vigil findings` shows the same.
 
+### Grouping by component (decided 2026-11-10)
+
+The 2026-11-10 Mac sweep found 113 findings in 12 components: ffmpeg 8.1.2 alone had 33, one
+per advisory, each with the same `brew upgrade ffmpeg`. The owner chose to show components:
+
+- A finding belongs to the installed component it was found in: same target, version and
+  place found, and same lookup unless the place is one installed thing (a Homebrew formula or
+  cask, a rustup toolchain, the `node` or `python3` on `PATH`, a version manager's folder, an
+  OS source package). One formula can map to several NVD products (curl and libcurl), all at
+  its version, and one upgrade replaces them, so they are one component, named after the
+  formula. A place that holds many packages (a lockfile, a dependency graph, npm's global
+  packages, macOS) keeps them apart by lookup; so does a place this build cannot read.
+- `popover_view` turns open findings into items: one per component, holding its findings,
+  and one per issue (an issue has no component). An item's lead is its most urgent finding
+  (exploited, then severity, then newest); the lead's fix is the item's fix, shown once, and
+  Fix runs it with the existing per-finding flow, its confirmation saying the fix is for the
+  component and the next sweep checks every advisory again. An item has the worst severity
+  of its findings, is exploited if any is, and was first seen when the earliest was.
+- Everything the popover and the report count is items: the headline, "N exploited", the
+  severity counts and bar, the target rows' columns (each component once, at its worst
+  severity), the tabs, the tray's worst severity, the urgent line, and the notification
+  (one line per component, with how many new advisories). Dismissed counts stay findings.
+- Findings stay the unit of keys, dismissals, fixes and storage; nothing on disk changed. A
+  component's detail lists each advisory, collapsed, with its own severity, explanation,
+  evidence, key and Dismiss; dismissing them all removes the item.
+
 ### Mac inventory
 
 Decided 2026-11-05. Each source is collected on its own; a failing one is reported and the
@@ -575,6 +601,8 @@ Built in step 9a (2026-11-06):
 - A sweep that finds new, open, critical or high findings or issues raises one notification
   listing up to three of them (`alerts`; on a target's first sweep with a verdict every such
   one is new, and when its last report cannot be read none is, so nothing is notified twice).
+  It counts as the popover does: one line per component, with how many such advisories it
+  has, and one per issue.
 - A tray click within 300 ms of the popover hiding on blur leaves it hidden: clicking the icon
   first takes focus from the open popover, then delivers the click.
 - Accepted: the "last sweep failed" icon is kept in memory, so after the app restarts the
@@ -600,7 +628,7 @@ Built in step 9b (2026-11-06):
   folder, repository or server; set the agent, schedule or history) checked like a loaded
   config before it is written.
 - Every value the UI shows is worked out in Rust (owner's rule, 2026-11-06): the core's
-  `popover_view` ranks findings (exploited, then severity, then newest), counts them, lists the confirmed fixes
+  `popover_view` groups findings by component, ranks the items (exploited, then severity, then newest), counts them, lists the confirmed fixes
   newest first, writes the headline and the target lines; `settings_view` writes each section's summary, the
   choices and which are chosen, folders as `~/...`, and whether a host can be added. The UI
   lays these out and sends `Setting`s; the only formatting left in TypeScript is "5 min ago",
@@ -635,11 +663,15 @@ with all the details", dark, not white):
   the app's `open_report` command writes it and opens it with `/usr/bin/open`; the popover's
   button that calls it comes with the popover's new main view, built separately. It renders `latest` through `popover_view`, so it shows what `vigil
   findings` and the popover show: the headline, the key numbers (need you, exploited, open,
-  fixed in 30 days, dismissed), a callout for each finding exploited in the wild with the
-  command to run first, the open findings and issues under "Needs you" (exploited, critical
-  or high) and "Lower", each expanding to its explanation, advisories (or, for an issue, its
-  subject), installed version, place, confidence, first seen, fix status, key, the agent's evidence, the fix's summary,
-  steps and commands with Copy buttons; then a table of targets and one of the fixes
+  fixed in 30 days, dismissed), a callout for each item with a finding exploited in the wild,
+  naming those advisories, with the command to run first, the open items under "Needs you"
+  (exploited, critical or high) and "Lower". A finding or issue alone expands to its
+  explanation, advisories (or, for an issue, its subject), installed version, place,
+  confidence, first seen, fix status, key, the agent's evidence, the fix's summary, steps and
+  commands with Copy buttons. A component with several findings is one card (2026-11-10):
+  how many advisories, what is installed where, its one fix shown once with what it covers,
+  then each advisory collapsed, with its own severity, explanation, evidence and key (and its
+  own fix summary when it differs from the lead's); then a table of targets and one of the fixes
   confirmed in the last 30 days, and the sources. Times are in UTC. Agent text is shown as
   one plain line, as everywhere else (line breaks become spaces). Writers take `state/.lock`,
   so the CLI and the app never write it at once.
@@ -664,11 +696,16 @@ asks to confirm). Same core, same files.
   newest report with a verdict: severity, key, title (the advisories, component, version and
   where it was found; or the issue's subject) and the fix summary, plus how many are
   dismissed. Dismissed means dismissed in `state/dismissals.json` now, as `fix` checks it, so a
-  `dismiss` shows at once. Titles and summaries are printed as plain lines (control and
+  `dismiss` shows at once. Since 2026-11-10 it groups as the popover does and counts items:
+  a component with several findings is one line (worst severity, name, version, place, how
+  many advisories) with its one fix, then a line per finding with its severity, key and
+  advisories; a lone finding or an issue keeps its one line. Titles and summaries are printed
+  as plain lines (control and
   invisible characters replaced), since they hold agent text and names from the target.
   `--json` prints one object per target (`target`, `swept`, `components`, `open`, `fixed`,
-  `dismissed`); an open entry also has its `confidence` (null for an issue), `evidence` and
-  fix `steps`, and its `fix_state` is null or `reported` (with `summary` and
+  `dismissed`), still one `open` entry per finding; an open entry also has its `confidence`
+  (null for an issue), `evidence`, fix `steps` and `component` (its key and name, null for
+  an issue), and its `fix_state` is null or `reported` (with `summary` and
   `pull_request`) or `not_held`. Each report
   entry carries that `title`, so the tray app shows the same line. `--target` matches the
   report name exactly.
