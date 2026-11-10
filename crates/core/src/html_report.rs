@@ -709,33 +709,41 @@ mod tests {
 
     #[test]
     fn the_report_font_is_the_app_s() {
-        let fonts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/ui/src/fonts");
-        for (weight, number) in [
-            ("Regular", 400),
-            ("Medium", 500),
-            ("SemiBold", 600),
-            ("Bold", 700),
-        ] {
-            for part in ["Latin1", "Pi"] {
-                let file = fonts.join(format!("IBMPlexSans-{weight}-{part}.woff2"));
-                let out = Command::new("/usr/bin/openssl")
-                    .args(["base64", "-A", "-in"])
-                    .arg(&file)
-                    .output()
-                    .expect("macOS ships /usr/bin/openssl");
-                assert!(out.status.success(), "openssl base64 {}", file.display());
-                let encoded = String::from_utf8(out.stdout).unwrap();
-                let rule = format!(
-                    "font-weight: {number}; src: url(\"data:font/woff2;base64,{}\")",
-                    encoded.trim()
-                );
-                assert!(
-                    PLEX_CSS.contains(&rule),
-                    "{} is not embedded under weight {number}",
-                    file.display()
-                );
-            }
+        // Every @font-face rule of the app's style.css, with the same weight and unicode-range
+        // and its file inlined, so the two cannot drift apart.
+        let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../app/ui/src");
+        let style = std::fs::read_to_string(ui.join("style.css")).unwrap();
+        let faces: Vec<&str> = style.split("@font-face {").skip(1).collect();
+        assert_eq!(faces.len(), 8, "four weights, Latin1 and Pi");
+        for face in faces {
+            let face = &face[..face.find('}').unwrap()];
+            let value = |name: &str| {
+                let start = face.find(name).unwrap() + name.len();
+                let end = start + face[start..].find(';').unwrap();
+                face[start..end]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let file = value("src: url(\"./");
+            let file = &file[..file.find('"').unwrap()];
+            let out = Command::new("/usr/bin/openssl")
+                .args(["base64", "-A", "-in"])
+                .arg(ui.join(file))
+                .output()
+                .expect("macOS ships /usr/bin/openssl");
+            assert!(out.status.success(), "openssl base64 {file}");
+            let encoded = String::from_utf8(out.stdout).unwrap();
+            let rule = format!(
+                "font-weight: {}; src: url(\"data:font/woff2;base64,{}\") format(\"woff2\"); \
+                 unicode-range: {};",
+                value("font-weight: "),
+                encoded.trim(),
+                value("unicode-range:")
+            );
+            assert!(PLEX_CSS.contains(&rule), "{file} differs from style.css");
         }
+        assert!(PLEX_CSS.starts_with("/* IBM Plex Sans: Copyright"));
         assert!(page(vec![mac(Vec::new())]).contains(PLEX_CSS));
     }
 
