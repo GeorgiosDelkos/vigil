@@ -3,23 +3,6 @@
    2026-11-09, asked for a softer, less blurred light (blur 80px at 0.42 opacity behind, 8px in
    the glass), and for nothing to move: the light, the vortex and the urgent dot are still. */
 
-/* Instrument Serif, from google/fonts at 5bb28733cec313b63fbd415b574b5ae35c8aa8b8
-   (https://github.com/google/fonts/tree/5bb28733cec313b63fbd415b574b5ae35c8aa8b8/ofl/instrumentserif),
-   under the SIL Open Font License 1.1 in fonts/OFL.txt. Bundled so the popover looks the same
-   offline; the system serif (New York) is wider and reads as a different design. */
-@font-face {
-  font-family: "Instrument Serif";
-  src: url("./fonts/InstrumentSerif-Regular.ttf") format("truetype");
-  font-style: normal;
-  font-weight: 400;
-}
-@font-face {
-  font-family: "Instrument Serif";
-  src: url("./fonts/InstrumentSerif-Italic.ttf") format("truetype");
-  font-style: italic;
-  font-weight: 400;
-}
-
 :root {
   --n-cyan: #3ef0ff;
   --n-violet: #9b5cff;
@@ -28,7 +11,6 @@
   --n-dim: rgba(143, 162, 255, 0.4);
   --n-ink: #f2f4ff;
   --n-ink2: rgba(242, 244, 255, 0.6);
-  --serif: "Instrument Serif", ui-serif, Georgia, serif;
 }
 
 .pop.on-orbit {
@@ -163,7 +145,7 @@
   cursor: pointer;
 }
 .orbit .centre .n {
-  font: 400 92px/0.85 var(--serif);
+  font: 400 92px/0.85 var(--ui);
   text-shadow:
     0 0 18px rgba(62, 240, 255, 0.55),
     0 0 42px rgba(155, 92, 255, 0.45);
@@ -176,7 +158,6 @@
 }
 .orbit .centre .n.word {
   font-size: 60px;
-  font-style: italic;
   text-shadow:
     0 0 18px rgba(61, 255, 168, 0.55),
     0 0 42px rgba(62, 240, 255, 0.35);
