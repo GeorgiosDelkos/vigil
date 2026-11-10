@@ -16,7 +16,6 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::InventoryError;
-use crate::inventory::Lookup;
 use crate::inventory::VersionManager;
 use crate::inventory::toolchains::product;
 
@@ -218,32 +217,11 @@ fn version<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
     (release_ok && pre_ok).then_some(version)
 }
 
-/// Drops the `node` or `python3` on `PATH` when a version manager has the same product at the
-/// same version. It is most likely that install, reached through the manager's shim or `PATH`
-/// entry. The manager's entry is the one kept: it names the manager that removes the version,
-/// and its finding key does not change with the `PATH` Vigil started with.
-///
-/// The accepted downside: a separate install at the same version (the nodejs.org installer's
-/// `/usr/local/bin/node`) is reported only once the manager's copy is gone.
-pub(super) fn drop_path_duplicates(components: &mut Vec<Component>) {
-    let product_version = |c: &Component| match &c.lookup {
-        Lookup::Product(p) => Some((p.to_string(), c.version.clone())),
-        Lookup::Package(_) => None,
-    };
-    let managed: Vec<_> = components
-        .iter()
-        .filter(|c| matches!(c.found_in, FoundIn::VersionManager { .. }))
-        .filter_map(product_version)
-        .collect();
-    components.retain(|c| {
-        !matches!(c.found_in, FoundIn::Node | FoundIn::Python)
-            || product_version(c).is_none_or(|pv| !managed.contains(&pv))
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::symlink;
+
+    use crate::inventory::Lookup;
 
     use super::*;
 
@@ -462,50 +440,6 @@ mod tests {
         assert!(
             matches!(&err, InventoryError::Io { path, .. } if *path == layout.dir),
             "{err:?}"
-        );
-    }
-
-    #[test]
-    fn the_path_runtime_is_dropped_when_a_manager_has_its_version() {
-        let at = |product_name: &str, version: &str, found_in: FoundIn| Component {
-            lookup: product(product_name),
-            version: version.to_owned(),
-            found_in,
-        };
-        let managed = |product_name: &str, version: &str| {
-            let found_in = FoundIn::VersionManager {
-                manager: VersionManager::Asdf,
-                path: PathBuf::from(format!("/m/{version}")),
-            };
-            at(product_name, version, found_in)
-        };
-        let brew = FoundIn::HomebrewFormula {
-            name: "node".into(),
-        };
-        let mut components = vec![
-            at("node.js", "22.1.0", FoundIn::Node),
-            at("python", "3.13.1", FoundIn::Python),
-            at("node.js", "20.0.0", FoundIn::Node),
-            at("node.js", "22.1.0", brew),
-            managed("node.js", "22.1.0"),
-            managed("python", "3.13.1"),
-            managed("python", "20.0.0"),
-        ];
-        drop_path_duplicates(&mut components);
-        let left: Vec<String> = components
-            .iter()
-            .map(|c| format!("{} [{}]", c.version, c.found_in))
-            .collect();
-        assert_eq!(
-            left,
-            [
-                "20.0.0 [the node on PATH]",
-                "22.1.0 [Homebrew formula node]",
-                "22.1.0 [asdf /m/22.1.0]",
-                "3.13.1 [asdf /m/3.13.1]",
-                "20.0.0 [asdf /m/20.0.0]",
-            ],
-            "only a PATH runtime with a managed twin of the same product and version goes"
         );
     }
 }
