@@ -22,7 +22,7 @@ and the user can approve a fix the agent then performs.
 | Sources | OSV.dev (includes GitHub reviewed advisories and malicious-package reports), NVD + CISA KEV |
 | Feed flow | App fetches into a local cache; agent reads files |
 | History window | User-chosen (`since` date or `all`); then deltas |
-| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV) |
+| Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV). Since 2026-11-10 the same rule covers OSV: Vigil compares versions itself (see "Version pre-match") and drops every advisory whose components are all out of range; the agent judges applicability. KEV entries no longer skip it (owner's decision, 2026-11-10): a known-exploited advisory that is provably out of range for every component is dropped too, which took one Mac's bundle from 271 advisories to 168 |
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
 | Agent permissions | Sweeps restricted: read anything, write only `findings.json`, read-only listing commands. Fixes get full access, only after the user confirms (decided 2026-11-05) |
 | Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
@@ -310,12 +310,15 @@ Issues on a server name a file (`server/listening.txt`); there are no settings.
 1. Feeds: delta-sync all sources (skip a source that fails, record the error in the report).
 2. Inventory:
    - Mac, GitHub and servers: app collects (servers over SSH, see "Servers").
-3. Bundle: app writes `bundle/` = `inventory.json`, filtered `advisories.jsonl`,
-   `findings.schema.json`, rendered prompt.
-4. Agent run: headless CLI in `bundle/` as cwd; agent writes `findings.json`.
-5. Validate with serde (strict). On failure, one retry with the error appended; then mark the
+3. Pre-match (see "Version pre-match"): each advisory and component pair gets in range,
+   unknown or out of range. Out-of-range pairs are dropped, KEV or not, then advisories left
+   with none; the report counts those as `out_of_range`.
+4. Bundle: app writes `bundle/` = `inventory.json`, filtered `advisories.jsonl` with each
+   candidate's verdict and reason, `findings.schema.json`, rendered prompt.
+5. Agent run: headless CLI in `bundle/` as cwd; agent writes `findings.json`.
+6. Validate with serde (strict). On failure, one retry with the error appended; then mark the
    target failed.
-6. Key each finding and issue, apply dismissals, compare with the target's last sweep (see
+7. Key each finding and issue, apply dismissals, compare with the target's last sweep (see
    "Lifecycle"), write the report; the tray app updates and notifies on new critical/high.
 
 ### Fix flow
@@ -421,8 +424,9 @@ Each target's bundle folder holds:
 - `inventory.jsonl`: one component per line with a short id (`c1`, `c2`, ...).
 - `advisories.jsonl`: one compact line per advisory: id, source, aliases, summary, source
   severity (CVSS score and vector, NVD's primary score first, or GHSA severity), what is
-  affected, `known_exploited`, the ids of the components whose lookup returned it, and
-  `record`, the path of its full record.
+  affected, `known_exploited`, the components it is a candidate for, each as
+  `{"component": "c23", "match": "in_range", "why": "2.88.1 < versionEndExcluding 2.89.0"}`
+  (see "Version pre-match"), and `record`, the path of its full record.
 - `records/<source>-<id>.json`: each advisory's full record as the source served it, opened
   on demand. OSV `versions` lists of up to 50 stay on the index line; a longer one is only
   counted there. NVD configurations keep their AND/OR structure.
@@ -450,6 +454,54 @@ Homebrew products for which NVD returns no CVEs are checked against NVD's CPE di
 unknown answer is asked again after 30 days); a product NVD does not know is reported in the
 sweep report, so a wrong guessed name is visible.
 
+### Version pre-match (decided 2026-11-10)
+
+Sweeps run the agent without a shell, so an agent that compared hundreds of ranges by hand
+spent 38 minutes on one Mac and 24 on one repository, with context compaction and a real risk
+of a wrong match. Version comparison is deterministic, so the app does it (`matching`,
+`feeds::cpe`) and the agent only judges applicability: the app narrows input, the agent
+decides "affected".
+
+Each advisory and component pair gets one verdict with a short reason:
+
+- `in_range`: the version is in an affected range or listed as affected.
+- `unknown`: the version could not be placed with certainty.
+- `out_of_range`: every part of the record that names the component puts the version
+  outside.
+
+The rule is conservative: anything not read with certainty is `unknown`, never
+`out_of_range`, since a false `out_of_range` hides a vulnerability.
+
+- OSV: the schema's evaluation algorithm
+  (<https://github.com/ossf/osv-schema/blob/7e336cc6dabe2f414d8e65f1955d1f1aa4b17d39/docs/schema.md#evaluation>)
+  over the `affected` entries for the component's ecosystem and name (PyPI names normalized,
+  crates.io `-` and `_` alike): `SEMVER` and `ECOSYSTEM` ranges with `introduced` (`0` before
+  every version), `fixed`, `last_affected` and `limit`, plus the explicit `versions` list.
+  Versions compare as SemVer 2.0 for crates.io, npm, Go (a Go version loses its `v`),
+  GitHub Actions and every `SEMVER` range, as PEP 440 for PyPI, and for RubyGems only when
+  both sides are plain dotted numbers. `GIT` ranges, unreadable versions or bounds (a manifest range such
+  as `^1.2.0`), two events at one version, a range without `introduced`, and a record whose
+  entries never name the component are `unknown`. OS packages are queried by version, so
+  OSV's answer is `in_range`.
+- NVD: each CPE match marked vulnerable for the component's product, with the rules in
+  `feeds::cpe` (start and end bounds, including or excluding; a version named in the
+  criteria; `*` without bounds is every version). A match whose version is `-` (not
+  applicable), a negated node, an unparsable record, and a record that never names the
+  product are `unknown`; a record that names the product only as not vulnerable (the
+  platform) is `out_of_range`. A match in a configuration that ANDs several CPEs keeps its
+  verdict, and its reason asks the agent to judge the platform; the app never decides
+  platforms.
+
+Out-of-range pairs are dropped from each advisory, then advisories left with none, and the
+report's `out_of_range` counts those advisories, so none disappears silently. KEV
+advisories follow the same rule (owner's decision, 2026-11-10): one is kept only when some
+pair is in range or unknown, and whether the catalog could be read changes nothing. Until
+then every KEV entry reached the agent; on the Mac 104 of 281 advisories were KEV CVEs for
+macOS releases fixed long ago. An advisory linked to no component would be kept, as nothing
+shows it out of range, but every fetched advisory comes from a component's lookup. On the
+2026-11-10 sweep's bundles this kept 16 of a repository's 341 advisories and 168 of the
+Mac's 281, and every one of the 118 findings of that sweep stayed a candidate, in range.
+
 ### Feeds
 
 Decided 2026-11-05 after checking the live APIs: OSV already mirrors the GitHub Advisory
@@ -469,9 +521,9 @@ not an OSV ecosystem, so formulae go through NVD.
   limit: 5 per 30 s without a key, 50 per 30 s with an API key read from the macOS Keychain
   (service `io.github.georgiosdelkos.vigil`, account `nvd-api-key`). A CVE reaches the bundle
   only for the installed versions its CPE matches may cover (`feeds::cpe`, which lists the
-  rules); whatever it cannot tell is kept, a CVE that names the product only as not vulnerable
-  (the platform another product runs on) is dropped, and a CVE in KEV is always kept; when
-  the KEV catalog cannot be read, no CVE is filtered.
+  rules, and "Version pre-match"); whatever it cannot tell is kept, a CVE that names the
+  product only as not vulnerable (the platform another product runs on) is dropped, KEV or
+  not (since 2026-11-10; before, a CVE in KEV was always kept).
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
   actively exploited.
 - A product's cached CVEs are used without a request for 2 hours after the last fetch's

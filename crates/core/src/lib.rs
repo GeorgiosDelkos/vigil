@@ -20,6 +20,7 @@ mod github;
 mod html_report;
 mod inventory;
 mod lifecycle;
+mod matching;
 mod package;
 mod paths;
 mod popover;

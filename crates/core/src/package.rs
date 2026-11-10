@@ -117,7 +117,7 @@ impl FromStr for Ecosystem {
 }
 
 /// A package in one ecosystem. Versions are deliberately absent: advisories are looked up by
-/// name, and the agent decides whether the installed version is affected.
+/// name, and each advisory is compared with the installed version later (`matching`).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct Package {
     /// The ecosystem the name belongs to.

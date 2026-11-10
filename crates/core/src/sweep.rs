@@ -12,7 +12,6 @@
 //! sweeps folder, which the system releases when the process ends, however it ends.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -37,7 +36,6 @@ use crate::config::Config;
 use crate::config::History;
 use crate::config::RepoSlug;
 use crate::config::Server;
-use crate::feeds::Advisory;
 use crate::feeds::Feeds;
 use crate::feeds::Kev;
 use crate::feeds::NvdAccess;
@@ -65,6 +63,10 @@ use crate::lifecycle::ComponentKey;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
+use crate::matching;
+use crate::matching::Linked;
+use crate::matching::Match;
+use crate::matching::OsvRecord;
 use crate::paths::DataDir;
 use crate::server;
 
@@ -225,6 +227,11 @@ pub struct Report {
     pub components: usize,
     /// How many advisories went into the bundle.
     pub advisories: usize,
+    /// How many advisories were fetched for the target but left out of the bundle because
+    /// Vigil's version comparison shows that none of their components is affected: every
+    /// version is outside the affected ranges, or an NVD CVE names the product only as a
+    /// platform. Advisories in CISA's KEV catalog count like any other.
+    pub out_of_range: usize,
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
     /// Risky settings and files, most severe first.
@@ -260,6 +267,7 @@ impl Report {
             agent,
             components: 0,
             advisories: 0,
+            out_of_range: 0,
             findings: Vec::new(),
             issues: Vec::new(),
             changes: None,
@@ -682,13 +690,14 @@ impl Shared<'_> {
         let dir = sweep_dir.join(&collected.dir_name);
         let mut problems = self.notes.to_vec();
         problems.extend(collected.problems);
-        let fetched = fetch(self.sources, &collected.components, &mut problems, progress);
+        let (fetched, out_of_range) =
+            fetch(self.sources, &collected.components, &mut problems, progress);
         self.sources.cancel.check()?;
         let entries: Vec<_> = fetched
             .iter()
             .map(|(advisory, components)| bundle::Entry {
                 advisory,
-                components: components.clone(),
+                components,
             })
             .collect();
         let prompt = prompt(self.data_dir, collected.prompt, &collected.title)?;
@@ -752,6 +761,7 @@ impl Shared<'_> {
         let mut report = Report::new(started, collected.target, self.agent, dir.clone());
         report.components = collected.components.len();
         report.advisories = entries.len();
+        report.out_of_range = out_of_range;
         report.findings = findings;
         report.issues = issues;
         report.changes = changes;
@@ -841,7 +851,7 @@ impl Shared<'_> {
         target: &str,
         components: &[Component],
         verdict: Verdict,
-        fetched: &[(Advisory, BTreeSet<usize>)],
+        fetched: &[Linked],
     ) -> (Vec<ReportFinding>, Vec<ReportIssue>) {
         let modified: BTreeMap<&str, Option<Timestamp>> = fetched
             .iter()
@@ -1017,14 +1027,16 @@ fn nvd_access(problems: &mut Vec<String>) -> NvdAccess {
     })
 }
 
-/// Fetches every advisory for the inventory, each with the indexes of the components whose
-/// lookup returned it.
+/// Fetches every advisory for the inventory, each with the components whose lookup returned
+/// it, by index, and how its affected versions relate to each one's version. Out-of-range
+/// pairs are already left out (see [`matching::keep_candidates`]); the count is how many
+/// advisories that left out.
 fn fetch(
     sources: Sources<'_>,
     components: &[Component],
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Vec<(Advisory, BTreeSet<usize>)> {
+) -> (Vec<Linked>, usize) {
     let mut packages: BTreeMap<OsvQuery, Vec<usize>> = BTreeMap::new();
     let mut products: BTreeMap<String, (Product, Vec<usize>)> = BTreeMap::new();
     for (i, component) in components.iter().enumerate() {
@@ -1046,21 +1058,23 @@ fn fetch(
         products: products.len(),
     });
 
-    let mut fetched = fetch_osv(sources, &packages, problems);
+    let mut fetched = fetch_osv(sources, components, &packages, problems);
     fetched.extend(fetch_nvd(
         sources, components, &products, problems, progress,
     ));
-    fetched
+    let out_of_range = matching::keep_candidates(&mut fetched);
+    (fetched, out_of_range)
 }
 
 /// OSV advisories, linked by the queries that returned them. The record's own `affected`
-/// names are not used: OSV matches names the way each ecosystem compares them (PyPI's
-/// `Django` is `django`), and the query result already carries that match.
+/// names do not decide the link: OSV matches names the way each ecosystem compares them
+/// (PyPI's `Django` is `django`), and the query result already carries that match.
 fn fetch_osv(
     sources: Sources<'_>,
+    components: &[Component],
     packages: &BTreeMap<OsvQuery, Vec<usize>>,
     problems: &mut Vec<String>,
-) -> Vec<(Advisory, BTreeSet<usize>)> {
+) -> Vec<Linked> {
     if packages.is_empty() {
         return Vec::new();
     }
@@ -1087,39 +1101,32 @@ fn fetch_osv(
             crowded.kept,
         ));
     }
-    osv.advisories
-        .into_iter()
-        .map(
-            |OsvAdvisory {
-                 advisory,
-                 queries: matched,
-             }| {
-                let components = matched
-                    .iter()
-                    .filter_map(|p| packages.get(p))
-                    .flatten()
-                    .copied()
-                    .collect();
-                (advisory, components)
-            },
-        )
-        .collect()
+    let mut fetched = Vec::with_capacity(osv.advisories.len());
+    for OsvAdvisory { advisory, queries } in osv.advisories {
+        let record = OsvRecord::parse(&advisory.record);
+        let mut matches = BTreeMap::new();
+        for query in &queries {
+            for &i in packages.get(query).into_iter().flatten() {
+                let verdict = record.verdict(&query.package, &components[i].version);
+                matches.insert(i, verdict);
+            }
+        }
+        fetched.push((advisory, matches));
+    }
+    fetched
 }
 
-/// NVD CVEs per product, merged by CVE id, and one note for every product NVD does not know.
-/// A CVE is linked only to the components whose installed version it may affect, and left out
-/// when it may affect none of them (see `feeds::cpe`). A CVE in the KEV catalog is linked to
-/// every component of its product: one exploited in the wild is worth the agent's look even
-/// when its CPE matches seem to rule the version out. When the catalog could not be read,
-/// any CVE may be in it, so none is filtered.
+/// NVD CVEs per product, merged by CVE id, each linked to the components of its products with
+/// the verdict of its CPE matches (see `feeds::cpe`), and one note for every product NVD does
+/// not know.
 fn fetch_nvd(
     sources: Sources<'_>,
     components: &[Component],
     products: &BTreeMap<String, (Product, Vec<usize>)>,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Vec<(Advisory, BTreeSet<usize>)> {
-    let mut found: BTreeMap<String, (Advisory, BTreeSet<usize>)> = BTreeMap::new();
+) -> Vec<Linked> {
+    let mut found: BTreeMap<String, Linked> = BTreeMap::new();
     let mut unknown = Vec::new();
     for (done, (name, (product, indexes))) in products.iter().enumerate() {
         // The caller sees the request and stops; what was fetched is not used.
@@ -1143,24 +1150,15 @@ fn fetch_nvd(
             },
             Ok(advisories) => {
                 for advisory in advisories {
-                    let may_be_exploited = sources
-                        .kev
-                        .is_none_or(|kev| advisory.is_known_exploited(kev));
                     let matches = cpe::Matches::parse(&advisory.record);
-                    let affected: Vec<usize> = indexes
+                    let verdicts: Vec<(usize, Match)> = indexes
                         .iter()
-                        .copied()
-                        .filter(|&i| {
-                            may_be_exploited || matches.may_affect(product, &components[i].version)
-                        })
+                        .map(|&i| (i, matches.verdict(product, &components[i].version)))
                         .collect();
-                    if affected.is_empty() {
-                        continue;
-                    }
                     let entry = found
                         .entry(advisory.id.clone())
-                        .or_insert_with(|| (advisory, BTreeSet::new()));
-                    entry.1.extend(affected);
+                        .or_insert_with(|| (advisory, BTreeMap::new()));
+                    entry.1.extend(verdicts);
                 }
             }
             Err(e) => problems.push(format!("NVD product {name}: {}", error_chain(&e))),
@@ -1286,8 +1284,14 @@ fn write_report(dir: &Path, report: &Report) -> Result<(), SweepError> {
 /// visible text, though a renderer that autolinks may make it clickable.
 pub fn report_markdown(report: &Report) -> String {
     let mut out = format!(
-        "# Sweep of {} ({})\n\nAgent: {}. {} components, {} advisories checked.\n\n",
-        report.target, report.started, report.agent, report.components, report.advisories
+        "# Sweep of {} ({})\n\nAgent: {}. {} components, {} advisories checked, {} left out \
+         as out of range.\n\n",
+        report.target,
+        report.started,
+        report.agent,
+        report.components,
+        report.advisories,
+        report.out_of_range
     );
     out.push_str(&headline(report));
     if let Some(changes) = &report.changes {
@@ -1776,26 +1780,30 @@ mod tests {
             kev: Some(&kev),
             cancel: &cancel,
         };
-        let fetched = fetch(sources, &inventory.components, &mut problems, &mut |p| {
+        let (fetched, dropped) = fetch(sources, &inventory.components, &mut problems, &mut |p| {
             seen.push(format!("{p:?}"));
         });
-
+        assert_eq!(
+            fetched[0].1[&0],
+            Match::Unknown("an affected entry gives neither ranges nor versions".to_owned()),
+            "each pair carries its verdict"
+        );
+        assert_eq!(dropped, 2, "CVE-6 and CVE-7");
         let linked: Vec<(&str, Vec<usize>)> = fetched
             .iter()
-            .map(|(a, c)| (a.id.as_str(), c.iter().copied().collect()))
+            .map(|(a, c)| (a.id.as_str(), c.keys().copied().collect()))
             .collect();
         assert_eq!(
             linked,
             [
                 ("GHSA-1", vec![0, 2]),
                 ("PYSEC-1", vec![4]),
-                ("CVE-7", vec![1, 5]),
                 ("CVE-8", vec![5]),
                 ("CVE-9", vec![1, 5]),
             ],
             "linked by query, so `Django` reaches django; an NVD CVE only to the versions it \
-             may affect, so CVE-6, which affects neither curl, is left out, unless it is \
-             exploited in the wild like CVE-7"
+             may affect, so CVE-6 and CVE-7, which affect neither curl, are left out, though \
+             CVE-7 is exploited in the wild"
         );
         assert_eq!(
             problems,
@@ -1822,17 +1830,13 @@ mod tests {
         );
         assert!(!seen.iter().any(|s| s.starts_with("Product")), "{seen:?}");
 
-        // Without the KEV catalog any CVE may be exploited, so none is left out.
+        // Without the KEV catalog the same advisories are left out.
         let unknown = Sources {
             kev: None,
             ..sources
         };
-        let fetched = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
-        let linked: Vec<(&str, Vec<usize>)> = fetched
-            .iter()
-            .map(|(a, c)| (a.id.as_str(), c.iter().copied().collect()))
-            .collect();
-        assert!(linked.contains(&("CVE-6", vec![1, 5])), "{linked:?}");
+        let (_, dropped) = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
+        assert_eq!(dropped, 2);
     }
 
     #[test]
@@ -1946,6 +1950,7 @@ mod tests {
             agent: AgentKind::Claude,
             components: 2,
             advisories: 1,
+            out_of_range: 3,
             findings,
             issues: Vec::new(),
             changes: None,
@@ -2265,6 +2270,12 @@ mod tests {
             clean.contains("Nothing affected or risky was found."),
             "{clean}"
         );
+        assert!(
+            clean.contains("1 advisories checked, 3 left out as out of range."),
+            "{clean}"
+        );
+        let json = serde_json::to_value(report(vec![], &[])).unwrap();
+        assert_eq!(json["out_of_range"], 3, "report.json counts them too");
         let gaps = report_markdown(&report(vec![], &["OSV: offline"]));
         assert!(gaps.contains("some things were not checked"), "{gaps}");
         assert!(

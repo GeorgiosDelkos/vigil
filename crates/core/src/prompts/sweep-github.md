@@ -12,7 +12,10 @@ and need none.
   `found_in`.
 - `advisories.jsonl`: advisories that name those dependencies, one per line: `id`,
   `aliases`, `summary`, the source's `severity`, what is `affected`, `known_exploited` (CISA
-  KEV), the `components` it was fetched for, and `record`, the path of the full advisory.
+  KEV), the `components` it is a candidate for, and `record`, the path of the full advisory.
+  Each entry of `components` is `{"component": "c23", "match": "in_range", "why": "1.2.3 >=
+  introduced 0 and < fixed 1.2.4"}`: how Vigil's own version comparison placed that
+  dependency (see "Version matches").
 - `records/<source>-<id>.json`: the full advisory. Open it when the index line is not enough.
 - `github/repository.json`: the repository: visibility, default branch, whether it is
   archived or a fork.
@@ -33,13 +36,32 @@ and need none.
 - `github/workflows/<name>`: the default branch's GitHub Actions workflow files.
 - `findings.schema.json`: the exact shape of the file you write.
 
+## Version matches
+
+There is no shell for this: you cannot run scripts or programs (no Python, no `jq`), and you
+need none. Do not write a matcher. Vigil has already compared every dependency's version with
+every advisory's affected versions (SemVer for crates.io, npm, Go and GitHub Actions, PEP 440
+for PyPI, plain dotted numbers for RubyGems), and left out the advisories that cannot affect any
+dependency. What is left are candidates, and each `components` entry says where its version
+fell:
+
+- `in_range`: the version is inside an affected range or listed as affected; `why` names the
+  range. Confirm it against the record, then judge whether the advisory applies.
+- `unknown`: Vigil could not place the version with certainty (a range from a manifest, a
+  version or bound it cannot read, a GIT range); `why` says what. Read the record and decide
+  yourself.
+
+Components outside an advisory's affected versions are left out, and so is an advisory left
+with none, known-exploited ones included.
+
 ## What to do
 
-1. For each advisory, decide whether it affects the version of one of its components.
-   Compare the version with the affected ranges, and read the full record when the ranges are
-   missing or unclear. A range from a manifest (`^1.2.0`) means the resolved version is not
-   known: use `likely` and say so in `evidence`. Open Dependabot alerts are GitHub's own
-   matches; use them as evidence, not as proof.
+1. For each advisory, decide whether it affects the version of one of its candidate
+   components. A version in range is not yet a finding: judge whether the advisory applies
+   (the right package, a feature or configuration the repository uses). Read the full record
+   when the index line is not enough. A range from a manifest (`^1.2.0`) means the resolved
+   version is not known: use `likely` and say so in `evidence`. Open Dependabot alerts are
+   GitHub's own matches; use them as evidence, not as proof.
 2. Review the settings and workflows for risks that matter for this repository: an
    unprotected default branch, secret scanning or Dependabot alerts off, broad default
    workflow permissions, actions not pinned to a full commit SHA, `pull_request_target` or
