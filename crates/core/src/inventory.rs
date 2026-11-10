@@ -27,7 +27,8 @@ use crate::package::Package;
 #[derive(Debug, Default)]
 pub struct Inventory {
     /// Installed components, in collection order. The same component appears once per place it
-    /// was found.
+    /// was found, except the `node` or `python3` on `PATH`, which is left out when another place
+    /// has the same product and version.
     pub components: Vec<Component>,
     /// Sources or files that could not be read, names that cannot be looked up, and notes on
     /// sources that were still read (see [`InventoryError::is_failure`]).
@@ -51,7 +52,7 @@ impl Inventory {
         homebrew::collect(&mut inventory);
         toolchains::collect(&mut inventory);
         version_managers::collect(&mut inventory);
-        version_managers::drop_path_duplicates(&mut inventory.components);
+        drop_path_duplicates(&mut inventory.components);
         for dir in project_dirs {
             lockfiles::collect(dir, &mut inventory);
         }
@@ -96,6 +97,31 @@ impl Inventory {
             }
         }
     }
+}
+
+/// Drops the `node` or `python3` on `PATH` when any other component (in practice a version
+/// manager's or a Homebrew formula's) has the same product at the same version. The `PATH` one
+/// is most likely that install, reached through the manager's shim or Homebrew's `bin` folder
+/// on `PATH`. The other entry is the one kept: it names the tool that removes or upgrades the
+/// version, and its finding key does not change with the `PATH` Vigil started with.
+///
+/// The accepted downside: a separate install at the same version (the nodejs.org installer's
+/// `/usr/local/bin/node` next to Homebrew's `node` at that version) is reported only once the
+/// other copy is gone or upgraded.
+fn drop_path_duplicates(components: &mut Vec<Component>) {
+    let is_path_runtime = |c: &Component| matches!(c.found_in, FoundIn::Node | FoundIn::Python);
+    let product_version = |c: &Component| match &c.lookup {
+        Lookup::Product(p) => Some((p.to_string(), c.version.clone())),
+        Lookup::Package(_) => None,
+    };
+    let others: Vec<_> = components
+        .iter()
+        .filter(|c| !is_path_runtime(c))
+        .filter_map(product_version)
+        .collect();
+    components.retain(|c| {
+        !is_path_runtime(c) || product_version(c).is_none_or(|pv| !others.contains(&pv))
+    });
 }
 
 /// One installed thing at one version, and where it was found.
@@ -420,6 +446,90 @@ mod tests {
         };
         assert!(!other.is_failure());
         assert!(other.to_string().contains("OSV covers crates.io only"));
+    }
+
+    /// What is left after [`drop_path_duplicates`], as `version [found_in]`.
+    fn deduplicated(mut components: Vec<Component>) -> Vec<String> {
+        drop_path_duplicates(&mut components);
+        components
+            .iter()
+            .map(|c| format!("{} [{}]", c.version, c.found_in))
+            .collect()
+    }
+
+    fn at(product: &str, version: &str, found_in: FoundIn) -> Component {
+        Component {
+            lookup: Lookup::Product(product.parse().unwrap()),
+            version: version.to_owned(),
+            found_in,
+        }
+    }
+
+    fn formula(name: &str) -> FoundIn {
+        FoundIn::HomebrewFormula { name: name.into() }
+    }
+
+    #[test]
+    fn the_path_runtime_is_dropped_when_a_manager_has_its_version() {
+        let managed = |product: &str, version: &str| {
+            let found_in = FoundIn::VersionManager {
+                manager: VersionManager::Asdf,
+                path: PathBuf::from(format!("/m/{version}")),
+            };
+            at(product, version, found_in)
+        };
+        let components = vec![
+            at("node.js", "22.1.0", FoundIn::Node),
+            at("python", "3.13.1", FoundIn::Python),
+            at("node.js", "20.0.0", FoundIn::Node),
+            managed("node.js", "22.1.0"),
+            managed("python", "3.13.1"),
+            managed("python", "20.0.0"),
+        ];
+        assert_eq!(
+            deduplicated(components),
+            [
+                "20.0.0 [the node on PATH]",
+                "22.1.0 [asdf /m/22.1.0]",
+                "3.13.1 [asdf /m/3.13.1]",
+                "20.0.0 [asdf /m/20.0.0]",
+            ],
+            "only a PATH runtime with a managed twin of the same product and version goes"
+        );
+    }
+
+    #[test]
+    fn the_path_runtime_is_dropped_when_a_formula_has_its_version() {
+        let components = vec![
+            at("python", "3.14.6", FoundIn::Python),
+            at("node.js", "24.1.0", FoundIn::Node),
+            at("python", "3.14.6", formula("python@3.14")),
+            at("node.js", "24.1.0", formula("node")),
+        ];
+        assert_eq!(
+            deduplicated(components),
+            [
+                "3.14.6 [Homebrew formula python@3.14]",
+                "24.1.0 [Homebrew formula node]",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_path_runtime_is_kept_when_version_or_product_differs() {
+        let components = vec![
+            at("python", "3.14.6", FoundIn::Python),
+            at("python", "3.13.1", formula("python@3.13")),
+            at("node.js", "3.14.6", formula("node")),
+        ];
+        assert_eq!(
+            deduplicated(components),
+            [
+                "3.14.6 [the python3 on PATH]",
+                "3.13.1 [Homebrew formula python@3.13]",
+                "3.14.6 [Homebrew formula node]",
+            ]
+        );
     }
 
     #[test]
