@@ -56,7 +56,7 @@ Core modules (one concept each):
 - `config`: `config.toml` load/validate (`serde`, `deny_unknown_fields`).
 - `paths`: data dir layout.
 - `feeds::{osv, nvd, kev, ghsa}`: sync with cursor per source; `feeds::index` name index.
-- `inventory::{homebrew, toolchains, lockfiles}`: Mac collectors producing `Vec<Component>`;
+- `inventory::{homebrew, toolchains, version_managers, lockfiles}`: Mac collectors producing `Vec<Component>`;
   `github` collects a repository (step 5).
 - `agent`: `AgentKind` enum, detection, command construction, run with output capture.
 - `sweep`: orchestrates targets sequentially, emits progress events.
@@ -145,6 +145,7 @@ rest still count. A tool that is not installed is skipped, not an error.
 | Node.js | `node --version` | NVD product `node.js` |
 | Global npm packages | `npm ls -g --json --depth=0` | OSV `npm` |
 | Python | `python3 --version` | NVD product `python` |
+| Node.js and Python versions kept by version managers | the version folders: nvm `$NVM_DIR/versions/node/v*` (else `$XDG_CONFIG_HOME/nvm`, else `~/.nvm`), fnm `node-versions/v*` under `$FNM_DIR` or the first that exists of `$XDG_DATA_HOME/fnm` (`~/.local/share/fnm`), `~/.fnm`, `~/Library/Application Support/fnm`, Volta `$VOLTA_HOME/tools/image/node/*` (`~/.volta`), asdf `$ASDF_DATA_DIR/installs/{nodejs,python}/*` (`~/.asdf`), pyenv `$PYENV_ROOT/versions/*` (`~/.pyenv`) | NVD product `node.js` or `python` |
 | uv and pipx tools | `uv tool list`, `pipx list --json` | OSV `PyPI` |
 | Project lockfiles under `mac.project_dirs` | `Cargo.lock`, `package-lock.json` and `npm-shrinkwrap.json` (v2/v3), `uv.lock`, `poetry.lock` | OSV by ecosystem |
 
@@ -156,10 +157,31 @@ Commands run from `/` with stdin closed and a one-minute limit, so a project fil
 caller's folder (`rust-toolchain.toml`, `.nvmrc`) cannot change which tool answers. Tools that
 are not installed are listed, so an inventory taken with a bare `PATH` shows what it skipped.
 
+Version managers (decided 2026-11-10): every installed version counts, not only the one the
+shell would pick, since an unused version is still on disk and one `nvm use` away. The folders
+are listed with no command run, so the result does not depend on `PATH`. Only real folders
+whose name (after nvm's and fnm's `v`) starts with a digit and holds only letters, digits, `.`,
+`-` and `+` are versions: symlinks (pyenv-virtualenv's virtualenvs), fnm's `.downloads`,
+asdf's `ref-` builds and pyenv's other distributions (`pypy3.10-7.3.15`, `anaconda3-2024.06`)
+are skipped. Each version is found in `version_manager` with the manager and the folder, shown
+as "nvm /Users/me/.nvm/versions/node/v22.22.2"; the folder is in the finding key, so two
+versions are two findings and removing one keeps the other's key. When the `node` or `python3`
+on `PATH` has the same product and version as a manager's entry it is reported once, as the
+manager's: that names the tool that removes it, and its key does not change with `PATH`. A
+separate install at the same version is then reported only after the manager's copy is gone.
+The sweep's fix for such a version removes it with the manager (`nvm uninstall 22.22.2`;
+Volta has no command for it, so its folder goes to the Trash), installing a fixed version
+first if none is installed and moving the default off it; switching the default alone is not
+a fix.
+
 Known gaps, accepted for now:
 
-- Only the `node`, `npm` and `python3` first on `PATH` are read; other versions kept by nvm,
-  fnm, volta, asdf or pyenv, and their global packages, are not.
+- Global npm packages are read only from the `npm` first on `PATH`; those installed under
+  other Node.js versions a version manager keeps are not.
+- pyenv's and asdf's Pythons that are not a CPython version folder (PyPy, GraalPy, conda
+  distributions) and asdf's `ref-` builds are not read. nvm versions older than Node.js 0.12
+  and io.js are not read. A manager's folder set only in a shell profile (`NVM_DIR` in
+  `.zshrc`) is not seen by an app started at login, which reads the default folders.
 - `pnpm-lock.yaml`, `yarn.lock`, `bun.lock` and `Pipfile.lock` are not read.
 - A Homebrew name that is a valid CPE name but the wrong product gets no CVEs and no warning.
   Step 4 checks each product with no CVEs against NVD's CPE dictionary (an unknown answer is
