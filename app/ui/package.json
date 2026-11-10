@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "check": "oxlint && oxfmt --check . && tsc --noEmit",
+    "check": "oxlint && oxfmt --check . && tsc --noEmit && vitest run src/scale.test.ts",
     "test": "vitest run"
   },
   "dependencies": {
