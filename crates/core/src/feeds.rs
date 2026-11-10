@@ -2,8 +2,8 @@
 //!
 //! The app narrows advisories to the packages and products in the inventory here, and to the
 //! installed versions afterwards (`matching`, and `cpe` for NVD); the agent decides which ones
-//! apply. So every fetch here takes names, never versions, and returns records as the source served them, unparsed beyond the few fields
-//! needed for caching and the history window.
+//! apply. So every fetch here takes names, never versions, and returns records as the source
+//! served them, unparsed beyond the few fields needed for caching and the history window.
 //!
 //! Records are cached under `<data dir>/feeds/` as one JSON file per OSV advisory and per NVD
 //! product. A missing or unreadable cache file is fetched again, so deleting the folder is
