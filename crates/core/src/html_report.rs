@@ -256,7 +256,8 @@ fn item(listed: &Listed, expanded: bool) -> String {
 fn component_part(listed: &Listed) -> String {
     let lead = &listed.lead;
     let mut rows = component_rows(listed);
-    // The earliest finding's date; only a newer one may be new, so say which is.
+    // The date is the earliest finding's, but `new` may come from a later one, so the note
+    // does not mark the date itself as new.
     let mut first_seen = seen(listed.first_seen, false);
     if listed.new {
         first_seen.push_str(" (an advisory is new in the last sweep)");

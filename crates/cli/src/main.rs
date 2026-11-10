@@ -326,7 +326,10 @@ fn item_text(item: &Listed) -> String {
         }
         return out;
     }
-    let count = item.advisory_count.as_deref().unwrap_or_default();
+    let count = item
+        .advisory_count
+        .as_deref()
+        .expect("listed sets advisory_count whenever others is non-empty");
     let version = lead.version.as_deref().unwrap_or_default();
     let mut out = format!(
         "  {:<8} {} {version}, {}: {count}\n           fix: {}\n",
