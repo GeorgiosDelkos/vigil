@@ -11,6 +11,7 @@ import {
   SEVERITIES,
   type Listed,
   type Overview,
+  type Severity,
   type Status,
   type TargetLine,
 } from "./overview.ts";
@@ -106,7 +107,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
           {(hint) => <p class="orbit-hint">{hint()}</p>}
         </Match>
       </Switch>
-      <Chips
+      <TargetRows
         targets={props.overview.targets}
         sweeping={sweeping() !== null}
         onOpen={props.actions.onTargets}
@@ -203,44 +204,89 @@ function Progress(props: { status: Sweeping; now: Date }) {
   );
 }
 
-/** The most dots a chip shows; the list behind shows every finding. Arbitrary: six fit the
- * narrowest chip on one line. */
-const CHIP_DOTS = 6;
+/** The tags' severity names. "med" is short so three tags fit beside a long target name. */
+const TAG: Readonly<Record<Severity, string>> = {
+  critical: "critical",
+  high: "high",
+  medium: "med",
+  low: "low",
+};
 
-/** A target chip's dots, from the counts Rust gives it: one per open finding in its severity's
- * colour, worst first; green when it is clear; one dim dot while a sweep runs or before its
- * first. */
-function chipDots(target: TargetLine, sweeping: boolean): string[] {
-  if (sweeping || target.swept === null) {
-    return ["var(--n-dim)"];
+/** A target's open findings per severity it has, worst first: one tag and one bar segment
+ * each. Empty before its first sweep and when it is clear. */
+function mix(target: TargetLine): { severity: Severity; count: number }[] {
+  if (target.swept === null) {
+    return [];
   }
-  const lit = SEVERITIES.flatMap((s) => Array<string>(target.counts[s]).fill(NEON[s]));
-  return lit.length > 0 ? lit.slice(0, CHIP_DOTS) : ["var(--n-green)"];
+  return SEVERITIES.filter((s) => target.counts[s] > 0).map((s) => ({
+    severity: s,
+    count: target.counts[s],
+  }));
 }
 
-/** What a chip's dots say, for those who cannot see them. */
-function chipStatus(target: TargetLine): string {
+/** What a row's tags and bar say, for those who cannot see them. */
+function rowStatus(target: TargetLine): string {
   if (target.swept === null) {
     return "not swept yet";
   }
-  return target.open > 0 ? `${target.open} open` : "clear";
+  if (target.open === 0) {
+    return "clear";
+  }
+  const parts = mix(target).map((m) => `${m.count} ${m.severity}`);
+  return `${target.open} open: ${parts.join(", ")}`;
 }
 
-function Chips(props: { targets: readonly TargetLine[]; sweeping: boolean; onOpen: () => void }) {
+/** One row per target, with its open findings as labelled tags and a bar split by severity.
+ * Every bar is the full width, so it shows the mix within its target, not its size beside the
+ * others (the owner's choice, 2026-11-10). During a sweep the rows dim: their counts are from
+ * the last sweep. */
+function TargetRows(props: {
+  targets: readonly TargetLine[];
+  sweeping: boolean;
+  onOpen: () => void;
+}) {
   return (
-    <div class="chips">
-      {/* Keyed by position, so a refetch during a sweep keeps the chips and their focus. */}
+    <div class="trows glass" classList={{ dim: props.sweeping }}>
+      {/* Keyed by position, so a refetch during a sweep keeps the rows and their focus. */}
       <Index each={props.targets}>
         {(t) => (
-          <button type="button" class="glass" onClick={() => props.onOpen()}>
+          <button type="button" class="trow" onClick={() => props.onOpen()}>
             <Icon name={t().kind} />
-            <b>{t().label}</b>
-            <span class="sr-only">, {chipStatus(t())}</span>
-            <i aria-hidden="true">
-              <Index each={chipDots(t(), props.sweeping)}>
-                {(colour) => <span style={{ "--c": colour() }} />}
+            <b class="tname" aria-hidden="true">
+              {t().label}
+            </b>
+            <span class="sr-only">
+              {t().label}, {rowStatus(t())}
+            </span>
+            <span class="tags" aria-hidden="true">
+              <Show
+                when={mix(t()).length > 0}
+                fallback={
+                  <Show when={t().swept !== null}>
+                    <span class="stag ok">clear</span>
+                  </Show>
+                }
+              >
+                <Index each={mix(t())}>
+                  {(m) => (
+                    <span class="stag" style={{ "--c": NEON[m().severity] }}>
+                      {m().count} {TAG[m().severity]}
+                    </span>
+                  )}
+                </Index>
+              </Show>
+            </span>
+            <span class="go" aria-hidden="true">
+              ›
+            </span>
+            <small class="tsub" aria-hidden="true">
+              {t().checked ?? "not swept yet"}
+            </small>
+            <span class="tbar" classList={{ ok: t().swept !== null && t().open === 0 }}>
+              <Index each={mix(t())}>
+                {(m) => <i style={{ "flex-grow": m().count, "--c": NEON[m().severity] }} />}
               </Index>
-            </i>
+            </span>
           </button>
         )}
       </Index>

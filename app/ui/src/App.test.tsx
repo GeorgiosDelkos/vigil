@@ -95,12 +95,15 @@ const context = {
   stroke: () => undefined,
 };
 
-/** The colours of the dots on the target chip named `name`. */
-function colours(name: RegExp): string[] {
-  const chip = screen.getByRole("button", { name });
-  return [...chip.querySelectorAll<HTMLElement>("i span")].map((dot) =>
-    dot.style.getPropertyValue("--c"),
-  );
+/** The tags on the target row named `name`, and its bar's segments as count and colour. */
+function targetRow(name: RegExp): { tags: string[]; bar: string[] } {
+  const button = screen.getByRole("button", { name });
+  return {
+    tags: [...button.querySelectorAll(".stag")].map((t) => t.textContent ?? ""),
+    bar: [...button.querySelectorAll<HTMLElement>(".tbar i")].map(
+      (i) => `${i.style.flexGrow} ${i.style.getPropertyValue("--c")}`,
+    ),
+  };
 }
 
 /** Renders the popover and opens the list behind the main view. */
@@ -966,10 +969,7 @@ describe("the main view", () => {
     expect(document.querySelector(".orbit.green")).not.toBeNull();
     expect(screen.getByText("1 fixed in the last 30 days")).toBeTruthy();
     expect(screen.getByText("3 targets · every 6 hours")).toBeTruthy();
-    const chip = screen.getByRole("button", { name: /^This Mac/ });
-    expect(chip.querySelector<HTMLElement>("i span")?.style.getPropertyValue("--c")).toBe(
-      "var(--n-green)",
-    );
+    expect(targetRow(/^This Mac/)).toEqual({ tags: ["clear"], bar: [] });
   });
 
   it("opens the list from the count, and goes back with Back or Escape", async () => {
@@ -1022,24 +1022,23 @@ describe("the main view", () => {
     answer();
     render(() => <App />);
     await screen.findByTitle("Show details");
-    expect(colours(/^web/)).toEqual([
-      "#ff3b3b",
-      "#ff8a1f",
-      "#ff8a1f",
-      "#ff8a1f",
-      "#ff8a1f",
-      "#ff8a1f",
-    ]);
-    expect(screen.getByRole("button", { name: "web, 8 open" })).toBeTruthy();
-    expect(colours(/^me\/app/)).toEqual(["var(--n-green)"]);
+    expect(targetRow(/^web/)).toEqual({
+      tags: ["1 critical", "5 high", "2 med"],
+      bar: ["1 #ff3b3b", "5 #ff8a1f", "2 #ffe14a"],
+    });
+    expect(
+      screen.getByRole("button", { name: "web, 8 open: 1 critical, 5 high, 2 medium" }),
+    ).toBeTruthy();
+    expect(targetRow(/^me\/app/)).toEqual({ tags: ["clear"], bar: [] });
     expect(screen.getByRole("button", { name: "me/app, clear" })).toBeTruthy();
-    expect(colours(/^This Mac/)).toEqual(["var(--n-dim)"]);
+    expect(targetRow(/^This Mac/)).toEqual({ tags: [], bar: [] });
     expect(screen.getByRole("button", { name: "This Mac, not swept yet" })).toBeTruthy();
+    expect(document.querySelector(".trows.dim")).toBeNull();
 
     shown = sweeping(false);
     handlers.get("changed")?.({ payload: null });
     await screen.findByText("sweeping This Mac");
-    expect(colours(/^This Mac/)).toEqual(["var(--n-dim)"]);
+    expect(document.querySelector(".trows.dim")).not.toBeNull();
   });
 
   it("shows why the last sweep failed", async () => {
