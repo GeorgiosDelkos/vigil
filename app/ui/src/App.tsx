@@ -532,17 +532,20 @@ function Detail(props: {
 }) {
   const lead = () => props.item.lead;
   const single = () => props.item.others.length === 0;
-  const [preview, setPreview] = createSignal<FixPreview | null>(null);
+  // The preview keeps the key it was asked for: dismissing the lead while it shows makes
+  // another finding the lead, and Run fix must still run the fix shown.
+  const [preview, setPreview] = createSignal<{ key: string; shown: FixPreview } | null>(null);
   const [dismissing, setDismissing] = createSignal(false);
   const askFix = () => {
-    invoke<FixPreview>("fix_preview", { key: lead().key })
-      .then(setPreview)
+    const key = lead().key;
+    invoke<FixPreview>("fix_preview", { key })
+      .then((shown) => setPreview({ key, shown }))
       .catch((e: unknown) => props.onError(String(e)));
   };
   // The preview's `found` pins the fix to the one shown: Rust refuses it if a sweep changed
   // the finding since.
-  const runFix = (shown: FixPreview) => {
-    invoke("fix", { key: lead().key, found: shown.found }).catch((e: unknown) =>
+  const runFix = (asked: { key: string; shown: FixPreview }) => {
+    invoke("fix", { key: asked.key, found: asked.shown.found }).catch((e: unknown) =>
       props.onError(String(e)),
     );
   };
@@ -609,11 +612,12 @@ function Detail(props: {
             {(p) => (
               <div class="confirm">
                 <p>
-                  Run this fix on <b>{p().destination}</b> with {p().agent}, with full access?
+                  Run this fix on <b>{p().shown.destination}</b> with {p().shown.agent}, with full
+                  access?
                 </p>
                 <Show when={props.item.fix_scope}>{(scope) => <p>{scope()}</p>}</Show>
-                <p class="fixline">{p().summary}</p>
-                <Commands commands={p().commands} label="Commands the fix runs" />
+                <p class="fixline">{p().shown.summary}</p>
+                <Commands commands={p().shown.commands} label="Commands the fix runs" />
                 <div class="dacts">
                   <button
                     type="button"
@@ -679,6 +683,9 @@ function Advisory(props: { finding: Finding; onDismiss: (reason: string) => void
           <span class="id">{f().advisories.join(" · ")}</span>
           <Show when={f().known_exploited}>
             <span class="tag kev">Exploited</span>
+          </Show>
+          <Show when={f().fix_state}>
+            {(state) => <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>}
           </Show>
           <span class="adv-sev">{f().severity}</span>
         </summary>

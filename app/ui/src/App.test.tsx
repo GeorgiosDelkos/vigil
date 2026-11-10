@@ -617,8 +617,28 @@ describe("a component", () => {
     fireEvent.click(screen.getByText("Fix…"));
     expect(await screen.findByText(/which all 3 advisories are in; the next sweep/)).toBeTruthy();
     expect(invoke).toHaveBeenCalledWith("fix_preview", { key: "f2" });
+    // The lead dismissed elsewhere while the preview shows: Run fix still runs the fix shown.
+    shown = grouped(ffmpeg(["f1", "f3"]));
+    handlers.get("changed")?.({ payload: null });
+    await vi.waitFor(() => expect(screen.getByText("2 advisories")).toBeTruthy());
     fireEvent.click(screen.getByText("Run fix"));
     expect(invoke).toHaveBeenCalledWith("fix", { key: "f2", found: "2026-11-06T11:00:00Z" });
+  });
+
+  it("marks an advisory whose fix did not hold, not only the lead", async () => {
+    const item = ffmpeg();
+    const [f1, f3] = item.others;
+    if (f1 === undefined || f3 === undefined) {
+      throw new Error("ffmpeg has three findings");
+    }
+    const at = "2026-11-06T10:00:00Z";
+    shown = grouped({ ...item, others: [{ ...f1, fix_state: { state: "not_held", at } }, f3] });
+    answer();
+    await openList();
+    fireEvent.click(await screen.findByText("ffmpeg"));
+    const list = await screen.findByRole("list", { name: "Advisories" });
+    const [, held] = within(list).getAllByRole("listitem");
+    expect(within(held as HTMLElement).getByText("Still found after a fix")).toBeTruthy();
   });
 
   it("dismisses one advisory and keeps showing the rest", async () => {
