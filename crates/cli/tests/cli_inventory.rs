@@ -45,6 +45,13 @@ impl Sandbox {
             .arg("inventory")
             .env("HOME", self.path())
             .env("PATH", self.bin())
+            .env_remove("NVM_DIR")
+            .env_remove("FNM_DIR")
+            .env_remove("VOLTA_HOME")
+            .env_remove("ASDF_DATA_DIR")
+            .env_remove("PYENV_ROOT")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
             .output()
             .expect("the test binary was built by cargo")
     }
@@ -77,6 +84,10 @@ fn collects_every_source() {
     sandbox.tool("python3", "echo 'Python 3.13.1'");
     sandbox.tool("uv", r"printf 'ruff v0.6.9\n- ruff\n'");
     // `pipx` is deliberately missing: a tool that is not installed is listed, not an error.
+    // nvm has the `node` on PATH's version, which is then listed once, as nvm's, and another.
+    for version in ["v22.1.0", "v20.0.0"] {
+        fs::create_dir_all(sandbox.path().join(".nvm/versions/node").join(version)).unwrap();
+    }
 
     let project = sandbox.path().join("src/app");
     fs::create_dir_all(&project).unwrap();
@@ -128,15 +139,17 @@ fn collects_every_source() {
             r#"homebrew_cask codex "0.128.0""#,
             r#"rustup rust "1.99.1""#,
             r#"cargo_install crates.io:ripgrep "14.1.0""#,
-            r#"node node.js "22.1.0""#,
             r#"npm_global npm:npm "10.9.7""#,
             r#"python python "3.13.1""#,
             r#"uv_tool PyPI:ruff "0.6.9""#,
+            r#"version_manager node.js "20.0.0""#,
+            r#"version_manager node.js "22.1.0""#,
             r#"lockfile crates.io:serde "1.0.229""#,
         ]
     );
+    assert_eq!(lines[8]["found_in"]["manager"], "nvm");
     assert_eq!(
-        lines[9]["found_in"]["path"],
+        lines[10]["found_in"]["path"],
         project.join("Cargo.lock").to_str().unwrap()
     );
 }

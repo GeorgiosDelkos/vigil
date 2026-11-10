@@ -6,12 +6,14 @@
 //! [`Inventory::not_installed`], so an inventory taken with a bare `PATH` (an app started by
 //! launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`) shows what it did not check.
 //!
-//! Collecting only reads: it runs listing commands and parses lockfiles, never project code.
+//! Collecting only reads: it runs listing commands, lists version managers' folders and parses
+//! lockfiles, never project code.
 
 pub(crate) mod command;
 mod homebrew;
 pub(crate) mod lockfiles;
 mod toolchains;
+mod version_managers;
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -39,14 +41,17 @@ impl Inventory {
     /// `project_dirs`.
     ///
     /// Runs read-only listing commands (`sw_vers`, `brew`, `rustup`, `cargo`, `npm`, `node`,
-    /// `python3`, `uv`, `pipx`) found on `PATH`, each from `/` with a one-minute limit, and
-    /// walks `project_dirs`. Blocks until all of them finish; `brew info` alone can take
-    /// several seconds.
+    /// `python3`, `uv`, `pipx`) found on `PATH`, each from `/` with a one-minute limit, lists
+    /// the folders where version managers (nvm, fnm, volta, asdf, pyenv) keep Node.js and
+    /// Python versions, and walks `project_dirs`. Blocks until all of them finish; `brew info`
+    /// alone can take several seconds.
     pub fn collect_mac(project_dirs: &[PathBuf]) -> Self {
         let mut inventory = Self::default();
         toolchains::macos(&mut inventory);
         homebrew::collect(&mut inventory);
         toolchains::collect(&mut inventory);
+        version_managers::collect(&mut inventory);
+        version_managers::drop_path_duplicates(&mut inventory.components);
         for dir in project_dirs {
             lockfiles::collect(dir, &mut inventory);
         }
@@ -148,6 +153,14 @@ pub enum FoundIn {
     UvTool,
     /// A tool installed with `pipx install`.
     Pipx,
+    /// A runtime version a version manager installed, by its folder
+    /// (`~/.nvm/versions/node/v22.1.0`).
+    VersionManager {
+        /// The version manager.
+        manager: VersionManager,
+        /// The version's folder.
+        path: PathBuf,
+    },
     /// A lockfile in a project folder.
     Lockfile {
         /// The lockfile's path.
@@ -180,9 +193,41 @@ impl std::fmt::Display for FoundIn {
             Self::Python => f.write_str("the python3 on PATH"),
             Self::UvTool => f.write_str("uv tools"),
             Self::Pipx => f.write_str("pipx"),
+            Self::VersionManager { manager, path } => {
+                write!(f, "{} {}", manager.name(), path.display())
+            }
             Self::Lockfile { path } => write!(f, "lockfile {}", path.display()),
             Self::OsPackage { packages } => write!(f, "OS packages {}", packages.join(", ")),
             Self::DependencyGraph { repo } => write!(f, "the dependency graph of {repo}"),
+        }
+    }
+}
+
+/// A version manager that keeps several versions of a runtime side by side.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VersionManager {
+    /// nvm, for Node.js.
+    Nvm,
+    /// fnm, for Node.js.
+    Fnm,
+    /// Volta, for Node.js.
+    Volta,
+    /// asdf, for Node.js and Python.
+    Asdf,
+    /// pyenv, for Python.
+    Pyenv,
+}
+
+impl VersionManager {
+    /// The manager's command name, as in `nvm uninstall`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Nvm => "nvm",
+            Self::Fnm => "fnm",
+            Self::Volta => "volta",
+            Self::Asdf => "asdf",
+            Self::Pyenv => "pyenv",
         }
     }
 }
@@ -326,6 +371,13 @@ mod tests {
             (FoundIn::UvTool, "uv tools"),
             (FoundIn::Pipx, "pipx"),
             (
+                FoundIn::VersionManager {
+                    manager: VersionManager::Nvm,
+                    path: "/Users/me/.nvm/versions/node/v22.22.2".into(),
+                },
+                "nvm /Users/me/.nvm/versions/node/v22.22.2",
+            ),
+            (
                 FoundIn::Lockfile {
                     path: "/p/Cargo.lock".into(),
                 },
@@ -345,6 +397,17 @@ mod tests {
         for (found_in, text) in cases {
             assert_eq!(found_in.to_string(), text);
         }
+    }
+
+    #[test]
+    fn version_manager_is_serialized_by_name_and_folder() {
+        let found_in = FoundIn::VersionManager {
+            manager: VersionManager::Pyenv,
+            path: "/Users/me/.pyenv/versions/3.13.1".into(),
+        };
+        let json = r#"{"kind":"version_manager","manager":"pyenv","#.to_owned()
+            + r#""path":"/Users/me/.pyenv/versions/3.13.1"}"#;
+        assert_eq!(serde_json::to_string(&found_in).unwrap(), json);
     }
 
     #[test]

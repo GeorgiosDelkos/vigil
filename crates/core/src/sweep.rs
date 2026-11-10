@@ -920,12 +920,8 @@ fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey
                 FoundIn::Python => "python".to_owned(),
                 FoundIn::UvTool => "uv_tool".to_owned(),
                 FoundIn::Pipx => "pipx".to_owned(),
-                // A path that is not UTF-8 is spelled by its bytes: lossy text would give two
-                // such paths one key.
-                FoundIn::Lockfile { path } => match path.to_str() {
-                    Some(path) => format!("lockfile:{path}"),
-                    None => format!("lockfile-bytes:{:x?}", path.as_os_str().as_encoded_bytes()),
-                },
+                FoundIn::VersionManager { manager, path } => path_key(manager.name(), path),
+                FoundIn::Lockfile { path } => path_key("lockfile", path),
                 FoundIn::OsPackage { .. } => "os_package".to_owned(),
                 FoundIn::DependencyGraph { repo } => format!("dependency_graph:{repo}"),
             };
@@ -953,6 +949,15 @@ fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey
             FindingKey::new(&key)
         })
         .collect()
+}
+
+/// `<kind>:<path>`. A path that is not UTF-8 is spelled by its bytes, as `<kind>-bytes:<hex>`:
+/// lossy text would give two such paths one key.
+fn path_key(kind: &str, path: &Path) -> String {
+    match path.to_str() {
+        Some(path) => format!("{kind}:{path}"),
+        None => format!("{kind}-bytes:{:x?}", path.as_os_str().as_encoded_bytes()),
+    }
 }
 
 /// Creates `<sweeps>/<start time>`, or `<start time>-2` and so on when an earlier sweep
@@ -1601,6 +1606,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::inventory::VersionManager;
 
     #[test]
     fn no_agent_is_found_until_one_is_chosen() {
@@ -1852,6 +1858,22 @@ mod tests {
             keys[0],
             finding_keys("mac", &[("GHSA-1", &one)])[0],
             "no collision, no version"
+        );
+
+        let nvm = |version: &str| Component {
+            found_in: FoundIn::VersionManager {
+                manager: VersionManager::Nvm,
+                path: PathBuf::from(format!("/Users/me/.nvm/versions/node/v{version}")),
+            },
+            ..component("node.js", version)
+        };
+        let (old, new) = (nvm("22.22.2"), nvm("22.23.4"));
+        let keys = finding_keys("mac", &[("CVE-1", &old), ("CVE-1", &new)]);
+        assert_ne!(keys[0], keys[1], "two versions in one version manager");
+        assert_eq!(
+            keys[0],
+            finding_keys("mac", &[("CVE-1", &old)])[0],
+            "removing the other version keeps the key"
         );
 
         // Not UTF-8, and differing only in bytes that lossy text would replace alike.

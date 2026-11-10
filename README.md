@@ -339,7 +339,8 @@ target types. Next on the list:
 - A signed and notarized DMG, which needs an Apple Developer account
 - Lockfiles not read yet: `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `Pipfile.lock` and
   `go.sum`
-- Node and Python versions managed by nvm, fnm, volta, asdf or pyenv, beyond the one on `PATH`
+- Global npm packages under Node.js versions a version manager keeps, beyond the `npm` on
+  `PATH`
 
 ## License
 

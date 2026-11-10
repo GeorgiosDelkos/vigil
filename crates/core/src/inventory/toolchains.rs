@@ -2,9 +2,10 @@
 //! global npm packages, Python, and uv and pipx tools.
 //!
 //! Each parser is a plain function over the command's output, so the formats are tested
-//! without the tools installed. Only the `node`, `npm` and `python3` first on `PATH` are read:
-//! other versions kept by version managers (nvm, fnm, volta, asdf, pyenv) are a known gap,
-//! recorded in the spec.
+//! without the tools installed. Only the `node`, `npm` and `python3` first on `PATH` are run.
+//! Every Node.js and Python version a version manager keeps is read from its folder in
+//! `version_managers`; the global npm packages of versions other than the one on `PATH` are a
+//! known gap, recorded in the spec.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -54,7 +55,7 @@ fn component(lookup: Lookup, version: &str, found_in: FoundIn) -> Component {
     }
 }
 
-fn product(name: &str) -> Lookup {
+pub(super) fn product(name: &str) -> Lookup {
     Lookup::Product(name.parse().expect("built-in product names are valid"))
 }
 

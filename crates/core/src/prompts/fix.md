@@ -18,7 +18,8 @@ what happened. You have full access, so act with care: change only what the fix 
 1. Run the confirmed commands in order. When one fails, find out why and make the smallest
    change that reaches the same goal: the same package at a fixed version, the same setting.
    Do not upgrade, remove or reconfigure anything the fix does not name.
-2. Check that the fix took: the installed version is outside the affected range, the setting
+2. Check that the fix took: the installed version is outside the affected range (or, for a
+   version a version manager kept, that version is no longer installed), the setting
    reads as intended, the file no longer has the problem.
 3. Write `result.json` in this folder, following `result.schema.json`:
    - `outcome`: `fixed` when the check passed, `partial` when some of it was done, `failed`
