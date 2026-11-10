@@ -67,7 +67,8 @@ fn collects_every_source() {
     sandbox.tool("sw_vers", "echo 27.2");
     sandbox.tool(
         "brew",
-        r#"echo '{"formulae": [{"name": "openssl@3", "installed": [{"version": "3.4.0"}]}],
+        r#"echo '{"formulae": [{"name": "openssl@3", "installed": [{"version": "3.4.0"}]},
+                              {"name": "python@3.13", "installed": [{"version": "3.13.1_1"}]}],
                  "casks": [{"token": "codex", "installed": "0.128.0"}]}'"#,
     );
     sandbox.tool(
@@ -84,7 +85,8 @@ fn collects_every_source() {
     sandbox.tool("python3", "echo 'Python 3.13.1'");
     sandbox.tool("uv", r"printf 'ruff v0.6.9\n- ruff\n'");
     // `pipx` is deliberately missing: a tool that is not installed is listed, not an error.
-    // nvm has the `node` on PATH's version, which is then listed once, as nvm's, and another.
+    // Homebrew has the `python3` on PATH's version (after its `_1` revision is dropped), which
+    // is then listed once, as the formula's. nvm has the `node` on PATH's version, which is then listed once, as nvm's, and another.
     for version in ["v22.1.0", "v20.0.0"] {
         fs::create_dir_all(sandbox.path().join(".nvm/versions/node").join(version)).unwrap();
     }
@@ -136,11 +138,11 @@ fn collects_every_source() {
         [
             r#"mac_os apple:macos "27.2""#,
             r#"homebrew_formula openssl "3.4.0""#,
+            r#"homebrew_formula python "3.13.1""#,
             r#"homebrew_cask codex "0.128.0""#,
             r#"rustup rust "1.99.1""#,
             r#"cargo_install crates.io:ripgrep "14.1.0""#,
             r#"npm_global npm:npm "10.9.7""#,
-            r#"python python "3.13.1""#,
             r#"uv_tool PyPI:ruff "0.6.9""#,
             r#"version_manager node.js "20.0.0""#,
             r#"version_manager node.js "22.1.0""#,
