@@ -521,10 +521,11 @@ document.addEventListener("click", (event) => {
 
 /// IBM Plex Sans, the app's one typeface, as `@font-face` rules with the font files inlined:
 /// the page is opened from disk and its CSP allows no request, so the font travels inside it
-/// (about 155 kB). It is the `@font-face` rules of `app/ui/src/style.css` (where the files'
-/// source and licence are), one line each, with every `url()` replaced by that file's
-/// `data:font/woff2;base64,` URL. Regenerate it that way after changing the files;
-/// `the_report_font_is_the_app_s` checks each file is embedded under its weight.
+/// (about 155 kB). The file is a licence comment on the first line (the copyright and OFL
+/// notice), then the `@font-face` rules of `app/ui/src/style.css`, one line each, with every
+/// `url()` replaced by that file's `data:font/woff2;base64,` URL. Regenerate it that way after
+/// changing the fonts; `the_report_font_is_the_app_s` checks every rule's family, weight,
+/// unicode-range and inlined file against style.css, the rule count, and the notice.
 const PLEX_CSS: &str = include_str!("html_report/plex.css");
 
 /// The approved mockup's report styles, dark only: the night ground with faint violet and cyan
@@ -715,6 +716,11 @@ mod tests {
         let style = std::fs::read_to_string(ui.join("style.css")).unwrap();
         let faces: Vec<&str> = style.split("@font-face {").skip(1).collect();
         assert_eq!(faces.len(), 8, "four weights, Latin1 and Pi");
+        assert_eq!(
+            PLEX_CSS.matches("@font-face").count(),
+            faces.len(),
+            "plex.css has a rule style.css lacks"
+        );
         for face in faces {
             let face = &face[..face.find('}').unwrap()];
             let value = |name: &str| {
@@ -735,8 +741,9 @@ mod tests {
             assert!(out.status.success(), "openssl base64 {file}");
             let encoded = String::from_utf8(out.stdout).unwrap();
             let rule = format!(
-                "font-weight: {}; src: url(\"data:font/woff2;base64,{}\") format(\"woff2\"); \
-                 unicode-range: {};",
+                "font-family: {}; font-weight: {}; \
+                 src: url(\"data:font/woff2;base64,{}\") format(\"woff2\"); unicode-range: {};",
+                value("font-family: "),
                 value("font-weight: "),
                 encoded.trim(),
                 value("unicode-range:")
