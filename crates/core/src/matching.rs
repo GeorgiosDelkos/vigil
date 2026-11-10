@@ -348,9 +348,6 @@ enum Bound {
     Infinity,
 }
 
-/// A range's events sorted by version, each with its kind and its text as written.
-type Timeline<'e> = Vec<(Bound, EventKind, &'e str)>;
-
 /// Evaluates one range for `version`, as `IncludedInRanges` and `BeforeLimits` in the
 /// schema's evaluation: the events sorted, and the last one the version has reached decides.
 fn evaluate(scheme: Scheme, events: &[Event], version: &str) -> Match {
@@ -369,8 +366,9 @@ fn evaluate(scheme: Scheme, events: &[Event], version: &str) -> Match {
         .collect();
     // The lowest limit above the version: the one the reason can name truthfully.
     let below = limits.iter().find(|(limit, _, _)| installed < *limit);
-    if !limits.is_empty() && below.is_none() {
-        let highest = limits.last().expect("limits is not empty");
+    if below.is_none()
+        && let Some(highest) = limits.last()
+    {
         return Match::OutOfRange(format!("{version} >= limit {}", highest.2));
     }
 
@@ -388,9 +386,9 @@ fn evaluate(scheme: Scheme, events: &[Event], version: &str) -> Match {
     describe(&timeline, last, below.map(|(_, _, text)| *text), version)
 }
 
-/// The range's events as a sorted timeline, or the unknown verdict when they cannot be
-/// ordered with certainty.
-fn timeline(scheme: Scheme, events: &[Event]) -> Result<Timeline<'_>, Match> {
+/// The range's events sorted by version, each with its kind and its text as written, or the
+/// unknown verdict when they cannot be ordered with certainty.
+fn timeline(scheme: Scheme, events: &[Event]) -> Result<Vec<(Bound, EventKind, &str)>, Match> {
     let mut timeline = Vec::with_capacity(events.len());
     for event in events {
         let (kind, text) = event.single().ok_or_else(|| {
