@@ -42,16 +42,16 @@ impl Inventory {
     ///
     /// Runs read-only listing commands (`sw_vers`, `brew`, `rustup`, `cargo`, `npm`, `node`,
     /// `python3`, `uv`, `pipx`) found on `PATH`, each from `/` with a one-minute limit, lists
-    /// the folders where version managers (nvm, fnm, volta, asdf, pyenv) keep Node.js and Python
-    /// versions, and walks `project_dirs`. Blocks until all of them finish; `brew info` alone can take
+    /// the folders where version managers (nvm, fnm, volta, asdf, pyenv) keep Node.js and
+    /// Python versions, and walks `project_dirs`. Blocks until all of them finish; `brew info` alone can take
     /// several seconds.
     pub fn collect_mac(project_dirs: &[PathBuf]) -> Self {
         let mut inventory = Self::default();
         toolchains::macos(&mut inventory);
         homebrew::collect(&mut inventory);
         toolchains::collect(&mut inventory);
-        // After toolchains: it drops the `node` and `python3` on `PATH` that it also finds.
         version_managers::collect(&mut inventory);
+        version_managers::drop_path_duplicates(&mut inventory.components);
         for dir in project_dirs {
             lockfiles::collect(dir, &mut inventory);
         }

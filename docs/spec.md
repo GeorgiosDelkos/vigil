@@ -169,6 +169,8 @@ versions are two findings and removing one keeps the other's key. When the `node
 on `PATH` has the same product and version as a manager's entry it is reported once, as the
 manager's: that names the tool that removes it, and its key does not change with `PATH`. A
 separate install at the same version is then reported only after the manager's copy is gone.
+Such a `PATH` finding's key changes once, from `node` to the manager's folder, so a dismissal
+of it made before this change no longer matches and the finding is shown again.
 The sweep's fix for such a version removes it with the manager (`nvm uninstall 22.22.2`;
 Volta has no command for it, so its folder goes to the Trash), installing a fixed version
 first if none is installed and moving the default off it; switching the default alone is not

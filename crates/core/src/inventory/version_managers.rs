@@ -20,8 +20,7 @@ use crate::inventory::Lookup;
 use crate::inventory::Manager;
 use crate::inventory::toolchains::product;
 
-/// Adds every version the managers in this user's home folder installed, then drops the
-/// `node` or `python3` on `PATH` when a manager has the same version.
+/// Adds every version the managers in this user's home folder installed.
 ///
 /// The managers' environment variables (`NVM_DIR`, ...) are read from Vigil's own environment.
 /// An app started at login does not have the ones a shell profile sets, and then the default
@@ -34,35 +33,38 @@ pub(super) fn collect(inventory: &mut Inventory) {
         });
         return;
     };
-    // An empty or relative value is not a folder any of the managers would use.
-    let env = |name: &str| {
-        std::env::var_os(name)
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-    };
+    let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
     for layout in layouts(&home, env) {
         inventory.absorb(read_versions(&layout));
     }
-    drop_path_duplicates(&mut inventory.components);
 }
 
-/// Where one manager keeps one runtime: `dir` holds a folder `<prefix><version>` per version.
+/// Where one manager keeps one runtime: `dir` holds a folder per version, named as
+/// [`version_prefix`] says.
 #[derive(Debug)]
 struct Layout {
     manager: Manager,
     dir: PathBuf,
     product: &'static str,
-    prefix: &'static str,
+}
+
+/// What comes before the version in the name of a manager's version folder.
+fn version_prefix(manager: Manager) -> &'static str {
+    match manager {
+        Manager::Nvm | Manager::Fnm => "v",
+        Manager::Volta | Manager::Asdf | Manager::Pyenv => "",
+    }
 }
 
 /// Each manager's folders, found as the manager finds them. `env` reads an environment
-/// variable that is set to an absolute path.
+/// variable.
 fn layouts(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<Layout> {
-    let layout = |manager, dir: PathBuf, product, prefix| Layout {
+    // An empty or relative value is not a folder any of the managers would use.
+    let env = |name: &str| env(name).filter(|p| p.is_absolute());
+    let layout = |manager, dir: PathBuf, product| Layout {
         manager,
         dir,
         product,
-        prefix,
     };
     // nvm: `$NVM_DIR`, which install.sh sets to `$XDG_CONFIG_HOME/nvm` or `~/.nvm`; versions
     // from Node 0.12 on are in `versions/node/v<version>`. Older ones (in `$NVM_DIR` itself)
@@ -88,25 +90,15 @@ fn layouts(home: &Path, env: impl Fn(&str) -> Option<PathBuf>) -> Vec<Layout> {
     // https://github.com/pyenv/pyenv/blob/9e40c078c0f86eae0d96e114269e934681745625/libexec/pyenv-versions#L43
     let pyenv = env("PYENV_ROOT").unwrap_or_else(|| home.join(".pyenv"));
 
-    let mut layouts = vec![layout(
-        Manager::Nvm,
-        nvm.join("versions/node"),
-        "node.js",
-        "v",
-    )];
+    let mut layouts = vec![layout(Manager::Nvm, nvm.join("versions/node"), "node.js")];
     if let Some(fnm) = fnm_dir(home, &env) {
-        layouts.push(layout(Manager::Fnm, fnm, "node.js", "v"));
+        layouts.push(layout(Manager::Fnm, fnm, "node.js"));
     }
     layouts.extend([
-        layout(
-            Manager::Volta,
-            volta.join("tools/image/node"),
-            "node.js",
-            "",
-        ),
-        layout(Manager::Asdf, asdf.join("installs/nodejs"), "node.js", ""),
-        layout(Manager::Asdf, asdf.join("installs/python"), "python", ""),
-        layout(Manager::Pyenv, pyenv.join("versions"), "python", ""),
+        layout(Manager::Volta, volta.join("tools/image/node"), "node.js"),
+        layout(Manager::Asdf, asdf.join("installs/nodejs"), "node.js"),
+        layout(Manager::Asdf, asdf.join("installs/python"), "python"),
+        layout(Manager::Pyenv, pyenv.join("versions"), "python"),
     ]);
     layouts
 }
@@ -155,7 +147,8 @@ fn read_versions(layout: &Layout) -> Result<Vec<Component>, InventoryError> {
     Ok(paths
         .into_iter()
         .filter_map(|path| {
-            let version = version(path.file_name()?.to_str()?, layout.prefix)?.to_owned();
+            let version =
+                version(path.file_name()?.to_str()?, version_prefix(layout.manager))?.to_owned();
             Some(Component {
                 lookup: product(layout.product),
                 version,
@@ -193,7 +186,7 @@ fn version<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
 ///
 /// The accepted downside: a separate install at the same version (the nodejs.org installer's
 /// `/usr/local/bin/node`) is reported only once the manager's copy is gone.
-fn drop_path_duplicates(components: &mut Vec<Component>) {
+pub(super) fn drop_path_duplicates(components: &mut Vec<Component>) {
     let product_version = |c: &Component| match &c.lookup {
         Lookup::Product(p) => Some((p.to_string(), c.version.clone())),
         Lookup::Package(_) => None,
@@ -308,6 +301,24 @@ mod tests {
     }
 
     #[test]
+    fn relative_or_empty_variables_are_ignored() {
+        let home = tempfile::tempdir().unwrap();
+        mkdir(&home.path().join(".nvm/versions/node/v22.1.0"));
+        mkdir(&home.path().join(".pyenv/versions/3.13.1"));
+        let vars = [
+            ("NVM_DIR", PathBuf::from("nvm")),
+            ("PYENV_ROOT", PathBuf::new()),
+        ];
+        assert_eq!(
+            found(home.path(), &vars),
+            [
+                "node.js 22.1.0 [nvm ~/.nvm/versions/node/v22.1.0]",
+                "python 3.13.1 [pyenv ~/.pyenv/versions/3.13.1]",
+            ]
+        );
+    }
+
+    #[test]
     fn nvm_under_xdg_config_home() {
         let tmp = tempfile::tempdir().unwrap();
         let config = tmp.path().join("config");
@@ -395,7 +406,6 @@ mod tests {
             manager: Manager::Pyenv,
             dir: file.join("versions"),
             product: "python",
-            prefix: "",
         };
         let err = read_versions(&layout).unwrap_err();
         assert!(
