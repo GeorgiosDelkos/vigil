@@ -4,6 +4,9 @@
 # checks it), and it holds only glue, with its decisions in the core.
 test_package = ["vigil-core", "vigil"]
 exclude_globs = ["app/**"]
+# The prompt tests read the built-in prompts' git history, so each mutant's copy of the tree
+# needs the repository's history (crates/core/src/prompts.rs).
+copy_vcs = true
 # These two run /usr/bin/security against the user's login Keychain, which no test may touch,
 # so a mutant there cannot be caught. Their decisions are in `saved` and `keychain_script`,
 # which are mutated and tested.
