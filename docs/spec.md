@@ -139,7 +139,7 @@ rest still count. A tool that is not installed is skipped, not an error.
 | Source | Command or file | Looked up as |
 |---|---|---|
 | macOS | `sw_vers -productVersion` | NVD product `apple:macos` |
-| Homebrew formulae and casks, dependencies included | `brew info --json=v2 --installed` | NVD product: name without `@version`, through a small alias table checked against NVD (`node` -> `node.js`, `gh` -> `github:cli`); a name that is not a valid product is reported |
+| Homebrew formulae and casks, dependencies included | `brew info --json=v2 --installed` | NVD products: name without `@version`, through a small alias table checked against NVD (`node` -> `node.js`, `gh` -> `github:cli`, `webp` -> `libwebp`, `curl` -> `curl` and `libcurl`); a name that is not a valid product is reported |
 | Rust toolchains | `rustup toolchain list`, `rustup run <toolchain> rustc --version` | NVD product `rust` |
 | Cargo-installed binaries | `cargo install --list` | OSV `crates.io` |
 | Node.js | `node --version` | NVD product `node.js`; left out when another component has the same product and version (below) |
@@ -201,6 +201,15 @@ Known gaps, accepted for now:
 - A Homebrew name that is a valid CPE name but the wrong product gets no CVEs and no warning.
   Step 4 checks each product with no CVEs against NVD's CPE dictionary (an unknown answer is
   asked again after 30 days) and reports the ones NVD does not know.
+- Homebrew names are matched to NVD products by name and an alias table
+  (`inventory/homebrew.rs`, decided 2026-11-10). An entry is added only when the product is in
+  NVD's CPE dictionary and its CVEs show it is the same software; one formula can map to
+  several products where NVD files its CVEs under more than one name (`curl` and `libcurl`,
+  `jpeg-xl` and `libjxl`). Names with no such product are looked up as they are, and step 4
+  reports the ones NVD does not know, as the 2026-11-10 sweep found for `actionlint`, `fftw`,
+  `gitleaks`, `libassuan`, `npth`, `pinentry`, `libsm`, `libxau`, `libxaw`, `libxmu`,
+  `xorgproto` and others; those are not checked. The names left out on purpose although a near
+  NVD name exists (`ggml`, `libomp`, `sdl2-compat`, ...) are listed, with why, on the table.
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the login shell's `PATH` (`$SHELL -lc`), as the agent adapters do.
 
