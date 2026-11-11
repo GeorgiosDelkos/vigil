@@ -51,8 +51,10 @@ LANES = ((4.4, 1.0, 1.6), (7.4, 0.85, 2.0), (10.2, 0.7, 2.4))
 # appearance (2026-11-09). The light set is each hue at the lightest that keeps 3:1 contrast
 # against a light bar (#ececf1, WCAG's minimum for graphics).
 #
-# Critical, high and clear take the app's severity colours (--critical, --high and --ok in
-# app/ui/src/style.css), so the icon reads like the popover. Medium and low have no look: the
+# On a dark bar, critical, high and clear are the app's severity colours (--critical, --high
+# and --ok in app/ui/src/style.css, copied here by hand), so the icon reads like the popover.
+# Their light-bar colours are not those tokens but the same hues deepened to 3:1 as above,
+# which leaves them at the same HSL hue and saturation. Medium and low have no look: the
 # owner decided on 2026-11-11 that only critical and high colour the icon.
 PALETTES = {
     "": (
