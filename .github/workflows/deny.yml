@@ -3,16 +3,11 @@
 # dependency graph or the policy, and daily so a new advisory surfaces without a PR. House
 # addition: rust-ci-conf has no cargo-deny; the trigger pattern is Tokio's and Wasmtime's.
 # Blocking: never continue-on-error.
+# No push trigger (2026-11-11, as in check.yml): the PR already checked the same dependency
+# graph, and the daily run checks main for advisories published since.
 permissions:
   contents: read
 on:
-  push:
-    branches: [main]
-    paths:
-      - "**/Cargo.toml"
-      - "**/Cargo.lock"
-      - "deny.toml"
-      - ".github/workflows/deny.yml"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
@@ -24,7 +19,7 @@ on:
     - cron: '0 2 * * *'
 # See check.yml for information about how the concurrency cancellation and workflow triggering works
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ github.event.pull_request.draft }}
   cancel-in-progress: true
 name: deny
 jobs:
