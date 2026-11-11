@@ -582,6 +582,10 @@ describe("a finding", () => {
     const rows = within(steps).getAllByRole("listitem");
     expect(rows.map((r) => r.className)).toEqual(["step done", "step now", "step next"]);
     expect(rows[1]?.getAttribute("aria-current")).toBe("step");
+    // One spinner, on the running step: a second in the header only distracts.
+    expect(document.querySelector(".headline .spin")).toBeNull();
+    expect(rows[1]?.querySelectorAll(".spin")).toHaveLength(1);
+    expect(document.querySelectorAll(".spin")).toHaveLength(1);
     expect(within(rows[1] as HTMLElement).getByText("grok is applying the fix")).toBeTruthy();
     expect(within(rows[1] as HTMLElement).getByText("2 min")).toBeTruthy();
     expect(screen.getByText("other")).toBeTruthy();
