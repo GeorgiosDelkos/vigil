@@ -115,51 +115,75 @@ pub(crate) fn hide_on_blur(window: &Window) {
     drop(window.hide());
 }
 
-/// The icon for each state, 44 by 44 pixels: the menu bar's 22 points at 2x.
+/// The icon for each state, 44 by 44 pixels: the menu bar's 22 points at 2x, and its tooltip.
 ///
 /// The owner decided on 2026-11-11 that only critical and high findings colour the icon: red
 /// for critical, orange for high, and green when neither is open, medium and low included,
-/// which stay visible in the popover. A sweep or a fix keeps the cyan sweeping look, and a failed
-/// sweep the monochrome mark with an arm missing. So there is no look for medium or low.
+/// which stay visible in the popover. A sweep or a fix keeps the cyan sweeping look, and a
+/// failed sweep the monochrome mark with an arm missing. So there is no look for medium or low.
+///
+/// The owner clarified the same day that a failure must not hide an open critical: with a
+/// critical or high finding open in the last reports, the icon stays red or orange after a
+/// failed sweep, and only the tooltip and the popover's banner tell of the failure. The
+/// missing arm shows only when nothing critical or high is open, which is why `Clear` carries
+/// no [`LastSweep`]: a failure with nothing to show in colour is `Failed`.
 #[derive(Debug, Clone, Copy)]
 enum Look {
-    Critical,
-    High,
+    Critical(LastSweep),
+    High(LastSweep),
     Clear,
     Sweeping,
+    Fixing,
+    Failed,
+}
+
+/// Whether the last sweep had a verdict for every target.
+#[derive(Debug, Clone, Copy)]
+enum LastSweep {
+    Succeeded,
     Failed,
 }
 
 impl Look {
-    /// The look of an idle app whose worst open item is `worst`.
-    fn of(worst: Option<Severity>) -> Self {
-        match worst {
-            Some(Severity::Critical) => Self::Critical,
-            Some(Severity::High) => Self::High,
-            Some(Severity::Medium | Severity::Low) | None => Self::Clear,
+    /// The look of an app running nothing, whose worst open item is `worst`.
+    fn of(worst: Option<Severity>, last: LastSweep) -> Self {
+        match (worst, last) {
+            (Some(Severity::Critical), _) => Self::Critical(last),
+            (Some(Severity::High), _) => Self::High(last),
+            (Some(Severity::Medium | Severity::Low) | None, LastSweep::Succeeded) => Self::Clear,
+            (Some(Severity::Medium | Severity::Low) | None, LastSweep::Failed) => Self::Failed,
         }
     }
 
     fn png(self, bar: Bar) -> &'static [u8] {
         match (self, bar) {
             (Self::Failed, _) => include_bytes!("../icons/tray-failed.png"),
-            (Self::Critical, Bar::Dark) => include_bytes!("../icons/tray-critical.png"),
-            (Self::Critical, Bar::Light) => include_bytes!("../icons/tray-critical-light.png"),
-            (Self::High, Bar::Dark) => include_bytes!("../icons/tray-high.png"),
-            (Self::High, Bar::Light) => include_bytes!("../icons/tray-high-light.png"),
+            (Self::Critical(_), Bar::Dark) => include_bytes!("../icons/tray-critical.png"),
+            (Self::Critical(_), Bar::Light) => include_bytes!("../icons/tray-critical-light.png"),
+            (Self::High(_), Bar::Dark) => include_bytes!("../icons/tray-high.png"),
+            (Self::High(_), Bar::Light) => include_bytes!("../icons/tray-high-light.png"),
             (Self::Clear, Bar::Dark) => include_bytes!("../icons/tray-clear.png"),
             (Self::Clear, Bar::Light) => include_bytes!("../icons/tray-clear-light.png"),
-            (Self::Sweeping, Bar::Dark) => include_bytes!("../icons/tray-sweeping.png"),
-            (Self::Sweeping, Bar::Light) => include_bytes!("../icons/tray-sweeping-light.png"),
+            (Self::Sweeping | Self::Fixing, Bar::Dark) => {
+                include_bytes!("../icons/tray-sweeping.png")
+            }
+            (Self::Sweeping | Self::Fixing, Bar::Light) => {
+                include_bytes!("../icons/tray-sweeping-light.png")
+            }
         }
     }
 
     fn tooltip(self) -> &'static str {
         match self {
-            Self::Critical => "Vigil: critical findings open",
-            Self::High => "Vigil: high findings open",
+            Self::Critical(LastSweep::Succeeded) => "Vigil: critical findings open",
+            Self::Critical(LastSweep::Failed) => {
+                "Vigil: critical findings open; the last sweep failed"
+            }
+            Self::High(LastSweep::Succeeded) => "Vigil: high findings open",
+            Self::High(LastSweep::Failed) => "Vigil: high findings open; the last sweep failed",
             Self::Clear => "Vigil: no critical or high findings open",
             Self::Sweeping => "Vigil: sweeping",
+            Self::Fixing => "Vigil: fixing",
             Self::Failed => "Vigil: the last sweep failed",
         }
     }
@@ -169,10 +193,7 @@ impl Look {
     /// neutral grey inside, the state's colour outside), from the palette for the bar's
     /// appearance ([`Bar`]).
     fn template(self) -> bool {
-        match self {
-            Self::Failed => true,
-            Self::Critical | Self::High | Self::Clear | Self::Sweeping => false,
-        }
+        matches!(self, Self::Failed)
     }
 
     fn image(self, bar: Bar) -> Image<'static> {
@@ -251,15 +272,16 @@ pub(crate) fn refresh(app: &AppHandle) {
     drop(tray.set_tooltip(Some(look.tooltip())));
 }
 
-/// While a sweep runs this returns at once; only an idle app reads the config and reports,
-/// which keeps the refresh on every progress step cheap.
+/// While a sweep or fix runs this returns at once; only an app running nothing reads the
+/// config and reports, which keeps the refresh on every progress step cheap.
 fn look(app: &AppHandle) -> Look {
     let runner = app.state::<Runner>();
-    match runner.status() {
-        Status::Sweeping { .. } | Status::Fixing { .. } => return Look::Sweeping,
-        Status::Failed { .. } => return Look::Failed,
-        Status::Idle => {}
-    }
+    let last = match runner.status() {
+        Status::Sweeping { .. } => return Look::Sweeping,
+        Status::Fixing { .. } => return Look::Fixing,
+        Status::Failed { .. } => LastSweep::Failed,
+        Status::Idle => LastSweep::Succeeded,
+    };
     let Ok(config) = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
     else {
         return Look::Failed;
@@ -268,7 +290,7 @@ fn look(app: &AppHandle) -> Look {
         return Look::Failed;
     };
     // The popover's open items, so a fix reported done colours neither the icon nor the list.
-    Look::of(popover_view(targets).worst())
+    Look::of(popover_view(targets).worst(), last)
 }
 
 fn toggle(app: &AppHandle) {
@@ -297,29 +319,95 @@ fn toggle(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
+    use jiff::Timestamp;
+    use vigil_core::Latest;
+    use vigil_core::Open;
+
     use super::*;
 
-    const LOOKS: [Look; 5] = [
-        Look::Critical,
-        Look::High,
+    const LOOKS: [Look; 8] = [
+        Look::Critical(LastSweep::Succeeded),
+        Look::Critical(LastSweep::Failed),
+        Look::High(LastSweep::Succeeded),
+        Look::High(LastSweep::Failed),
         Look::Clear,
         Look::Sweeping,
+        Look::Fixing,
         Look::Failed,
     ];
 
     #[test]
     fn only_critical_and_high_colour_the_icon() {
-        assert!(matches!(Look::of(Some(Severity::Critical)), Look::Critical));
-        assert!(matches!(Look::of(Some(Severity::High)), Look::High));
-        assert!(matches!(Look::of(Some(Severity::Medium)), Look::Clear));
-        assert!(matches!(Look::of(Some(Severity::Low)), Look::Clear));
-        assert!(matches!(Look::of(None), Look::Clear));
-        // With nothing swept there is nothing open; that a reported fix is not open is the
-        // core's `PopoverView::worst`, tested there.
+        let of = |worst| Look::of(worst, LastSweep::Succeeded);
         assert!(matches!(
-            Look::of(popover_view(Vec::new()).worst()),
-            Look::Clear
+            of(Some(Severity::Critical)),
+            Look::Critical(LastSweep::Succeeded)
         ));
+        assert!(matches!(
+            of(Some(Severity::High)),
+            Look::High(LastSweep::Succeeded)
+        ));
+        assert!(matches!(of(Some(Severity::Medium)), Look::Clear));
+        assert!(matches!(of(Some(Severity::Low)), Look::Clear));
+        assert!(matches!(of(None), Look::Clear));
+    }
+
+    #[test]
+    fn a_failed_sweep_keeps_an_open_critical_or_high_in_colour() {
+        let of = |worst| Look::of(worst, LastSweep::Failed);
+        let critical = of(Some(Severity::Critical));
+        assert!(matches!(critical, Look::Critical(LastSweep::Failed)));
+        assert_eq!(
+            critical.tooltip(),
+            "Vigil: critical findings open; the last sweep failed"
+        );
+        let high = of(Some(Severity::High));
+        assert!(matches!(high, Look::High(LastSweep::Failed)));
+        assert_eq!(
+            high.tooltip(),
+            "Vigil: high findings open; the last sweep failed"
+        );
+        // The same coloured icon as after a sweep that succeeded; only the tooltip differs.
+        for bar in [Bar::Dark, Bar::Light] {
+            let succeeded = Look::of(Some(Severity::Critical), LastSweep::Succeeded);
+            assert_eq!(critical.png(bar), succeeded.png(bar));
+            let succeeded = Look::of(Some(Severity::High), LastSweep::Succeeded);
+            assert_eq!(high.png(bar), succeeded.png(bar));
+        }
+        // With nothing critical or high open the failure shows as the missing arm.
+        assert!(matches!(of(Some(Severity::Medium)), Look::Failed));
+        assert!(matches!(of(Some(Severity::Low)), Look::Failed));
+        assert!(matches!(of(None), Look::Failed));
+    }
+
+    #[test]
+    fn the_worst_open_item_of_the_popover_decides() {
+        let of = |open| Look::of(popover_view(swept(open)).worst(), LastSweep::Succeeded);
+        assert!(matches!(
+            of(vec![
+                finding(1, Severity::Low),
+                finding(2, Severity::Critical)
+            ]),
+            Look::Critical(LastSweep::Succeeded)
+        ));
+        assert!(matches!(
+            of(vec![
+                finding(1, Severity::Medium),
+                finding(2, Severity::High)
+            ]),
+            Look::High(LastSweep::Succeeded)
+        ));
+        // That a reported fix is not open is the core's `PopoverView::worst`, tested there.
+        assert!(matches!(of(Vec::new()), Look::Clear));
+    }
+
+    #[test]
+    fn a_fix_has_its_own_tooltip_and_the_sweeping_icon() {
+        assert_eq!(Look::Fixing.tooltip(), "Vigil: fixing");
+        assert_eq!(Look::Sweeping.tooltip(), "Vigil: sweeping");
+        for bar in [Bar::Dark, Bar::Light] {
+            assert_eq!(Look::Fixing.png(bar), Look::Sweeping.png(bar));
+        }
     }
 
     #[test]
@@ -339,6 +427,44 @@ mod tests {
             let same = look.png(Bar::Dark) == look.png(Bar::Light);
             assert_eq!(same, look.template(), "{look:?}");
             assert_eq!(look.template(), matches!(look, Look::Failed), "{look:?}");
+        }
+    }
+
+    /// One target, swept, with `open` open.
+    fn swept(open: Vec<Open>) -> Vec<Latest> {
+        vec![Latest {
+            target: "mac".to_owned(),
+            swept: Some(Timestamp::UNIX_EPOCH),
+            components: 1,
+            open,
+            fixed: Vec::new(),
+            dismissed: 0,
+        }]
+    }
+
+    /// An open finding with key `key`, in no component, so each is its own item.
+    fn finding(key: u64, severity: Severity) -> Open {
+        Open {
+            key: format!("{key:016x}")
+                .parse()
+                .expect("a 16-digit hex number is a finding key"),
+            severity,
+            title: format!("finding {key}"),
+            name: format!("pkg{key}"),
+            version: None,
+            component: None,
+            advisories: Vec::new(),
+            place: String::new(),
+            known_exploited: false,
+            confidence: None,
+            evidence: String::new(),
+            explanation: String::new(),
+            fix: String::new(),
+            steps: Vec::new(),
+            commands: Vec::new(),
+            first_seen: None,
+            new: false,
+            fix_state: None,
         }
     }
 }

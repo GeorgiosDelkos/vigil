@@ -609,8 +609,12 @@ Built in step 9a (2026-11-06):
   them in the popover. The config is read again on every refresh.
 - The tray icon is the mark: grey inner streaks with red outer ones (a critical finding open),
   orange (a high one open, no critical), or green (only medium or low open, or nothing); all
-  cyan (sweeping or fixing); and with one arm missing, in the bar's own colour (the last sweep
-  failed or a target got no verdict). Medium and low no longer colour the icon and stay
+  cyan (sweeping or fixing, with the tooltip "Vigil: sweeping" or "Vigil: fixing"); and with
+  one arm missing, in the bar's own colour (the last sweep failed or a target got no verdict,
+  and nothing critical or high is open). A failure never hides an open critical or high (the
+  owner's rule, clarified 2026-11-11): the icon stays red or orange, and the tooltip ("Vigil:
+  critical findings open; the last sweep failed") and the popover's banner show the failure.
+  Medium and low no longer colour the icon and stay
   visible in the popover (the owner's decision, 2026-11-11, replacing blue, yellow and pink for
   low, medium, and critical and high, and the uncoloured icon for nothing open). Red, orange
   and green are the app's `--critical`, `--high` and `--ok`. The coloured icons come in two
