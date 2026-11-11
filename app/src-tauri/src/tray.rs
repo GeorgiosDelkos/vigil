@@ -1,6 +1,6 @@
 //! The menu-bar icon, Vigil's mark: the main view's vortex in brief, three streaks on each of
-//! three arms. The colour of its outer streaks shows the worst open finding or a running
-//! sweep, a missing arm shows a failure, a left click shows or hides the popover under it, and
+//! three arms. The colour of its outer streaks shows whether a critical or high finding is
+//! open, or a sweep or fix is running ([`Look`]), a missing arm shows a failure, a left click shows or hides the popover under it, and
 //! a right click opens a menu with Quit.
 
 use std::sync::Mutex;
@@ -116,12 +116,16 @@ pub(crate) fn hide_on_blur(window: &Window) {
 }
 
 /// The icon for each state, 44 by 44 pixels: the menu bar's 22 points at 2x.
+///
+/// The owner decided on 2026-11-11 that only critical and high findings colour the icon: red
+/// for critical, orange for high, and green when neither is open, medium and low included,
+/// which stay visible in the popover. A sweep or a fix is blue, and a failed sweep keeps the
+/// monochrome mark with an arm missing. So there is no look for medium or low.
 #[derive(Debug, Clone, Copy)]
 enum Look {
-    Clean,
-    Low,
-    Medium,
+    Critical,
     High,
+    Clear,
     Sweeping,
     Failed,
 }
@@ -130,23 +134,21 @@ impl Look {
     /// The look of an idle app whose worst open item is `worst`.
     fn of(worst: Option<Severity>) -> Self {
         match worst {
-            None => Self::Clean,
-            Some(Severity::Low) => Self::Low,
-            Some(Severity::Medium) => Self::Medium,
-            Some(Severity::High | Severity::Critical) => Self::High,
+            Some(Severity::Critical) => Self::Critical,
+            Some(Severity::High) => Self::High,
+            Some(Severity::Medium | Severity::Low) | None => Self::Clear,
         }
     }
 
     fn png(self, bar: Bar) -> &'static [u8] {
         match (self, bar) {
-            (Self::Clean, _) => include_bytes!("../icons/tray-clean.png"),
             (Self::Failed, _) => include_bytes!("../icons/tray-failed.png"),
-            (Self::Low, Bar::Dark) => include_bytes!("../icons/tray-low.png"),
-            (Self::Low, Bar::Light) => include_bytes!("../icons/tray-low-light.png"),
-            (Self::Medium, Bar::Dark) => include_bytes!("../icons/tray-medium.png"),
-            (Self::Medium, Bar::Light) => include_bytes!("../icons/tray-medium-light.png"),
+            (Self::Critical, Bar::Dark) => include_bytes!("../icons/tray-critical.png"),
+            (Self::Critical, Bar::Light) => include_bytes!("../icons/tray-critical-light.png"),
             (Self::High, Bar::Dark) => include_bytes!("../icons/tray-high.png"),
             (Self::High, Bar::Light) => include_bytes!("../icons/tray-high-light.png"),
+            (Self::Clear, Bar::Dark) => include_bytes!("../icons/tray-clear.png"),
+            (Self::Clear, Bar::Light) => include_bytes!("../icons/tray-clear-light.png"),
             (Self::Sweeping, Bar::Dark) => include_bytes!("../icons/tray-sweeping.png"),
             (Self::Sweeping, Bar::Light) => include_bytes!("../icons/tray-sweeping-light.png"),
         }
@@ -154,23 +156,22 @@ impl Look {
 
     fn tooltip(self) -> &'static str {
         match self {
-            Self::Clean => "Vigil: nothing open",
-            Self::Low => "Vigil: low findings open",
-            Self::Medium => "Vigil: medium findings open",
-            Self::High => "Vigil: critical or high findings open",
+            Self::Critical => "Vigil: critical findings open",
+            Self::High => "Vigil: high findings open",
+            Self::Clear => "Vigil: no critical or high findings open",
             Self::Sweeping => "Vigil: sweeping",
             Self::Failed => "Vigil: the last sweep failed",
         }
     }
 
     /// Whether macOS draws the icon in the menu bar's own colour, as it does the system's.
-    /// Only the looks without a colour are: nothing open, and a failure, which its missing arm
-    /// tells apart. The others keep their colours (a neutral grey inside, the state's colour
-    /// outside), from the palette for the bar's appearance ([`Bar`]).
+    /// Only a failure is, told apart by its missing arm. The others keep their colours (a
+    /// neutral grey inside, the state's colour outside), from the palette for the bar's
+    /// appearance ([`Bar`]).
     fn template(self) -> bool {
         match self {
-            Self::Clean | Self::Failed => true,
-            Self::Low | Self::Medium | Self::High | Self::Sweeping => false,
+            Self::Failed => true,
+            Self::Critical | Self::High | Self::Clear | Self::Sweeping => false,
         }
     }
 
@@ -181,7 +182,7 @@ impl Look {
 
 /// The menu bar's appearance, which picks the coloured icons' palette: neon reads on a dark
 /// bar but not on a light one, so a light bar gets deeper colours (the owner's choice,
-/// 2026-11-09). The template icons need no palette: macOS tints them.
+/// 2026-11-09). The template icon needs no palette: macOS tints it.
 #[derive(Debug, Clone, Copy)]
 enum Bar {
     Dark,
@@ -190,8 +191,8 @@ enum Bar {
 
 /// The menu bar's appearance, read from the popover window, which follows the system's. A
 /// window that cannot be read counts as dark, the more common bar. Not detected: a menu bar
-/// that a bright or dark wallpaper tints against the system appearance; the template icons
-/// follow that tint and the coloured ones do not.
+/// that a bright or dark wallpaper tints against the system appearance; the template icon
+/// follows that tint and the coloured ones do not.
 fn bar(app: &AppHandle) -> Bar {
     match app.get_webview_window(POPOVER).map(|window| window.theme()) {
         Some(Ok(Theme::Light)) => Bar::Light,
@@ -298,42 +299,46 @@ fn toggle(app: &AppHandle) {
 mod tests {
     use super::*;
 
+    const LOOKS: [Look; 5] = [
+        Look::Critical,
+        Look::High,
+        Look::Clear,
+        Look::Sweeping,
+        Look::Failed,
+    ];
+
     #[test]
-    fn the_icon_takes_the_worst_open_item() {
-        assert!(matches!(Look::of(None), Look::Clean));
-        assert!(matches!(Look::of(Some(Severity::Low)), Look::Low));
-        assert!(matches!(Look::of(Some(Severity::Medium)), Look::Medium));
+    fn only_critical_and_high_colour_the_icon() {
+        assert!(matches!(Look::of(Some(Severity::Critical)), Look::Critical));
         assert!(matches!(Look::of(Some(Severity::High)), Look::High));
-        assert!(matches!(Look::of(Some(Severity::Critical)), Look::High));
+        assert!(matches!(Look::of(Some(Severity::Medium)), Look::Clear));
+        assert!(matches!(Look::of(Some(Severity::Low)), Look::Clear));
+        assert!(matches!(Look::of(None), Look::Clear));
         // With nothing swept there is nothing open; that a reported fix is not open is the
         // core's `PopoverView::worst`, tested there.
         assert!(matches!(
             Look::of(popover_view(Vec::new()).worst()),
-            Look::Clean
+            Look::Clear
         ));
     }
 
     #[test]
-    fn a_light_bar_gets_its_own_coloured_icons_and_the_same_templates() {
-        for look in [Look::Low, Look::Medium, Look::High, Look::Sweeping] {
-            assert_ne!(look.png(Bar::Dark), look.png(Bar::Light), "{look:?}");
-        }
-        // Every icon decodes, at the menu bar's 22 points at 2x.
-        for look in [
-            Look::Clean,
-            Look::Low,
-            Look::Medium,
-            Look::High,
-            Look::Sweeping,
-            Look::Failed,
-        ] {
+    fn every_icon_decodes_at_the_menu_bars_size() {
+        // The menu bar's 22 points at 2x.
+        for look in LOOKS {
             for bar in [Bar::Dark, Bar::Light] {
                 let image = look.image(bar);
                 assert_eq!((image.width(), image.height()), (44, 44), "{look:?}");
             }
         }
-        for look in [Look::Clean, Look::Failed] {
-            assert_eq!(look.png(Bar::Dark), look.png(Bar::Light), "{look:?}");
+    }
+
+    #[test]
+    fn a_light_bar_gets_its_own_coloured_icons_and_only_a_failure_is_a_template() {
+        for look in LOOKS {
+            let same = look.png(Bar::Dark) == look.png(Bar::Light);
+            assert_eq!(same, look.template(), "{look:?}");
+            assert_eq!(look.template(), matches!(look, Look::Failed), "{look:?}");
         }
     }
 }

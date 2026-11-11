@@ -6,8 +6,8 @@ itself (vortex.html), and the tray keeps only what reads at 22 points (this file
 Writes, next to this file:
   mark.svg          the tray mark, 24 px, in currentColor
   mark-failed.svg   the tray mark with one arm missing, for a failed sweep
-  tray-<state>.svg  the coloured tray marks for low, medium, high and sweeping on a dark menu
-                    bar, in neon: grey inner streaks, the state's colour on the outer ones, as
+  tray-<state>.svg  the coloured tray marks for critical, high, clear and sweeping on a dark
+                    menu bar: grey inner streaks, the state's colour on the outer ones, as
                     findings burn at the vortex's edge
   tray-<state>-light.svg  the same on a light menu bar, in deeper colours
 
@@ -19,8 +19,8 @@ The PNGs one level up are rendered with headless Chrome, transparent, then sized
     <img style="width:440px;height:440px;display:block"> on a margin-free body, then
     chrome --headless --hide-scrollbars --window-size=440,440 --force-device-scale-factor=1
       --default-background-color=00000000 --screenshot=<out> <page>
-    and `sips -z 44 44`. tray-clean and tray-failed come from mark.svg and mark-failed.svg
-    with currentColor replaced by #000: macOS template images, tinted to the menu bar.
+    and `sips -z 44 44`. tray-failed comes from mark-failed.svg with currentColor replaced
+    by #000: a macOS template image, tinted to the menu bar.
   icon.png, 512 px: the same chrome command on vortex.html with --window-size=1024,1024,
     then `sips -z 512 512`.
 """
@@ -50,22 +50,26 @@ LANES = ((4.4, 1.0, 1.6), (7.4, 0.85, 2.0), (10.2, 0.7, 2.4))
 # not on a light one (cyan is 1.2:1 against it), so the owner chose two sets switched with the
 # appearance (2026-11-09). The light set is each hue at the lightest that keeps 3:1 contrast
 # against a light bar (#ececf1, WCAG's minimum for graphics).
+#
+# Critical, high and clear take the app's severity colours (--critical, --high and --ok in
+# app/ui/src/style.css), so the icon reads like the popover. Medium and low have no look: the
+# owner decided on 2026-11-11 that only critical and high colour the icon.
 PALETTES = {
     "": (
         "#9aa1b4",
         {
-            "low": "#8fa2ff",
-            "medium": "#ffd23a",
-            "high": "#ff2e88",
+            "critical": "#ff5a52",
+            "high": "#ff8a3d",
+            "clear": "#4fd18b",
             "sweeping": "#3ef0ff",
         },
     ),
     "-light": (
         "#81889c",
         {
-            "low": "#637dff",
-            "medium": "#b27d00",
-            "high": "#ff268b",
+            "critical": "#ff3c32",
+            "high": "#e75c00",
+            "clear": "#289b5d",
             "sweeping": "#0095b2",
         },
     ),

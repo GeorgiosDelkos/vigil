@@ -586,8 +586,8 @@ not an OSV ecosystem, so formulae go through NVD.
 
 ### UI (Tauri 2)
 
-- `LSUIElement` (no Dock icon), tray icon states: idle-clean, findings (by worst severity),
-  sweeping, error.
+- `LSUIElement` (no Dock icon), tray icon states: critical open, high open, clear (no
+  critical or high open), sweeping, error.
 - Popover panel under the icon, hidden on blur: per-target counts, Sweep now, newest findings.
 - Window: finding details (agent explanation, evidence, fix plan + confirm), targets
   (Mac folders, repos, servers), agent picker, schedule, history window, report history.
@@ -607,12 +607,15 @@ Built in step 9a (2026-11-06):
 
 - Settings were first only shown, with "Edit settings" opening `config.toml`; step 9b edits
   them in the popover. The config is read again on every refresh.
-- The tray icon is the mark: in the menu bar's own colour (nothing open); grey inner streaks
-  with blue, yellow or pink outer ones (worst open severity: low, medium, or critical and
-  high); all cyan (sweeping); and with one arm missing, in the bar's colour (the last sweep
-  failed or a target got no verdict). The coloured icons come in two palettes switched with the
-  menu bar's appearance (decided 2026-11-09): neon on a dark bar, the same hues deepened to 3:1
-  contrast on a light one.
+- The tray icon is the mark: grey inner streaks with red outer ones (a critical finding open),
+  orange (a high one open, no critical), or green (only medium or low open, or nothing); all
+  cyan (sweeping or fixing); and with one arm missing, in the bar's own colour (the last sweep
+  failed or a target got no verdict). Medium and low no longer colour the icon and stay
+  visible in the popover (the owner's decision, 2026-11-11, replacing blue, yellow and pink for
+  low, medium, and critical and high, and the uncoloured icon for nothing open). Red, orange
+  and green are the app's `--critical`, `--high` and `--ok`. The coloured icons come in two
+  palettes switched with the menu bar's appearance (decided 2026-11-09): bright on a dark
+  bar, the same hues deepened to 3:1 contrast on a light one.
 - A left click on the icon shows or hides the popover; a right click opens a menu with only
   Quit Vigil (asked for 2026-11-09), which quits as the popover's Quit does.
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
