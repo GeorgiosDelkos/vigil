@@ -450,6 +450,10 @@ select:focus-visible {
 }
 .list {
   display: grid;
+  /* Each row as tall as its text. With auto rows, a list of capped height (settings'
+     .group.scroll) sized rows that have a min-height to fit the cap, not their text, and a
+     row's wrapped lines ran over the next row. */
+  grid-auto-rows: max-content;
   align-content: start;
   margin: 0;
   padding: 0;
