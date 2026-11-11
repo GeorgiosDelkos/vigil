@@ -1353,6 +1353,57 @@ describe("the main view", () => {
     ).toBeTruthy();
   });
 
+  it("ends with the startup disk: its name, used and free parts, size, and free space", async () => {
+    shown = overview({
+      disk: {
+        name: "Macintosh HD",
+        total: 245_107_195_904,
+        free: 27_953_098_752,
+        size: "245 GB",
+        label: "Macintosh HD: 28 GB free of 245 GB",
+        used_percent: 88.6,
+        free_percent: 11.4,
+      },
+    });
+    answer();
+    render(() => <App />);
+    const bar = await screen.findByRole("img", { name: "Macintosh HD: 28 GB free of 245 GB" });
+    const disk = bar.closest(".orbit-disk");
+    expect(disk?.getAttribute("title")).toBe("Macintosh HD: 28 GB free of 245 GB");
+    expect(disk?.textContent).toBe("Macintosh HD245 GB");
+    const used = bar.querySelector<HTMLElement>(".used");
+    const free = bar.querySelector<HTMLElement>(".free");
+    expect(used?.style.flexGrow).toBe("88.6");
+    expect(free?.style.flexGrow).toBe("11.4");
+    // Below the actions: the last thing in the main view.
+    expect(document.querySelector(".orbit > :last-child")).toBe(disk);
+  });
+
+  it("draws no empty part of the disk's bar", async () => {
+    const full = {
+      name: "Full",
+      total: 1,
+      free: 0,
+      size: "0 GB",
+      label: "Full: 0 GB free of 0 GB",
+    };
+    shown = overview({ disk: { ...full, used_percent: 100, free_percent: 0 } });
+    answer();
+    render(() => <App />);
+    const bar = await screen.findByRole("img", { name: "Full: 0 GB free of 0 GB" });
+    expect(bar.querySelector(".used")).toBeTruthy();
+    expect(bar.querySelector(".free")).toBeNull();
+  });
+
+  it("has no disk row when Rust could not read the disk", async () => {
+    shown = overview({ disk: null });
+    answer();
+    render(() => <App />);
+    expect(await screen.findByRole("button", { name: "Sweep now" })).toBeTruthy();
+    expect(document.querySelector(".orbit-disk")).toBeNull();
+    expect(screen.queryByRole("img", { name: /free of/ })).toBeNull();
+  });
+
   it("shows a running sweep's progress, and cancels it", async () => {
     shown = sweeping(false);
     answer({ cancel_sweep: () => null });

@@ -148,6 +148,20 @@ export type ReportedFix = {
   readonly fixed_at: string;
 };
 
+/** The startup disk (the core's `Disk`): its name, size and how much is used and free. */
+export type Disk = {
+  readonly name: string;
+  readonly total: number;
+  readonly free: number;
+  /** The size for display: "245 GB". */
+  readonly size: string;
+  /** The row in words: "Macintosh HD: 28 GB free of 245 GB". */
+  readonly label: string;
+  /** From 0 to 100; with `free_percent` it makes 100. */
+  readonly used_percent: number;
+  readonly free_percent: number;
+};
+
 export type Overview = {
   readonly status: Status;
   readonly busy: boolean;
@@ -175,6 +189,8 @@ export type Overview = {
   readonly schedule: string;
   readonly config: string;
   readonly problem: string | null;
+  /** Null when Rust could not read the disk; the main view then has no disk row. */
+  readonly disk: Disk | null;
 };
 
 export type FixPreview = {
