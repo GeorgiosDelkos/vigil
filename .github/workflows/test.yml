@@ -1,21 +1,24 @@
 # Derived from jonhoo/rust-ci-conf @ de512da1e85b with house
 # additions (nextest from Tokio).
-# This is the main CI workflow that runs the test suite on all pushes to main and all pull
-# requests. Keep it in every repo. It runs the following jobs:
-# - required: runs the test suite on macOS (the only platform the app ships on) with stable and
-#   beta. rust-toolchain.toml pins stable, so RUSTUP_TOOLCHAIN selects the matrix toolchain.
+# This is the main CI workflow that runs the test suite on all pull requests and daily on main.
+# Keep it in every repo. It runs the following jobs:
+# - required: runs the test suite on macOS (the only platform the app ships on) with stable, and
+#   daily also with beta. rust-toolchain.toml pins stable, so RUSTUP_TOOLCHAIN selects the
+#   matrix toolchain.
 # Every house repo commits Cargo.lock, so every job runs with --locked and there is no
 # generate-lockfile fallback.
-# See check.yml for information about how the concurrency cancellation and workflow triggering works
+# See check.yml for information about how the concurrency cancellation and workflow triggering
+# works, and why there is no push trigger and beta runs only daily.
 permissions:
   contents: read
 on:
-  push:
-    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '7 4 * * *'
+  workflow_dispatch:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ github.event.pull_request.draft }}
   cancel-in-progress: true
 name: test
 jobs:
@@ -28,8 +31,8 @@ jobs:
     strategy:
       matrix:
         # run on stable and beta to ensure that tests won't break on the next version of the rust
-        # toolchain
-        toolchain: [stable, beta]
+        # toolchain; beta only daily and by hand, since a PR cannot break it
+        toolchain: ${{ fromJSON(github.event_name == 'pull_request' && '["stable"]' || '["stable", "beta"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
         with:

@@ -1,23 +1,26 @@
 # Derived from jonhoo/rust-ci-conf @ de512da1e85b with
 # house additions. Runs whenever a PR is opened or updated,
-# or a commit is pushed to main:
+# and daily on main:
 # - fmt: checks that the code is formatted according to rustfmt
-# - clippy: on macOS, no warnings on stable (blocking); beta is non-blocking early warning of
-#   new lints. RUSTUP_TOOLCHAIN overrides the pin in rust-toolchain.toml.
+# - clippy: on macOS, no warnings on stable (blocking); beta, daily only, is non-blocking early
+#   warning of new lints. RUSTUP_TOOLCHAIN overrides the pin in rust-toolchain.toml.
 # - release: the release build on macOS, the only platform the app ships on
 permissions:
   contents: read
-# This configuration allows maintainers of this repo to create a branch and pull request based on
-# the new branch. Restricting the push trigger to the main branch ensures that the PR only gets
-# built once.
+# PRs run only the stable checks; the toolchains a PR cannot break run daily (decided with the
+# owner on 2026-11-11 to cut macOS minutes). There is no push trigger: a merge reran every check
+# on code its PR had just passed. The daily run tests main instead and keeps the README badge,
+# which shows the latest run on main, current. workflow_dispatch runs it by hand.
 on:
-  push:
-    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: '7 4 * * *'
+  workflow_dispatch:
 # A draft PR gets no CI: it is opened for its review, whose fixes would supersede the run. Every
-# job here and in the other workflows carries `if: ${{ !github.event.pull_request.draft }}`, and
-# `ready_for_review` above starts the one run that counts. The skip is safe for required checks
+# job that runs on PRs, here and in the other workflows, carries
+# `if: ${{ !github.event.pull_request.draft }}`, and `ready_for_review` above starts the one run
+# that counts. The skip is safe for required checks
 # only because no job has `needs:`: a job's check run is created when its run queues, so the
 # skipped (green) result on a draft is replaced the moment the PR is marked ready. A job behind
 # `needs:` gets its check run only after its needs finish, which leaves that stale green showing
@@ -26,8 +29,9 @@ on:
 # nothing on a draft and stay expected until the ready run.
 # If new code is pushed to a PR branch, then cancel in progress workflows for that PR. Ensures that
 # we don't waste CI time, and returns results quicker https://github.com/jonhoo/rust-ci-conf/pull/5
+# The group ends in the draft flag, so a skipped draft run cannot cancel the ready run after it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ github.event.pull_request.draft }}
   cancel-in-progress: true
 name: check
 jobs:
@@ -54,12 +58,13 @@ jobs:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     name: ${{ matrix.toolchain }} / clippy
     # Stable blocks the PR. Beta gives early warning of new lints, which are regularly introduced
-    # in beta channels, without failing the PR.
+    # in beta channels, without failing the PR. A PR cannot break beta, so beta runs only on the
+    # daily schedule and by hand.
     continue-on-error: ${{ matrix.toolchain == 'beta' }}
     strategy:
       fail-fast: false
       matrix:
-        toolchain: [stable, beta]
+        toolchain: ${{ fromJSON(github.event_name == 'pull_request' && '["stable"]' || '["stable", "beta"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
         with:

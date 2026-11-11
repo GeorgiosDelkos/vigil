@@ -1,25 +1,21 @@
 # From jonhoo/rust-ci-conf @ de512da1e85b. Keep it in
 # every repo.
 # Run scheduled (rolling) jobs on a nightly basis, as your crate may break independently of any
-# given PR. E.g., updates to rust nightly and updates to this crates dependencies. See check.yml for
-# information about how the concurrency cancellation and workflow triggering works
+# given PR. E.g., updates to rust nightly and updates to this crates dependencies.
+# Only on the schedule and by hand, not on PRs or pushes (decided with the owner on 2026-11-11 to
+# cut macOS minutes): a new nightly or a dependency release breaks main whether or not a PR
+# changed anything, so a run per PR only repeated the daily answer. The beta clippy and beta
+# test jobs of check.yml and test.yml likewise run only daily.
 permissions:
   contents: read
 on:
-  push:
-    branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   schedule:
     - cron:  '7 7 * * *'
-concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
-  cancel-in-progress: true
+  workflow_dispatch:
 name: rolling
 jobs:
   # https://twitter.com/mycoliza/status/1571295690063753218
   nightly:
-    if: ${{ !github.event.pull_request.draft }}
     runs-on: macos-latest
     env:
       # Overrides the stable pin in rust-toolchain.toml.
@@ -40,7 +36,6 @@ jobs:
         run: cargo test --locked --all-features --all-targets
   # https://twitter.com/alcuadrado/status/1571291687837732873
   update:
-    if: ${{ !github.event.pull_request.draft }}
     # Checks that the next `cargo update` (what Dependabot will propose) still builds and passes
     # the tests, within semver-compatible versions.
     runs-on: macos-latest
