@@ -217,7 +217,7 @@ function rowStatus(target: TargetLine): string {
 
 /** One row per target, every row the same shape: the name, what was checked, a count for each
  * severity in fixed columns, the number above its name so four digits fit at the popover's
- * 360px width (a zero is dimmed, so a severity sits in the same place in every row), and a bar split by severity. The owner asked for standard sizes and positions over tags
+ * 380px width (a zero is dimmed, so a severity sits in the same place in every row), and a bar split by severity. The owner asked for standard sizes and positions over tags
  * that wrapped and moved with the counts (2026-11-10). Every bar is the full width, so it shows
  * the mix within its target, not its size beside the others. During a sweep the rows dim: their
  * counts are from the last sweep. The card grows with its rows until the vortex has only the

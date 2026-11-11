@@ -277,8 +277,8 @@ fn ticks(total: usize) -> Vec<f64> {
         .collect()
 }
 
-/// How many targets the bar still marks apart. Arbitrary: in a 320 px bar, twelve leave
-/// about 25 px between marks.
+/// How many targets the bar still marks apart. Arbitrary: in a 340 px bar, twelve leave
+/// about 28 px between marks.
 const MAX_MARKED_TARGETS: usize = 12;
 
 // Async: Tauri runs it off the main thread, so reading every report never stalls the UI.

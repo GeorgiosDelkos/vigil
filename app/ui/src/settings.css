@@ -1,7 +1,7 @@
 /* Settings inside the popover, on the same Obsidian tokens as style.css. The list opens with
    a status card, then the sections in labelled inset groups with a coloured icon tile each,
    as in System Settings. A section's page opens with its tile, title and purpose, and rows
-   that turn something on or off use a switch. Sized for the 360 pixel popover. */
+   that turn something on or off use a switch. Sized for the 380 pixel popover. */
 .settings-view {
   display: flex;
   flex-direction: column;
