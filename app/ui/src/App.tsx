@@ -672,6 +672,12 @@ function FixAllConfirm(props: {
                 <Icon name="wrench" />
                 {item.summary}
               </p>
+              {/* The agent is told the steps were confirmed too, so they are shown. */}
+              <Show when={item.steps.length > 0}>
+                <ol class="fix-steps" aria-label={`Steps for ${item.name}`}>
+                  <For each={item.steps}>{(step) => <li>{step}</li>}</For>
+                </ol>
+              </Show>
               <Commands commands={item.commands} label={`Commands for ${item.name}`} />
             </li>
           )}

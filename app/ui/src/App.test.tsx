@@ -1611,7 +1611,7 @@ describe("the main view", () => {
           key: "g",
           name: "glibc 1.0.0",
           summary: "Upgrade glibc.",
-          steps: [],
+          steps: ["Hold the old kernel"],
           commands: ["sudo apt-get install --only-upgrade libc6"],
         },
         {
@@ -1647,6 +1647,10 @@ describe("the main view", () => {
     expect(within(fixes).getByLabelText("Commands for nginx 1.0.0").textContent).toBe(
       "$ sudo apt-get install --only-upgrade nginx\n",
     );
+    expect(within(fixes).getByLabelText("Steps for glibc 1.0.0").textContent).toBe(
+      "Hold the old kernel",
+    );
+    expect(within(fixes).queryByLabelText("Steps for nginx 1.0.0")).toBeNull();
     // The question replaces the rows and the button until it is answered.
     expect(names()).toEqual([]);
     expect(document.querySelector(".headline .pill")).toBeNull();
