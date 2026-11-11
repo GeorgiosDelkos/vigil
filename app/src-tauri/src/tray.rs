@@ -137,7 +137,9 @@ enum Look {
     Failed,
 }
 
-/// Whether the last sweep had a verdict for every target.
+/// Whether the runner's status is `Failed`: the last sweep stopped, a target in it got no
+/// verdict, or the schedule could not be checked. The tooltips say "something failed", not
+/// "the last sweep failed", as the failure need not be a sweep's.
 #[derive(Debug, Clone, Copy)]
 enum LastSweep {
     Succeeded,
@@ -177,14 +179,16 @@ impl Look {
         match self {
             Self::Critical(LastSweep::Succeeded) => "Vigil: critical findings open",
             Self::Critical(LastSweep::Failed) => {
-                "Vigil: critical findings open; the last sweep failed"
+                "Vigil: critical findings open; something failed, open Vigil to see it"
             }
             Self::High(LastSweep::Succeeded) => "Vigil: high findings open",
-            Self::High(LastSweep::Failed) => "Vigil: high findings open; the last sweep failed",
+            Self::High(LastSweep::Failed) => {
+                "Vigil: high findings open; something failed, open Vigil to see it"
+            }
             Self::Clear => "Vigil: no critical or high findings open",
             Self::Sweeping => "Vigil: sweeping",
             Self::Fixing => "Vigil: fixing",
-            Self::Failed => "Vigil: the last sweep failed",
+            Self::Failed => "Vigil: something failed; open Vigil to see it",
         }
     }
 
@@ -350,6 +354,22 @@ mod tests {
         assert!(matches!(of(Some(Severity::Medium)), Look::Clear));
         assert!(matches!(of(Some(Severity::Low)), Look::Clear));
         assert!(matches!(of(None), Look::Clear));
+        assert_eq!(
+            of(Some(Severity::Critical)).tooltip(),
+            "Vigil: critical findings open"
+        );
+        assert_eq!(
+            of(Some(Severity::High)).tooltip(),
+            "Vigil: high findings open"
+        );
+        assert_eq!(
+            of(None).tooltip(),
+            "Vigil: no critical or high findings open"
+        );
+        assert_eq!(
+            Look::Failed.tooltip(),
+            "Vigil: something failed; open Vigil to see it"
+        );
     }
 
     #[test]
@@ -359,13 +379,13 @@ mod tests {
         assert!(matches!(critical, Look::Critical(LastSweep::Failed)));
         assert_eq!(
             critical.tooltip(),
-            "Vigil: critical findings open; the last sweep failed"
+            "Vigil: critical findings open; something failed, open Vigil to see it"
         );
         let high = of(Some(Severity::High));
         assert!(matches!(high, Look::High(LastSweep::Failed)));
         assert_eq!(
             high.tooltip(),
-            "Vigil: high findings open; the last sweep failed"
+            "Vigil: high findings open; something failed, open Vigil to see it"
         );
         // The same coloured icon as after a sweep that succeeded; only the tooltip differs.
         for bar in [Bar::Dark, Bar::Light] {
@@ -426,7 +446,6 @@ mod tests {
         for look in LOOKS {
             let same = look.png(Bar::Dark) == look.png(Bar::Light);
             assert_eq!(same, look.template(), "{look:?}");
-            assert_eq!(look.template(), matches!(look, Look::Failed), "{look:?}");
         }
     }
 
