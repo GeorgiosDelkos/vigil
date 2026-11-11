@@ -137,6 +137,7 @@ function sameLabel(): Overview {
         counts: { critical: 1, high: 0, medium: 1, low: 0 },
         open: 2,
         to_confirm: "1 fix to confirm",
+        fix_all: null,
         dismissed: 1,
       },
       { ...line, swept, checked: "12 components checked" },
@@ -885,6 +886,7 @@ describe("the tabs", () => {
           counts: { critical: 0, high: 6, medium: 0, low: 0 },
           open: 6,
           to_confirm: null,
+          fix_all: null,
           dismissed: 1,
         },
         {
@@ -896,6 +898,7 @@ describe("the tabs", () => {
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
           to_confirm: null,
+          fix_all: null,
           dismissed: 0,
         },
         {
@@ -907,6 +910,7 @@ describe("the tabs", () => {
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
           to_confirm: null,
+          fix_all: null,
           dismissed: 0,
         },
         {
@@ -918,6 +922,7 @@ describe("the tabs", () => {
           counts: { critical: 1, high: 0, medium: 2, low: 0 },
           open: 3,
           to_confirm: null,
+          fix_all: null,
           dismissed: 0,
         },
       ],
@@ -1586,6 +1591,108 @@ describe("the main view", () => {
     expect(names()).toEqual(["glibc", "nginx"]);
     fireEvent.keyDown(window, { key: "Escape" });
     expect(await screen.findByTitle("Show details")).toBeTruthy();
+  });
+
+  it("shows Fix all only where Rust labelled it, and runs the list it confirmed", async () => {
+    const base = sameLabel();
+    shown = {
+      ...base,
+      targets: base.targets.map((t) =>
+        t.key === "server:web" ? { ...t, fix_all: "Fix all 2" } : t,
+      ),
+    };
+    const preview = {
+      destination: "the server web, through `ssh -- web`",
+      found: "2026-11-06T11:00:00Z",
+      agent: "claude",
+      confirm: "Fix all 2",
+      items: [
+        {
+          key: "g",
+          name: "glibc 1.0.0",
+          summary: "Upgrade glibc.",
+          steps: ["Hold the old kernel"],
+          commands: ["sudo apt-get install --only-upgrade libc6"],
+        },
+        {
+          key: "n",
+          name: "nginx 1.0.0",
+          summary: "Upgrade nginx.",
+          steps: [],
+          commands: ["sudo apt-get install --only-upgrade nginx"],
+        },
+      ],
+    };
+    answer({ fix_all_preview: () => preview, fix_all: () => null });
+    render(() => <App />);
+
+    // The repository, which Rust gave no label, has no button.
+    fireEvent.click(await screen.findByRole("button", { name: /^web, 1 open/ }));
+    expect(screen.queryByRole("button", { name: /Fix all/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    fireEvent.click(await screen.findByRole("button", { name: /^web, 2 open/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Fix all 2" }));
+    expect(invoke).toHaveBeenCalledWith("fix_all_preview", { target: "server:web" });
+    const asked = await screen.findByRole("region", { name: "Fix all" });
+    expect(asked.textContent).toContain(
+      "Run these 2 fixes on the server web, through `ssh -- web` with claude, with full access, in one run?",
+    );
+    const fixes = within(asked).getByRole("list", { name: "Fixes to run" });
+    expect(
+      within(fixes)
+        .getAllByRole("heading")
+        .map((h) => h.textContent),
+    ).toEqual(["glibc 1.0.0", "nginx 1.0.0"]);
+    expect(within(fixes).getByLabelText("Commands for nginx 1.0.0").textContent).toBe(
+      "$ sudo apt-get install --only-upgrade nginx\n",
+    );
+    expect(within(fixes).getByLabelText("Steps for glibc 1.0.0").textContent).toBe(
+      "Hold the old kernel",
+    );
+    expect(within(fixes).queryByLabelText("Steps for nginx 1.0.0")).toBeNull();
+    // The question replaces the rows and the button until it is answered.
+    expect(names()).toEqual([]);
+    expect(document.querySelector(".headline .pill")).toBeNull();
+
+    fireEvent.click(within(asked).getByRole("button", { name: "Cancel" }));
+    expect(names()).toEqual(["glibc", "nginx"]);
+    expect(invoke).not.toHaveBeenCalledWith("fix_all", expect.anything());
+
+    fireEvent.click(screen.getByRole("button", { name: "Fix all 2" }));
+    const again = await screen.findByRole("region", { name: "Fix all" });
+    fireEvent.click(within(again).getByRole("button", { name: "Fix all 2" }));
+    expect(invoke).toHaveBeenCalledWith("fix_all", {
+      target: "server:web",
+      keys: ["g", "n"],
+      found: "2026-11-06T11:00:00Z",
+    });
+  });
+
+  it("shows why Fix all cannot run, and disables it while something runs", async () => {
+    const base = sameLabel();
+    const labelled = base.targets.map((t) =>
+      t.key === "server:web" ? { ...t, fix_all: "Fix all 2" } : t,
+    );
+    shown = { ...base, targets: labelled };
+    answer({
+      fix_all_preview: () =>
+        Promise.reject(new Error("nothing was run: glibc 1.0.0: g is dismissed")),
+    });
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: /^web, 2 open/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Fix all 2" }));
+    expect(
+      await screen.findByText("Error: nothing was run: glibc 1.0.0: g is dismissed"),
+    ).toBeTruthy();
+
+    shown = { ...base, targets: labelled, busy: true };
+    handlers.get("changed")?.({ payload: null });
+    await vi.waitFor(() =>
+      expect(
+        (screen.getByRole("button", { name: "Fix all 2" }) as HTMLButtonElement).disabled,
+      ).toBe(true),
+    );
   });
 
   it("opens a target's findings from the list's Targets tab, and goes back to the tab", async () => {

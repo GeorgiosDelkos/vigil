@@ -31,12 +31,12 @@ use vigil_core::Config;
 use vigil_core::DataDir;
 use vigil_core::Disk;
 use vigil_core::FindingKey;
-use vigil_core::FixProgress;
 use vigil_core::ParseFindingKeyError;
 use vigil_core::PopoverView;
-use vigil_core::last_activity;
+use vigil_core::error_chain;
 use vigil_core::latest;
 use vigil_core::plan_fix;
+use vigil_core::plan_fix_all;
 use vigil_core::popover_view;
 use vigil_core::startup_disk;
 use vigil_core::target_label;
@@ -68,6 +68,8 @@ fn main() {
             quit,
             fix_preview,
             fix,
+            fix_all_preview,
+            fix_all,
             dismiss,
             settings::settings_data,
             settings::detect_again,
@@ -224,11 +226,11 @@ impl StatusView {
             } => Self::Fixing {
                 title,
                 place,
-                activity: match &step {
-                    FixProgress::Agent { log } => last_activity(log),
-                    FixProgress::Preparing | FixProgress::Recording => None,
+                activity: step.activity(),
+                steps: {
+                    let at = step.step(&labels);
+                    fix_steps(labels, at)
                 },
-                steps: fix_steps(labels, step.step()),
                 started,
                 step_started,
             },
@@ -255,7 +257,7 @@ enum StepState {
 
 /// The steps of a fix, `labels` in order, with the one at `at` running, those before it done
 /// and those after it next.
-fn fix_steps(labels: [String; 3], at: usize) -> Vec<StepView> {
+fn fix_steps(labels: Vec<String>, at: usize) -> Vec<StepView> {
     labels
         .into_iter()
         .enumerate()
@@ -453,6 +455,85 @@ fn fix(app: AppHandle, key: String, found: Timestamp) -> Result<(), String> {
     runner::start_fix(&app, key, found)
 }
 
+/// What the target view shows before the user confirms a Fix all: every item's fix, as the
+/// detail view shows one.
+#[derive(Debug, Serialize)]
+struct FixAllPreview {
+    /// Where they run: "this Mac", or the server and its ssh command.
+    destination: String,
+    /// When the sweep that found them started.
+    found: Timestamp,
+    agent: String,
+    /// The confirming button's label: "Fix all 3".
+    confirm: String,
+    items: Vec<FixAllPreviewItem>,
+}
+
+/// One item of a [`FixAllPreview`].
+#[derive(Debug, Serialize)]
+struct FixAllPreviewItem {
+    /// The key of the finding whose fix it runs.
+    key: String,
+    /// "curl 8.1.2", or an issue's subject.
+    name: String,
+    summary: String,
+    steps: Vec<String>,
+    commands: Vec<String>,
+}
+
+/// Checks the Fix all of `target` as the CLI's `fix all` does before it asks: every item is
+/// current and not dismissed, its fix well formed, the target configured and not a
+/// repository, and the agent installed.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn fix_all_preview(runner: State<'_, Runner>, target: String) -> Result<FixAllPreview, String> {
+    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+        .map_err(|e| e.to_string())?;
+    let plan = plan_fix_all(runner.data_dir(), &config, &target).map_err(|e| error_chain(&e))?;
+    Ok(FixAllPreview {
+        destination: plan.destination().to_owned(),
+        found: plan.found(),
+        agent: plan.agent().to_string(),
+        confirm: format!("Fix all {}", plan.items().len()),
+        items: plan
+            .items()
+            .iter()
+            .map(|item| FixAllPreviewItem {
+                key: item.key().to_string(),
+                name: item.name().to_owned(),
+                summary: item.fix().summary.clone(),
+                steps: item.fix().steps.clone(),
+                commands: item.fix().commands.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Runs the Fix all of `target`, which the user just confirmed, as one agent run with full
+/// access. `keys` and `found` are the preview's: it runs only when its items are still the
+/// ones the user saw. Async, so planning it never stalls the UI.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn fix_all(
+    app: AppHandle,
+    target: String,
+    keys: Vec<String>,
+    found: Timestamp,
+) -> Result<(), String> {
+    let keys = keys
+        .iter()
+        .map(|key| key.parse())
+        .collect::<Result<Vec<FindingKey>, ParseFindingKeyError>>()
+        .map_err(|e| e.to_string())?;
+    runner::start_fix_all(&app, &target, &keys, found)
+}
+
 /// Dismisses `key` for `reason`; it shows again when its advisory changes.
 #[tauri::command(async)]
 #[expect(
@@ -472,6 +553,8 @@ fn dismiss(app: AppHandle, key: String, reason: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use vigil_core::FixProgress;
 
     #[test]
     fn a_sweeps_status_names_targets_by_label_and_counts_where_it_is() {
@@ -593,13 +676,62 @@ mod tests {
             _ => panic!("still fixing"),
         };
         assert_eq!(
-            activity(at(FixProgress::Agent { log: log.clone() })).as_deref(),
+            activity(at(FixProgress::Agent {
+                dir: tmp.path().to_owned(),
+                keys: Vec::new(),
+            }))
+            .as_deref(),
             Some("upgrading curl")
         );
         assert_eq!(
             activity(at(FixProgress::Recording)),
             None,
             "not once the agent is done"
+        );
+    }
+
+    #[test]
+    fn a_fix_all_runs_one_item_at_a_time_as_the_agent_reports_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = "00000000000000c1";
+        std::fs::write(
+            tmp.path().join("results.jsonl"),
+            format!("{{\"key\": \"{key}\", \"outcome\": \"fixed\", \"summary\": \"s\"}}\n"),
+        )
+        .unwrap();
+        let status = Status::Fixing {
+            title: "grok applies 2 fixes in one run".to_owned(),
+            place: "This Mac".to_owned(),
+            labels: [
+                "preparing the fixes",
+                "fixing curl 8.1",
+                "fixing ffmpeg 8.1",
+                "recording",
+            ]
+            .map(str::to_owned)
+            .to_vec(),
+            step: FixProgress::Agent {
+                dir: tmp.path().to_owned(),
+                keys: ["00000000000000c1", "00000000000000c2"]
+                    .map(|k| k.parse().unwrap())
+                    .to_vec(),
+            },
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        };
+        let StatusView::Fixing { steps, .. } = StatusView::of(status) else {
+            panic!("still fixing");
+        };
+        let states: Vec<(&str, &StepState)> =
+            steps.iter().map(|s| (s.label.as_str(), &s.state)).collect();
+        assert_eq!(
+            states,
+            [
+                ("preparing the fixes", &StepState::Done),
+                ("fixing curl 8.1", &StepState::Done),
+                ("fixing ffmpeg 8.1", &StepState::Now),
+                ("recording", &StepState::Next),
+            ]
         );
     }
 

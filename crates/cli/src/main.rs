@@ -30,11 +30,15 @@ use vigil_core::SshConn;
 use vigil_core::SweepError;
 use vigil_core::Targets;
 use vigil_core::dismiss;
+use vigil_core::error_chain;
+use vigil_core::fix_all_outcome;
 use vigil_core::items;
 use vigil_core::latest;
 use vigil_core::plan_fix;
+use vigil_core::plan_fix_all;
 use vigil_core::report_markdown;
 use vigil_core::run_fix;
+use vigil_core::run_fix_all;
 use vigil_core::sweep;
 use vigil_core::undismiss;
 use vigil_core::write_html_report;
@@ -130,10 +134,31 @@ enum Command {
     /// The agent gets full access: on this Mac it runs the commands, for a repository it
     /// opens a pull request, for a server it runs them over ssh. Each run is recorded in the
     /// data directory's state/fixes.jsonl.
+    ///
+    /// `fix all <target>` shows the fix of every open item of a target that has commands to
+    /// run, and runs them all in one agent run once confirmed (`--yes` goes after the target).
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
     Fix {
         /// The finding's key, as shown in the report.
-        key: FindingKey,
+        #[arg(required = true)]
+        key: Option<FindingKey>,
         /// Run without asking; for scripts that already showed the fix to the user.
+        #[arg(long)]
+        yes: bool,
+        #[command(subcommand)]
+        all: Option<FixAll>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum FixAll {
+    /// Show the fix of every open item of a target with commands to run, and run them all,
+    /// in order, in one agent run once confirmed. Not for repositories, where each fix opens
+    /// its own pull request.
+    All {
+        /// The target: mac or server:<name>.
+        target: String,
+        /// Run without asking; for scripts that already showed the fixes to the user.
         #[arg(long)]
         yes: bool,
     },
@@ -189,9 +214,17 @@ fn main() -> anyhow::Result<()> {
                 "dismissed {key}; it is left out of reports from the next sweep"
             ));
         }
-        Command::Fix { key, yes } => {
+        Command::Fix { key, yes, all } => {
             let config = load_config(&data_dir, &home()?)?;
-            fix(&data_dir, &config, key, yes)?;
+            match (key, all) {
+                (None, Some(FixAll::All { target, yes })) => {
+                    fix_all(&data_dir, &config, &target, yes)?;
+                }
+                (Some(key), None) => fix(&data_dir, &config, key, yes)?,
+                (None, None) | (Some(_), Some(_)) => {
+                    unreachable!("clap requires a key or `all`, and refuses both")
+                }
+            }
         }
         Command::Undismiss { key } => {
             undismiss(&data_dir, key)?;
@@ -383,29 +416,21 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
         text.push_str(&format!("  $ {command}\n"));
     }
     print(&text);
-    if !yes {
-        status(&format!(
+    let confirmed = confirm(
+        yes,
+        &format!(
             "Run this fix now with {}, with full access? [y/N]",
             plan.agent()
-        ));
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .context("read the answer")?;
-        if !matches!(answer.trim(), "y" | "Y" | "yes") {
-            anyhow::bail!("not confirmed; nothing was run");
-        }
-    }
-    let confirmed = if yes {
-        Confirmed::YesFlag
-    } else {
-        Confirmed::Asked
-    };
+        ),
+    )?;
     let record = run_fix(
         data_dir,
         &plan,
         confirmed,
-        &mut |p| status(&FixProgress::labels(plan.agent())[p.step()]),
+        &mut |p| {
+            let labels = FixProgress::labels(plan.agent());
+            status(&labels[p.step(&labels)]);
+        },
         &cancel_on_ctrl_c()?,
     )?;
     let pull_request = record
@@ -423,6 +448,93 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
             .exit_code
             .map_or("no exit code".to_owned(), |c| format!("exit code {c}"));
         anyhow::bail!("the fix did not finish: {}, agent {exit}", record.outcome);
+    }
+    Ok(())
+}
+
+/// Asks `question` on stderr unless `yes`, and says how the run was confirmed. Fails when the
+/// answer is not yes, so a script can tell nothing ran.
+fn confirm(yes: bool, question: &str) -> anyhow::Result<Confirmed> {
+    if yes {
+        return Ok(Confirmed::YesFlag);
+    }
+    status(question);
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .context("read the answer")?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        anyhow::bail!("not confirmed; nothing was run");
+    }
+    Ok(Confirmed::Asked)
+}
+
+/// Shows the fix of every item Fix all takes on `target`, asks once to run them all unless
+/// `yes`, and runs them in one agent run. Fails when it is not confirmed, and unless every
+/// item was reported fixed and the agent exited 0.
+fn fix_all(data_dir: &DataDir, config: &Config, target: &str, yes: bool) -> anyhow::Result<()> {
+    let plan = plan_fix_all(data_dir, config, target)?;
+    let mut text = format!(
+        "Fix all {} on {} (found by the sweep of {}), in order, in one run:\n",
+        plan.items().len(),
+        plan.destination(),
+        plan.found()
+    );
+    for (n, item) in plan.items().iter().enumerate() {
+        // One line, as for one fix, so a summary cannot pass for a command line.
+        let summary = item.fix().summary.split_whitespace().collect::<Vec<_>>();
+        text.push_str(&format!(
+            "{}. {} ({}): {}\n",
+            n + 1,
+            item.name(),
+            item.key(),
+            summary.join(" ")
+        ));
+        for step in &item.fix().steps {
+            text.push_str(&format!("  - {step}\n"));
+        }
+        for command in &item.fix().commands {
+            text.push_str(&format!("  $ {command}\n"));
+        }
+    }
+    print(&text);
+    let confirmed = confirm(
+        yes,
+        &format!(
+            "Run these {} fixes now with {}, with full access, in one run? [y/N]",
+            plan.items().len(),
+            plan.agent()
+        ),
+    )?;
+    let labels = plan.labels();
+    let records = run_fix_all(
+        data_dir,
+        &plan,
+        confirmed,
+        &mut |p| match p {
+            // The agent's step covers every item, and the CLI hears of it once.
+            FixProgress::Agent { .. } => status(&plan.title()),
+            FixProgress::Preparing | FixProgress::Recording => status(&labels[p.step(&labels)]),
+        },
+        &cancel_on_ctrl_c()?,
+    )?;
+    let mut out = String::new();
+    for (item, record) in plan.items().iter().zip(&records) {
+        out.push_str(&format!(
+            "{} ({}): {}: {}\n",
+            item.name(),
+            record.key,
+            record.outcome,
+            record.summary
+        ));
+    }
+    if let Some(record) = records.first() {
+        out.push_str(&format!("(log and files in {})", record.dir.display()));
+    }
+    print(&out);
+    let (outcome, summary) = fix_all_outcome(&records);
+    if outcome != Outcome::Fixed {
+        anyhow::bail!("not every fix finished: {summary}");
     }
     Ok(())
 }
@@ -541,17 +653,6 @@ fn incomplete(failures: usize) -> anyhow::Result<()> {
         anyhow::bail!("{failures} feed request(s) failed; the output above is incomplete");
     }
     Ok(())
-}
-
-/// Renders an error and its sources as `outer: inner: innermost`.
-fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut source = error.source();
-    while let Some(e) = source {
-        text.push_str(&format!(": {e}"));
-        source = e.source();
-    }
-    text
 }
 
 fn load_config(data_dir: &DataDir, home: &Path) -> anyhow::Result<Config> {
@@ -781,14 +882,6 @@ mod tests {
             fix_line(&FixState::NotHeld { at }),
             "still found after a fix at 2026-11-05T11:00:00Z"
         );
-    }
-
-    #[test]
-    fn error_chain_joins_sources() {
-        let inner = std::io::Error::other("disk on fire");
-        let outer = anyhow::Error::new(inner).context("reading cache");
-        let outer: &dyn std::error::Error = outer.as_ref();
-        assert_eq!(error_chain(outer), "reading cache: disk on fire");
     }
 
     #[test]

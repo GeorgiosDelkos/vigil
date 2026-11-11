@@ -146,6 +146,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
         counts: { critical: 0, high: 0, medium: 0, low: 0 },
         open: 0,
         to_confirm: null,
+        fix_all: null,
         dismissed: 0,
       },
     ],

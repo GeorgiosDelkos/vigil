@@ -61,7 +61,7 @@ Core modules (one concept each):
 - `agent`: `AgentKind` enum, detection, command construction, run with output capture.
 - `sweep`: orchestrates targets sequentially, emits progress events.
 - `findings`: schema, validation. `lifecycle`: finding keys, dismissals, changes.
-- `fix`: plan, confirm, execute, history.
+- `fix`: plan, confirm, execute, history; Fix all of one target in one run.
 - `report`: JSON + Markdown writers.
 
 ### Data layout
@@ -70,12 +70,13 @@ Core modules (one concept each):
 ~/Library/Application Support/io.github.georgiosdelkos.vigil/
   config.toml
   report.html (the HTML report, replaced each time it is asked for)
-  prompts/{sweep,sweep-github,sweep-server,fix}.md
+  prompts/{sweep,sweep-github,sweep-server,fix,fix-all}.md
   prompts/<name>.default.md (the built-in prompt when it last differed from a copy the user edited)
   feeds/osv/<id>.json, feeds/nvd/<product>.json
   state/.lock, state/dismissals.json, state/fixes.jsonl
   sweeps/.lock
   fixes/<utc-timestamp>-<key>/{PROMPT.md, fix.json, result.schema.json, agent.log, result.json}
+  fixes/<utc-timestamp>-all/{PROMPT.md, fixes.json, result.schema.json, agent.log, results.jsonl}
   sweeps/<utc-timestamp>[-n]/<target>/{bundle/, agent-1.log, agent-2.log, report.json, report.md}
     (<target> is `mac`, `github-<owner>--<name>` or `server-<name>`)
 ```
@@ -378,6 +379,55 @@ use ssh.
   take `state/.lock`; a last line cut short by a crash is ended first. The CLI exits non-zero
   unless the outcome is `fixed` and the agent exited 0.
 - A fix holds `sweeps/.lock`, so no sweep or other fix runs while it changes the target.
+
+### Fix all (decided 2026-11-11)
+
+The owner asked for a Fix all button on a target's screen and chose "one run, one confirm":
+
+- Fix all takes every open item of one target whose lead's fix has commands to run, in the
+  order the popover ranks them. A fix without commands is manual and keeps its own Fix. The
+  button reads "Fix all N" (Rust's label) and shows only when it takes two or more items: one
+  item already has Fix.
+- Not for repositories (our choice; the owner left it open). There each fix is a pull request
+  on its own branch, reviewed and merged on its own, and a setting is fixed with `gh api`.
+  One pull request for all of them was weighed: it needs a branch named after no one finding,
+  and one merge would stand for many fixes. Fix all is for this Mac and servers, where fixes
+  apply in place; `vigil fix all github:...` refuses with that reason.
+- Before asking, each item is checked as one Fix checks its finding (current, not dismissed,
+  well formed, target configured, agent installed), and all come from the same report. The
+  one question lists every item: its name and version, the fix's summary and exact commands,
+  where it runs and with which agent, then "Fix all N" and Cancel.
+- Staleness: the app runs only the list it showed (the same keys in the same order, from the
+  same sweep). Under the sweeps lock the list is made again as planning makes it, and must be
+  the same keys in the same order from the same report: a sweep, a fix reported in between, a
+  dismissal or undismissal, or a new lead refuses the whole run, naming the first item that
+  differs ("nothing was run: curl 8.1.2: a sweep, fix or dismissal changed the list while it
+  was being confirmed; run `fix all mac` again ..."). Dropping that item and running the rest
+  was weighed: it would run a list nobody confirmed, so refusing is the honest one, and Fix
+  all asked again shows the current list.
+- One agent run with full access, the `fix-all` prompt (`prompts/fix-all.md`, listed with its
+  hashes like the others), and `fixes.json` holding each item's brief as `fix.json` holds one.
+  The agent applies them in order and appends one line per item to `results.jsonl` (`key`,
+  `outcome`, `summary`) as it finishes it; when one fails it says why in that line and goes
+  on with the rest. A line that does not parse or fails the checks of `result.json` is left
+  out; the last valid line of a key wins.
+- Each item is appended to `state/fixes.jsonl` on its own, exactly as a single fix records
+  it (its key, title, `found`, the run's agent, times, exit code and folder), so the reported
+  fix, "Still found after a fix" and the next sweep's check work per item. An item with no
+  valid line is `unknown`, with why when the agent was stopped or did not start; what the
+  agent reported before it was stopped is kept, and counts as a reported fix only with exit
+  code 0, as always.
+- One agent at a time (the owner's rule, 2026-11-11): Fix all is one agent process for the
+  whole batch, never one per item, and holds `sweeps/.lock` for the whole run, so a sweep, a
+  fix or another Fix all from the CLI or the app is refused ("a sweep or fix is running").
+  The app also claims its runner as for one fix, so Sweep now, the schedule, Fix and Fix all
+  are refused while it runs.
+- While it runs, the popover's fixing view lists preparing, one step per item, and recording;
+  the running item is the first the agent has not reported in `results.jsonl` yet, with one
+  spinner on it. When it ends, the banner says "2 of 3 fixed" and names each item not fixed; it
+  reads "failed" only when every item reported `failed`, and "partial" otherwise.
+- CLI: `vigil fix all <target> [--yes]` shows every item, asks once, runs, prints a line per
+  item and exits non-zero unless every item was fixed with exit code 0.
 
 ### Agent adapters
 
@@ -742,7 +792,8 @@ with all the details", dark, not white):
 
 `vigil sweep [--target <id>]`, `findings [--json]`, `report [--open]`,
 `dismiss <key> --reason <text>`, `undismiss <key>`, `fix <key> [--yes]` (shows the fix and
-asks to confirm). Same core, same files.
+asks to confirm), `fix all <target> [--yes]` (every fixable item of a target in one run;
+see "Fix all"). Same core, same files.
 
 - `sweep --target` takes a report name (`mac`, `github:<owner>/<name>`, `server:<name>`) of a
   configured target and sweeps only it; an unknown name fails before anything runs.

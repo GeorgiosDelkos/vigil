@@ -116,6 +116,8 @@ export type TargetLine = {
   /** "1 fix to confirm" when fixes of its items wait for the next sweep. */
   readonly to_confirm: string | null;
   readonly dismissed: number;
+  /** "Fix all 3" when Fix all takes two or more of its open items; null hides the button. */
+  readonly fix_all: string | null;
 };
 
 /** What the fix history says about an open finding. */
@@ -198,6 +200,26 @@ export type FixPreview = {
   readonly steps: readonly string[];
   readonly commands: readonly string[];
   readonly agent: string;
+};
+
+/** One item of a Fix all, with its fix as the single-item preview shows one. */
+export type FixAllPreviewItem = {
+  readonly key: string;
+  /** "curl 8.1.2", or an issue's subject. */
+  readonly name: string;
+  readonly summary: string;
+  readonly steps: readonly string[];
+  readonly commands: readonly string[];
+};
+
+/** What a target's screen asks before a Fix all: every item's fix, for one confirmation. */
+export type FixAllPreview = {
+  readonly destination: string;
+  readonly found: string;
+  readonly agent: string;
+  /** The confirming button's label: "Fix all 3". */
+  readonly confirm: string;
+  readonly items: readonly FixAllPreviewItem[];
 };
 
 export type FixDone = {

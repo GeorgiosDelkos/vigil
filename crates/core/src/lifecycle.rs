@@ -449,16 +449,49 @@ pub struct Open {
 ///
 /// Fails when a sweep folder, a report, the dismissals or `state/fixes.jsonl` cannot be read.
 pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateError> {
-    let sweeps = data_dir.sweeps_dir();
-    let dismissals = Dismissals::load(data_dir)?;
-    let runs = fix::runs(data_dir)?;
-    // The last run of each key decides: runs are in the order they ran.
-    let last: BTreeMap<FindingKey, &fix::Run> = runs.iter().map(|r| (r.key, r)).collect();
-    let since = Timestamp::now() - jiff::SignedDuration::from_hours(24 * CONFIRMED_DAYS);
-    let mut all = Vec::new();
-    for (target, dir_name) in sweep::configured_targets(config) {
-        let Some((_, saved)) = newest_verdict(&sweeps, &dir_name)? else {
-            all.push(Latest {
+    let state = State::load(data_dir)?;
+    sweep::configured_targets(config)
+        .into_iter()
+        .map(|(target, dir_name)| state.latest(target, &dir_name))
+        .collect()
+}
+
+/// The [`Latest`] of one target, `target` as configured (`mac`, `server:name`), whose sweep
+/// folders are named `dir_name`. Reads the same files [`latest`] reads.
+pub(crate) fn latest_of(
+    data_dir: &DataDir,
+    target: &str,
+    dir_name: &str,
+) -> Result<Latest, StateError> {
+    State::load(data_dir)?.latest(target.to_owned(), dir_name)
+}
+
+/// What [`latest`] reads once for every target: the dismissals and the fix history.
+struct State {
+    sweeps: PathBuf,
+    dismissals: Dismissals,
+    /// The last run of each key, which decides: runs are in the order they ran.
+    last: BTreeMap<FindingKey, fix::Run>,
+    /// Confirmed fixes that finished before this are no longer listed.
+    since: Timestamp,
+}
+
+impl State {
+    fn load(data_dir: &DataDir) -> Result<Self, StateError> {
+        Ok(Self {
+            sweeps: data_dir.sweeps_dir(),
+            dismissals: Dismissals::load(data_dir)?,
+            last: fix::runs(data_dir)?
+                .into_iter()
+                .map(|r| (r.key, r))
+                .collect(),
+            since: Timestamp::now() - jiff::SignedDuration::from_hours(24 * CONFIRMED_DAYS),
+        })
+    }
+
+    fn latest(&self, target: String, dir_name: &str) -> Result<Latest, StateError> {
+        let Some((_, saved)) = newest_verdict(&self.sweeps, dir_name)? else {
+            return Ok(Latest {
                 target,
                 swept: None,
                 components: 0,
@@ -466,16 +499,16 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
                 fixed: Vec::new(),
                 dismissed: 0,
             });
-            continue;
         };
         let (dismissed, kept): (Vec<_>, Vec<_>) = saved
             .entries()
-            .partition(|e| dismissals.get(e.key, e.modified).is_some());
+            .partition(|e| self.dismissals.get(e.key, e.modified).is_some());
         let new = |key: FindingKey| saved.changes.as_ref().is_some_and(|c| c.new.contains(&key));
         let mut open: Vec<Open> = kept
             .into_iter()
             .map(|e| {
-                let state = last
+                let state = self
+                    .last
                     .get(&e.key)
                     .and_then(|run| fix_state(run, saved.started));
                 open_entry(&target, e, new(e.key), state)
@@ -483,9 +516,10 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
             .collect();
         open.sort_by_key(|o| o.severity);
         let found: BTreeSet<FindingKey> = saved.entries().map(|e| e.key).collect();
-        let mut fixed: Vec<Fixed> = last
+        let mut fixed: Vec<Fixed> = self
+            .last
             .values()
-            .filter(|run| run.target == target && run.finished >= since)
+            .filter(|run| run.target == target && run.finished >= self.since)
             .filter(|run| confirmed(run, &found, saved.started))
             .map(|run| Fixed {
                 key: run.key,
@@ -496,16 +530,15 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateE
             })
             .collect();
         fixed.sort_by_key(|f| std::cmp::Reverse(f.fixed_at));
-        all.push(Latest {
+        Ok(Latest {
             target,
             swept: Some(saved.started),
             components: saved.components,
             open,
             fixed,
             dismissed: dismissed.len(),
-        });
+        })
     }
-    Ok(all)
 }
 
 /// What `run`, the last fix run of an open finding in the report that started at `report`,

@@ -1459,7 +1459,7 @@ fn component_name(component: &Component) -> String {
 }
 
 /// Renders an error and its sources as `outer: inner`.
-pub(crate) fn error_chain(error: &impl std::error::Error) -> String {
+pub fn error_chain(error: &(impl std::error::Error + ?Sized)) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(e) = source {
@@ -1541,8 +1541,8 @@ pub enum SweepError {
     /// The sweep was cancelled, by the user or the app as it quit.
     #[error("the sweep was cancelled")]
     Cancelled,
-    /// Another sweep holds the lock.
-    #[error("another sweep is running (it holds {}); wait for it to finish", lock.display())]
+    /// Another sweep, fix or Fix all holds the lock.
+    #[error("a sweep or fix is running (it holds {}); wait for it to finish", lock.display())]
     Busy {
         /// The lock file.
         lock: PathBuf,
@@ -2287,7 +2287,7 @@ mod tests {
         let err = Lock::acquire(tmp.path()).unwrap_err();
         assert!(matches!(err, SweepError::Busy { .. }), "{err:?}");
         assert!(
-            err.to_string().contains("another sweep is running"),
+            err.to_string().contains("a sweep or fix is running"),
             "{err}"
         );
         drop(lock);

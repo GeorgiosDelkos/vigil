@@ -34,6 +34,7 @@ use vigil_core::Config;
 use vigil_core::Confirmed;
 use vigil_core::DataDir;
 use vigil_core::FindingKey;
+use vigil_core::FixAllItem;
 use vigil_core::FixPlan;
 use vigil_core::FixProgress;
 use vigil_core::Progress;
@@ -42,9 +43,13 @@ use vigil_core::SweepError;
 use vigil_core::Targets;
 use vigil_core::alerts;
 use vigil_core::clean_up_interrupted;
+use vigil_core::error_chain;
+use vigil_core::fix_all_outcome;
 use vigil_core::last_sweep_started;
 use vigil_core::plan_fix;
+use vigil_core::plan_fix_all;
 use vigil_core::run_fix;
+use vigil_core::run_fix_all;
 use vigil_core::sweep;
 use vigil_core::target_label;
 use vigil_core::target_names;
@@ -129,8 +134,9 @@ pub(crate) enum Status {
         title: String,
         /// Its target, as `target_label` shows it: "This Mac", `owner/name`, the server.
         place: String,
-        /// Its steps' labels, in order ([`FixProgress::labels`]).
-        labels: [String; 3],
+        /// Its steps' labels, in order ([`FixProgress::labels`], or [`FixAllPlan::labels`] for a
+        /// Fix all): preparing, the agent's step or one per item, recording.
+        labels: Vec<String>,
         /// The current step.
         step: FixProgress,
         /// When it started.
@@ -405,20 +411,88 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
     if plan.found() != found {
         return Err("a newer sweep ran; open the finding again to see its fix".to_owned());
     }
+    let cancel = app.state::<Runner>().claim(fixing(
+        plan.fix().summary.clone(),
+        target_label(plan.target()),
+        FixProgress::labels(plan.agent()),
+    ))?;
+    changed(app);
+    fix_thread(app, key.to_string(), move |data_dir, progress| {
+        let record = run_fix(data_dir, &plan, Confirmed::Asked, progress, &cancel)
+            .map_err(|e| e.to_string())?;
+        Ok(FixDone {
+            key: key.to_string(),
+            outcome: record.outcome.to_string(),
+            summary: record.summary,
+            pull_request: record.pull_request,
+        })
+    });
+    Ok(())
+}
+
+/// Runs the confirmed Fix all of `target` on its own thread, as one agent run, and tells the
+/// popover how it ended with a `fix-done` event.
+///
+/// As for one fix, it is planned again and runs only when it is the list the user confirmed:
+/// the same items, in the same order (`keys`), from the sweep that found them (`found`), both
+/// from the preview. `run_fix_all` checks every item once more under the sweeps lock.
+///
+/// # Errors
+///
+/// Fails when it cannot be planned, its items changed since the preview, or a sweep or a fix
+/// is running.
+pub(crate) fn start_fix_all(
+    app: &AppHandle,
+    target: &str,
+    keys: &[FindingKey],
+    found: Timestamp,
+) -> Result<(), String> {
+    let runner = app.state::<Runner>();
+    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
+        .map_err(|e| e.to_string())?;
+    let plan = plan_fix_all(runner.data_dir(), &config, target).map_err(|e| error_chain(&e))?;
+    let planned: Vec<FindingKey> = plan.items().iter().map(FixAllItem::key).collect();
+    if plan.found() != found || planned != keys {
+        return Err(
+            "a sweep, fix or dismissal changed this target's items; open Fix all again to see \
+             them"
+                .to_owned(),
+        );
+    }
+    // One agent at a time (the owner's rule, 2026-11-11): claimed like any fix, so Sweep now,
+    // the schedule, Fix and another Fix all are refused until it ends.
+    let cancel = runner.claim(fixing(
+        plan.title(),
+        target_label(plan.target()),
+        plan.labels(),
+    ))?;
+    changed(app);
+    fix_thread(app, target.to_owned(), move |data_dir, progress| {
+        let records = run_fix_all(data_dir, &plan, Confirmed::Asked, progress, &cancel)
+            .map_err(|e| error_chain(&e))?;
+        let (outcome, summary) = fix_all_outcome(&records);
+        Ok(FixDone {
+            key: plan.target().to_owned(),
+            outcome: outcome.to_string(),
+            summary,
+            pull_request: None,
+        })
+    });
+    Ok(())
+}
+
+/// The status of a fix that has just been claimed. Claimed means started: its first step is
+/// preparing, whatever the core reports.
+fn fixing(title: String, place: &str, labels: Vec<String>) -> Status {
     let now = Timestamp::now();
-    let cancel = app.state::<Runner>().claim(Status::Fixing {
-        title: plan.fix().summary.clone(),
-        place: target_label(plan.target()).to_owned(),
-        labels: FixProgress::labels(plan.agent()),
-        // Claimed means started: the first step is preparing, whatever `run_fix` reports.
+    Status::Fixing {
+        title,
+        place: place.to_owned(),
+        labels,
         step: FixProgress::Preparing,
         started: now,
         step_started: now,
-    })?;
-    changed(app);
-    let app = app.clone();
-    thread::spawn(move || fix_thread(&app, key, &plan, &cancel));
-    Ok(())
+    }
 }
 
 /// Moves a running fix's status on to step `progress`.
@@ -433,40 +507,34 @@ fn advance_fix(status: &mut Status, progress: FixProgress) {
 }
 
 /// Runs a claimed fix, then tells the popover how it ended.
-fn fix_thread(app: &AppHandle, key: FindingKey, plan: &FixPlan, cancel: &Cancel) {
-    let done = panic::catch_unwind(AssertUnwindSafe(|| {
-        let runner = app.state::<Runner>();
-        let mut progress = |p: FixProgress| {
-            advance_fix(&mut runner.lock().status, p);
-            changed(app);
-        };
-        run_fix(
-            runner.data_dir(),
-            plan,
-            Confirmed::Asked,
-            &mut progress,
-            cancel,
-        )
-        .map_err(|e| e.to_string())
-    }))
-    .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
-    let event = match done {
-        Ok(record) => FixDone {
-            key: key.to_string(),
-            outcome: record.outcome.to_string(),
-            summary: record.summary,
-            pull_request: record.pull_request,
-        },
-        Err(error) => FixDone {
-            key: key.to_string(),
+/// Runs a claimed fix or Fix all on its own thread with `run`, which reports its progress and
+/// says how it ended; then sets the status back to idle and tells the popover with a
+/// `fix-done` event for `key` (the finding's key, or the target of a Fix all).
+fn fix_thread<F>(app: &AppHandle, key: String, run: F)
+where
+    F: FnOnce(&DataDir, &mut dyn FnMut(FixProgress)) -> Result<FixDone, String> + Send + 'static,
+{
+    let app = app.clone();
+    thread::spawn(move || {
+        let done = panic::catch_unwind(AssertUnwindSafe(|| {
+            let runner = app.state::<Runner>();
+            let mut progress = |p: FixProgress| {
+                advance_fix(&mut runner.lock().status, p);
+                changed(&app);
+            };
+            run(runner.data_dir(), &mut progress)
+        }))
+        .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
+        let event = done.unwrap_or_else(|error| FixDone {
+            key,
             outcome: "failed".to_owned(),
             summary: error,
             pull_request: None,
-        },
-    };
-    app.state::<Runner>().set(Status::Idle);
-    drop(app.emit("fix-done", event));
-    changed(app);
+        });
+        app.state::<Runner>().set(Status::Idle);
+        drop(app.emit("fix-done", event));
+        changed(&app);
+    });
 }
 
 fn plan(app: &AppHandle, key: FindingKey) -> Result<FixPlan, String> {
@@ -654,15 +722,21 @@ mod tests {
     #[test]
     fn a_fix_moves_through_its_steps() {
         let mut status = fixing();
-        let log = PathBuf::from("/fixes/x/agent.log");
-        advance_fix(&mut status, FixProgress::Agent { log: log.clone() });
+        let dir = PathBuf::from("/fixes/x");
+        advance_fix(
+            &mut status,
+            FixProgress::Agent {
+                dir: dir.clone(),
+                keys: Vec::new(),
+            },
+        );
         let Status::Fixing {
             step, step_started, ..
         } = &status
         else {
             panic!("still fixing");
         };
-        assert!(matches!(step, FixProgress::Agent { log: l } if *l == log));
+        assert!(matches!(step, FixProgress::Agent { dir: d, .. } if *d == dir));
         assert!(
             *step_started > Timestamp::UNIX_EPOCH,
             "each step restarts the clock"
@@ -690,6 +764,39 @@ mod tests {
             "a second request while it waits"
         );
         assert!(!must_wait(Quit::Ready, &busy), "the wait itself exits");
+    }
+
+    #[test]
+    fn one_run_at_a_time_a_fix_all_included() {
+        let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
+        let fix_all = || {
+            super::fixing(
+                "grok applies 2 fixes in one run".to_owned(),
+                "This Mac",
+                ["preparing the fixes", "curl", "ffmpeg", "recording"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            )
+        };
+        runner.claim(fix_all()).unwrap();
+        assert_eq!(runner.claim(fix_all()).unwrap_err(), "a fix is running");
+        assert_eq!(runner.claim(fixing()).unwrap_err(), "a fix is running");
+        let sweep = Status::Sweeping {
+            step: "starting".to_owned(),
+            current: None,
+            done: Vec::new(),
+            pending: Vec::new(),
+            thousandths: 0,
+            open_ended: false,
+            stopping: false,
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        };
+        assert_eq!(runner.claim(sweep.clone()).unwrap_err(), "a fix is running");
+
+        runner.set(Status::Idle);
+        runner.claim(sweep).unwrap();
+        assert_eq!(runner.claim(fix_all()).unwrap_err(), "a sweep is running");
     }
 
     #[test]

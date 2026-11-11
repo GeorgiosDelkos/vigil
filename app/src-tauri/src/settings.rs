@@ -24,6 +24,7 @@ use vigil_core::NvdAccess;
 use vigil_core::Setting;
 use vigil_core::SettingsView;
 use vigil_core::detect;
+use vigil_core::error_chain;
 use vigil_core::save_setting;
 use vigil_core::settings_view;
 
@@ -176,15 +177,4 @@ fn detect_now(app: &AppHandle) {
         detect(app.state::<Runner>().home())
     };
     *app.state::<Detection>().lock() = Some(found);
-}
-
-/// An error and its sources as one line, `outer: inner`.
-fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut source = error.source();
-    while let Some(inner) = source {
-        text.push_str(&format!(": {inner}"));
-        source = inner.source();
-    }
-    text
 }
