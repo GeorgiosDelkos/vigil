@@ -12,7 +12,7 @@ and fix them with one confirmed click.**
 </div>
 
 <p align="center">
-  <img src="docs/images/hero.png" alt="Vigil's popover: four findings that need attention, the confirmation of a Homebrew fix, and that fix running" width="100%">
+  <img src="docs/images/hero.png" alt="Vigil's popover: five findings that need attention across four targets, the confirmation of a server's Fix all, and that Fix all running" width="100%">
 </p>
 
 New CVEs land every day, in every stack you run. Vigil is a macOS menu-bar app that pulls the
@@ -56,9 +56,10 @@ It sweeps three kinds of target in one pass:
   flagged and always kept, and the popover ranks them above everything else.
 - **Fixes you approve.** Nothing changes until you confirm a fix. A dependency fix in a
   repository is made on a branch and opened as a pull request.
-- **A fix is not done until a sweep says so.** A fix the agent reports stays open and counted,
-  marked "Fix reported" or "Pull request open". It moves to the Fixed list only once a later
-  sweep no longer finds the problem.
+- **A fix is checked by the next sweep.** A fix the agent reports shows green, as "Fixed · the
+  next sweep confirms it", and counts no more; one that opened a pull request stays open as
+  "Pull request open". A later sweep that no longer finds the problem confirms the fix; one
+  that still finds it opens it again as "Still found after a fix".
 - **Quiet until it matters.** The menu-bar icon turns red for an open critical finding,
   orange for a high one, and stays green otherwise, and a notification arrives only for new critical or high findings and issues.
 - **Files you own.** Configuration, reports, dismissals and fix history are plain TOML, JSON
@@ -71,18 +72,18 @@ example targets.
 
 <table>
   <tr>
-    <td width="33%" align="center"><img src="docs/images/findings.png" alt="The findings that need attention, worst first"><br><sub><b>Needs you.</b> Critical, high and exploited findings, worst first.</sub></td>
+    <td width="33%" align="center"><img src="docs/images/findings.png" alt="The main view: five findings need you, one exploited in the wild, each target with its open findings by severity, and the startup disk's free space"><br><sub><b>At a glance.</b> What needs you, each target by severity, and free disk space.</sub></td>
+    <td width="33%" align="center"><img src="docs/images/targets.png" alt="A server's screen: its open findings with their fixes, and a Fix all button"><br><sub><b>Targets.</b> A target's findings and fixes, with Fix all for the lot.</sub></td>
     <td width="33%" align="center"><img src="docs/images/detail.png" alt="The details of a finding with its explanation and fix commands"><br><sub><b>Details.</b> The agent's explanation and the exact fix.</sub></td>
-    <td width="33%" align="center"><img src="docs/images/confirm.png" alt="The confirmation before a fix runs"><br><sub><b>Confirm.</b> Where the fix runs, with which agent, and what it runs.</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/images/sweeping.png" alt="A sweep in progress, with one progress bar and a row per target"><br><sub><b>Sweeping.</b> Progress across targets, cancellable at any time.</sub></td>
-    <td align="center"><img src="docs/images/fixing.png" alt="A fix in progress with the agent's live output"><br><sub><b>Fixing.</b> Each step, with the agent's latest output.</sub></td>
-    <td align="center"><img src="docs/images/targets.png" alt="Each target with its open findings by severity"><br><sub><b>Targets.</b> What each sweep checked and what it found.</sub></td>
+    <td align="center"><img src="docs/images/confirm.png" alt="The confirmation before a fix runs"><br><sub><b>Confirm.</b> Where the fix runs, with which agent, and what it runs.</sub></td>
+    <td align="center"><img src="docs/images/fixing.png" alt="A fix in progress: its steps, a spinner on the running one, and the agent's latest output"><br><sub><b>Fixing.</b> Each step, with the agent's latest output.</sub></td>
+    <td align="center"><img src="docs/images/sweeping.png" alt="A sweep in progress: the percentage in the centre, one progress bar and a row per target"><br><sub><b>Sweeping.</b> Progress across targets, cancellable at any time.</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/images/fixed.png" alt="Fixes that a later sweep confirmed"><br><sub><b>Fixed.</b> Fixes a later sweep confirmed, for 30 days.</sub></td>
-    <td align="center"><img src="docs/images/clear.png" alt="The all clear view"><br><sub><b>All clear.</b> Every target swept, nothing open.</sub></td>
+    <td align="center"><img src="docs/images/fixed.png" alt="The Fixed list: a reported fix in green that the next sweep confirms, then fixes a later sweep confirmed"><br><sub><b>Fixed.</b> Reported fixes in green until a sweep confirms them, then for 30 days.</sub></td>
+    <td align="center"><img src="docs/images/clear.png" alt="The main view when all is clear: every target swept, nothing open"><br><sub><b>All clear.</b> Every target swept, nothing open.</sub></td>
     <td align="center"><img src="docs/images/settings.png" alt="The settings view"><br><sub><b>Settings.</b> Agent, schedule, targets and NVD key.</sub></td>
   </tr>
 </table>
