@@ -9,10 +9,12 @@
 #
 # Kept fast and cheap (decided with the owner on 2026-11-11, when mutants took 618 of 884 macOS
 # minutes, about 4 of each shard's 6.4 spent on an uncached build):
-# - It runs only when a PR changes code that can produce a mutant. `--in-diff` ignores every
-#   non-Rust file and the menu-bar app (`exclude_globs` in .cargo/mutants.toml), so a PR that
-#   touches only docs, Cargo.lock, prompts or the app has no mutants: the other workflows test
-#   those. Changes to this file and to the mutants config run it too, to check the setup.
+# - It runs only when a PR changes Rust under crates/, the only code that can produce a mutant.
+#   `--in-diff` ignores every non-Rust file and the menu-bar app (`exclude_globs` in
+#   .cargo/mutants.toml), so a PR that touches only docs, Cargo.lock, prompts or the app has no
+#   mutants: the other workflows test those. A PR that changes only tests or comments still
+#   runs and finds nothing to mutate; telling those apart needs the diff, so it is accepted.
+#   Changes to this file and to the mutants config run it too, to check the setup.
 # - The dependencies come from a cache that the `warm` job below fills daily on main. A PR's
 #   cache is scoped to that PR, so without a main-branch writer every PR's first run would build
 #   from scratch on every shard.
@@ -32,6 +34,7 @@ on:
   schedule:
     # Daily, before the working day, so the day's PRs restore a cache built from today's main.
     - cron: '37 4 * * *'
+  # Warms the cache by hand, as the schedule does; it runs no mutants, which need a PR's diff.
   workflow_dispatch:
 concurrency:
   # Ends in the draft flag, so a skipped draft run cannot cancel the ready run that follows it.
@@ -88,10 +91,12 @@ jobs:
           # prompt tests (crates/core/src/prompts.rs).
           fetch-depth: 0
           persist-credentials: false
+      # HEAD is the merge commit GitHub made for this run, and its first parent is the base it
+      # merged into, so every shard gets the same diff. The base branch's tip would not do: a
+      # shard queued behind the 5-job limit fetches a later tip if main moves meanwhile, and the
+      # shards then split different mutant lists.
       - name: Diff against the base branch
-        env:
-          BASE_REF: ${{ github.base_ref }}
-        run: git diff "origin/$BASE_REF.." | tee git.diff
+        run: git diff HEAD^1 HEAD | tee git.diff
       - name: Install stable
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master
         with:
@@ -109,8 +114,8 @@ jobs:
           save-if: false
       # nextest runs every test binary's tests in parallel, each in its own process, and stops
       # starting tests at the first failure, where `cargo test` runs the binaries one after
-      # another and each to its end; about 60 s of each mutant was the tests. test.yml already
-      # runs the suite under nextest, so the two agree on what passes. nextest skips doctests,
+      # another and each to its end; about 60 s of each mutant was the tests. test.yml runs the
+      # suite under the same pinned nextest, so the two agree on what passes. nextest skips doctests,
       # which loses nothing here: no crate has a doctest that runs.
       #
       # `--timeout 240`: in place, cargo-mutants does not scale the timeout from the baseline
