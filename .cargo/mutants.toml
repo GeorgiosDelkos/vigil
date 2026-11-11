@@ -1,7 +1,8 @@
 # Run the core's and the CLI's tests against each mutant, not only the mutated package's: the
 # CLI's end-to-end tests are what exercise the core's command-running collectors. Not the
 # whole workspace: the menu-bar app's release build needs its web UI built first (app.yml
-# checks it), and it holds only glue, with its decisions in the core.
+# checks it). Its pure decisions (tray::Look) are covered by its own unit tests, run by
+# `cargo test -p vigil-app`; the rest is Tauri glue that needs a running app.
 test_package = ["vigil-core", "vigil"]
 exclude_globs = ["app/**"]
 # The prompt tests read the built-in prompts' git history, so each mutant's copy of the tree

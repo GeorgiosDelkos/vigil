@@ -59,8 +59,8 @@ It sweeps three kinds of target in one pass:
 - **A fix is not done until a sweep says so.** A fix the agent reports stays open and counted,
   marked "Fix reported" or "Pull request open". It moves to the Fixed list only once a later
   sweep no longer finds the problem.
-- **Quiet until it matters.** The menu-bar icon shows the worst open severity at a glance,
-  and a notification arrives only for new critical or high findings and issues.
+- **Quiet until it matters.** The menu-bar icon turns red for an open critical finding,
+  orange for a high one, and stays green otherwise, and a notification arrives only for new critical or high findings and issues.
 - **Files you own.** Configuration, reports, dismissals and fix history are plain TOML, JSON
   and Markdown in your Library folder. The menu-bar app and the CLI share them.
 
@@ -90,7 +90,7 @@ example targets.
 The menu-bar icon is the vortex in brief, three streaks on each arm, and its colours carry the state:
 
 <p align="center">
-  <img src="docs/images/tray-states.png" alt="The six menu-bar icon states: clear, low, medium, high, sweeping and failed" width="100%">
+  <img src="docs/images/tray-states.png" alt="The five menu-bar icon states on a dark and a light menu bar: critical open, high open, no critical or high open, sweeping or fixing, and failed" width="100%">
 </p>
 
 A left click opens the popover; a right click offers Quit Vigil.
