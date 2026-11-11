@@ -851,6 +851,25 @@ kbd {
   border-radius: var(--radius-6);
   padding: 0 var(--space-8);
 }
+/* Fix all's items, each named as its row is, its fix and commands under it. */
+.fix-all-items {
+  display: grid;
+  gap: var(--space-12);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.fix-all-items li {
+  display: grid;
+  gap: var(--space-4);
+  padding-top: var(--space-12);
+  border-top: 0.5px solid var(--hair);
+}
+.fix-all-items h2 {
+  margin: 0;
+  font: 600 var(--text-13) / var(--leading-13) var(--ui);
+  overflow-wrap: anywhere;
+}
 .dacts {
   display: flex;
   gap: var(--space-8);

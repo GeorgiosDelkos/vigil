@@ -18,6 +18,7 @@ import {
   type FixDone,
   type FixedItem,
   type FixState,
+  type FixAllPreview,
   type FixPreview,
   type Listed,
   type Overview,
@@ -206,7 +207,13 @@ export function App() {
               {(line) => (
                 <>
                   <Nav onBack={() => setTargetKey(null)} />
-                  <TargetFindings line={line()} overview={o()} now={now()} onOpen={setSelected} />
+                  <TargetFindings
+                    line={line()}
+                    overview={o()}
+                    now={now()}
+                    onOpen={setSelected}
+                    onError={setError}
+                  />
                 </>
               )}
             </Match>
@@ -572,10 +579,25 @@ function TargetFindings(props: {
   overview: Overview;
   now: Date;
   onOpen: (id: string) => void;
+  onError: (error: string) => void;
 }) {
   const items = () => props.overview.items.filter((i) => i.target_key === props.line.key);
   const reported = () =>
     props.overview.reported.filter((r) => r.item.target_key === props.line.key);
+  // Fix all's question, once Rust has checked every item; it replaces the lists until answered.
+  const [asked, setAsked] = createSignal<FixAllPreview | null>(null);
+  const askFixAll = () => {
+    invoke<FixAllPreview>("fix_all_preview", { target: props.line.key })
+      .then(setAsked)
+      .catch((e: unknown) => props.onError(String(e)));
+  };
+  // The keys and `found` pin the run to the list shown: Rust refuses it if anything changed.
+  const runFixAll = (shown: FixAllPreview) => {
+    const keys = shown.items.map((item) => item.key);
+    invoke("fix_all", { target: props.line.key, keys, found: shown.found }).catch((e: unknown) =>
+      props.onError(String(e)),
+    );
+  };
   return (
     <>
       <section class="summary">
@@ -584,18 +606,86 @@ function TargetFindings(props: {
             <h1>{props.line.label}</h1>
             <p class="sub">{sweptLine(props.line, props.now)}</p>
           </div>
+          <Show when={asked() === null && props.line.fix_all}>
+            {(label) => (
+              <button type="button" class="pill" disabled={props.overview.busy} onClick={askFixAll}>
+                <Icon name="wrench" />
+                {label()}
+              </button>
+            )}
+          </Show>
         </div>
       </section>
-      <Rows
-        items={items()}
-        now={props.now}
-        empty={props.line.swept === null ? "Not swept yet." : "Nothing is open."}
-        onOpen={props.onOpen}
-      />
-      <Show when={reported().length > 0}>
-        <FixedRows reported={reported()} fixed={[]} now={props.now} />
+      <Show
+        when={asked()}
+        fallback={
+          <>
+            <Rows
+              items={items()}
+              now={props.now}
+              empty={props.line.swept === null ? "Not swept yet." : "Nothing is open."}
+              onOpen={props.onOpen}
+            />
+            <Show when={reported().length > 0}>
+              <FixedRows reported={reported()} fixed={[]} now={props.now} />
+            </Show>
+          </>
+        }
+      >
+        {(shown) => (
+          <FixAllConfirm
+            shown={shown()}
+            busy={props.overview.busy}
+            onRun={() => runFixAll(shown())}
+            onCancel={() => setAsked(null)}
+          />
+        )}
       </Show>
     </>
+  );
+}
+
+/** One question for a whole Fix all: where and with what it runs, then each item's fix as the
+ * single Fix shows one, then the button Rust labelled and Cancel. */
+function FixAllConfirm(props: {
+  shown: FixAllPreview;
+  busy: boolean;
+  onRun: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <section class="group detail confirm fix-all pane" aria-label="Fix all" tabindex="0">
+      <p>
+        Run these {props.shown.items.length} fixes on <b>{props.shown.destination}</b> with{" "}
+        {props.shown.agent}, with full access, in one run?
+      </p>
+      <p>
+        The agent applies them in this order. If one fails, it says which and goes on with the rest;
+        each is recorded on its own.
+      </p>
+      <ol class="fix-all-items" aria-label="Fixes to run">
+        <For each={props.shown.items}>
+          {(item) => (
+            <li>
+              <h2>{item.name}</h2>
+              <p class="fixline">
+                <Icon name="wrench" />
+                {item.summary}
+              </p>
+              <Commands commands={item.commands} label={`Commands for ${item.name}`} />
+            </li>
+          )}
+        </For>
+      </ol>
+      <div class="dacts">
+        <button type="button" class="btn primary" disabled={props.busy} onClick={props.onRun}>
+          {props.shown.confirm}
+        </button>
+        <button type="button" class="btn" onClick={() => props.onCancel()}>
+          Cancel
+        </button>
+      </div>
+    </section>
   );
 }
 
