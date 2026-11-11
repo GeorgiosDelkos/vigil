@@ -320,19 +320,28 @@ describe("the popover", () => {
     expect(bar.querySelectorAll(".sweep-bar-tick")).toHaveLength(0);
   });
 
-  it("marks a reported fix, an open pull request and a fix that did not hold", async () => {
+  it("marks an open item's pending fix as Rust decides it over all its findings", async () => {
     const at = new Date().toISOString();
+    const reported = { state: "reported", at, summary: "upgraded", pull_request: null } as const;
     shown = overview({
       items: [
-        finding("a", {
-          name: "curl",
-          fix_state: { state: "reported", at, summary: "upgraded", pull_request: null },
-        }),
-        finding("b", {
-          name: "lodash",
-          fix_state: { state: "reported", at, summary: "bumped", pull_request: "https://x/pull/9" },
-        }),
-        finding("c", { name: "zlib", fix_state: { state: "not_held", at } }),
+        // A fix reported for one advisory, but a later sweep still found another.
+        component(
+          "a",
+          [
+            advisory("a1", { name: "curl", fix_state: reported }),
+            advisory("a2", { name: "curl", fix_state: { state: "not_held", at } }),
+          ],
+          { pending_fix: "not_held" },
+        ),
+        {
+          ...finding("b", {
+            name: "lodash",
+            fix_state: { ...reported, pull_request: "https://x/pull/9" },
+          }),
+          pending_fix: "pull_request",
+        },
+        { ...finding("c", { name: "zlib" }), pending_fix: "not_held" },
       ],
       needs_you: 3,
       headline: "3 findings need you",
@@ -342,9 +351,16 @@ describe("the popover", () => {
     answer();
     await openList();
     await screen.findByText("curl");
-    expect(within(row("curl")).getByText("Fix reported")).toBeTruthy();
+    expect(within(row("curl")).getByText("Still found after a fix")).toBeTruthy();
+    expect(within(row("curl")).queryByText("Fix reported")).toBeNull();
     expect(within(row("lodash")).getByText("Pull request open")).toBeTruthy();
     expect(within(row("zlib")).getByText("Still found after a fix")).toBeTruthy();
+
+    // Each advisory in the detail still says what its own fix came to.
+    fireEvent.click(row("curl"));
+    const advisories = await screen.findByRole("list", { name: "Advisories" });
+    expect(within(advisories).getByText("Fix reported")).toBeTruthy();
+    expect(within(advisories).getByText("Still found after a fix")).toBeTruthy();
   });
 
   it("lists confirmed fixes in a tab of their own and when all is clear", async () => {
@@ -820,6 +836,7 @@ describe("the tabs", () => {
           checked: "42 components checked",
           counts: { critical: 0, high: 6, medium: 0, low: 0 },
           open: 6,
+          to_confirm: null,
           dismissed: 1,
         },
         {
@@ -829,6 +846,7 @@ describe("the tabs", () => {
           checked: "3 components checked",
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
+          to_confirm: null,
           dismissed: 0,
         },
         {
@@ -838,6 +856,7 @@ describe("the tabs", () => {
           checked: null,
           counts: { critical: 0, high: 0, medium: 0, low: 0 },
           open: 0,
+          to_confirm: null,
           dismissed: 0,
         },
         {
@@ -847,6 +866,7 @@ describe("the tabs", () => {
           checked: "9 components checked",
           counts: { critical: 1, high: 0, medium: 2, low: 0 },
           open: 3,
+          to_confirm: null,
           dismissed: 0,
         },
       ],
@@ -1215,12 +1235,23 @@ describe("the main view", () => {
     expect(screen.queryByText(/node\.js/)).toBeNull();
   });
 
-  it("with only reported fixes left, shows the headline and no urgent card", async () => {
+  it("with only reported fixes left, shows them to confirm, green, and opens Fixed", async () => {
+    const node = component("n", [
+      advisory("n1", { name: "node.js", version: "22.22.2", known_exploited: true }),
+      advisory("n2", { name: "node.js", version: "22.22.2" }),
+    ]);
     shown = overview({
-      reported: [reportedFix(finding("n", { name: "node.js", known_exploited: true }))],
+      reported: [reportedFix(node)],
+      list_tab: "fixed",
       headline: "1 fix to confirm",
       last_swept: "2026-11-06T11:00:00Z",
       first_sweep_hint: null,
+      targets: overview().targets.map((t) => ({
+        ...t,
+        swept: "2026-11-06T11:00:00Z",
+        checked: "12 components checked",
+        to_confirm: "1 fix to confirm",
+      })),
     });
     answer();
     render(() => <App />);
@@ -1231,6 +1262,26 @@ describe("the main view", () => {
     expect(sceneOf(shown)).toEqual({ mood: "clear" });
     expect(sceneOf(overview())).toEqual({ mood: "unswept" });
     expect(sceneOf(two()).mood).toBe("findings");
+
+    const mac = targetRow(/^This Mac/);
+    expect(mac.sub).toBe("12 components checked · 1 fix to confirm");
+    expect(mac.clear).toBe(false);
+    expect(mac.counts).toEqual(["(0 critical)", "(0 high)", "(0 medium)", "(0 low)"]);
+    expect(screen.getByRole("button", { name: /^This Mac, 1 fix to confirm,/ })).toBeTruthy();
+    expect(screen.getByText("1 fix to confirm", { selector: ".confirming" })).toBeTruthy();
+
+    fireEvent.click(count);
+    const tab = await screen.findByRole("tab", { name: /Fixed/ });
+    expect(tab.getAttribute("aria-selected")).toBe("true");
+    const list = screen.getByRole("list", { name: "Fixed" });
+    expect(within(list).getByText("2 advisories")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Targets/ }));
+    const target = listTarget("This Mac");
+    const status = within(target).getByText("1 fix to confirm", { selector: ".confirming" });
+    expect(status.classList.contains("confirming")).toBe(true);
+    expect(within(target).queryByText(/clear/)).toBeNull();
+    expect(target.querySelector(".tbar.ok")).toBeNull();
   });
 
   it("counts what is open when nothing needs you", async () => {

@@ -222,7 +222,7 @@ function figuresText(target: TargetLine): string {
     return "not swept yet";
   }
   if (target.open === 0) {
-    return "clear";
+    return target.to_confirm ?? "clear";
   }
   const parts = mix(target).map((m) => `${m.count} ${m.severity}`);
   return `${target.open} open: ${parts.join(", ")}`;
@@ -262,7 +262,18 @@ function TargetRows(props: {
             <span class="go" aria-hidden="true">
               ›
             </span>
-            <small class="tsub">{t().checked ?? "not swept yet"}</small>
+            <small class="tsub">
+              {t().checked ?? "not swept yet"}
+              {/* In place of the clear bar, which would say nothing is left to confirm. */}
+              <Show when={t().open === 0 && t().to_confirm}>
+                {(text) => (
+                  <>
+                    {" · "}
+                    <span class="confirming">{text()}</span>
+                  </>
+                )}
+              </Show>
+            </small>
             <TargetFigures target={t()} colours={NEON} />
           </button>
         )}
@@ -299,7 +310,7 @@ export function TargetFigures(props: {
       </span>
       <span
         class="tbar"
-        classList={{ ok: t().swept !== null && t().open === 0 }}
+        classList={{ ok: t().swept !== null && t().open === 0 && t().to_confirm === null }}
         aria-hidden="true"
       >
         <Index each={mix(t())}>

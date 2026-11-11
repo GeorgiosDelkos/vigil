@@ -93,7 +93,12 @@ export type Listed = {
   readonly advisory_count: string | null;
   /** What the Fix confirmation adds when it holds more than one finding. */
   readonly fix_scope: string | null;
+  /** What keeps a fix of it from counting as done, decided over all its findings. */
+  readonly pending_fix: PendingFix | null;
 };
+
+/** A fix that did not hold, or one whose pull request is not merged yet. */
+export type PendingFix = "not_held" | "pull_request";
 
 export type TargetLine = {
   readonly label: string;
@@ -103,6 +108,8 @@ export type TargetLine = {
   readonly checked: string | null;
   readonly counts: Counts;
   readonly open: number;
+  /** "1 fix to confirm" when fixes of its items wait for the next sweep. */
+  readonly to_confirm: string | null;
   readonly dismissed: number;
 };
 
@@ -141,6 +148,8 @@ export type Overview = {
   readonly busy: boolean;
   /** The open items, ranked by risk. */
   readonly items: readonly Listed[];
+  /** The list tab the main view's centre opens. */
+  readonly list_tab: "needs" | "fixed";
   /** Items whose fix was reported, newest fix first. */
   readonly reported: readonly ReportedFix[];
   /** Fixes a later sweep confirmed that finished in the last 30 days, newest first. */
