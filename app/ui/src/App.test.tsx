@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App.tsx";
 import { advisory, component, finding, overview, settingsView } from "./fixtures.ts";
-import type { Overview, Status } from "./overview.ts";
+import { sceneOf } from "./Orbit.tsx";
+import type { Listed, Overview, ReportedFix, Status } from "./overview.ts";
 
 const invoke = vi.hoisted(() => vi.fn());
 const handlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -67,6 +68,16 @@ function answer(extra: Record<string, (args?: unknown) => unknown> = {}) {
       ? Promise.reject(new Error(`unexpected ${command}`))
       : Promise.resolve().then(() => reply(args));
   });
+}
+
+/** `item` as a fix the agent reported 5 minutes ago, as Rust sets it apart. */
+function reportedFix(item: Listed): ReportedFix {
+  return {
+    item,
+    status: "Fixed · the next sweep confirms it",
+    summary: `upgraded ${item.name}`,
+    fixed_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+  };
 }
 
 const two = () =>
@@ -369,6 +380,41 @@ describe("the popover", () => {
     expect(await screen.findByText("All clear")).toBeTruthy();
     expect(screen.getByText("Fixed in the last 30 days")).toBeTruthy();
     expect(screen.getByRole("list", { name: "Fixed" })).toBeTruthy();
+  });
+
+  it("lists a reported fix green under Fixed, above the confirmed ones, and not as open", async () => {
+    const node = finding("n", { name: "node.js", version: "22.22.2", known_exploited: true });
+    shown = {
+      ...two(),
+      reported: [reportedFix(node)],
+      fixed: [
+        {
+          key: "f",
+          title: "curl 8.0.0 is old",
+          target: "This Mac",
+          fixed_at: "2026-11-06T11:00:00Z",
+          summary: "upgraded curl",
+          pull_request: null,
+        },
+      ],
+    };
+    answer();
+    await openList();
+    fireEvent.click(await screen.findByRole("tab", { name: /All open/ }));
+    expect(names()).toEqual(["openssl", "lodash", "zlib"]);
+
+    const tab = screen.getByRole("tab", { name: /Fixed/ });
+    expect(within(tab).getByText("2")).toBeTruthy();
+    fireEvent.click(tab);
+    const list = await screen.findByRole("list", { name: "Fixed" });
+    const rows = [...list.querySelectorAll(".fixed-row .t")].map((t) => t.textContent);
+    expect(rows).toEqual(["node.js22.22.2", "curl 8.0.0 is old"]);
+    const first = list.querySelector(".fixed-row") as HTMLElement;
+    const status = within(first).getByText("Fixed · the next sweep confirms it");
+    expect(status.classList.contains("confirming")).toBe(true);
+    expect(within(first).getByText("upgraded node.js")).toBeTruthy();
+    expect(within(first).getByText("5 min ago")).toBeTruthy();
+    expect(first.querySelector(".icon.done")).not.toBeNull();
   });
 
   it("cancels a running sweep, and shows it stopping", async () => {
@@ -1157,6 +1203,34 @@ describe("the main view", () => {
     // The settings menu moves to the top; the footer would not fit under the spiral.
     expect(document.querySelector(".foot")).toBeNull();
     expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
+  });
+
+  it("shows the next open item, not a reported fix, as the urgent card", async () => {
+    const node = finding("n", { name: "node.js", version: "22.22.2", known_exploited: true });
+    shown = { ...two(), reported: [reportedFix(node)] };
+    answer();
+    render(() => <App />);
+    await screen.findByTitle("Show details");
+    expect(screen.getByText("openssl 1.0.0").closest("button")).not.toBeNull();
+    expect(screen.queryByText(/node\.js/)).toBeNull();
+  });
+
+  it("with only reported fixes left, shows the headline and no urgent card", async () => {
+    shown = overview({
+      reported: [reportedFix(finding("n", { name: "node.js", known_exploited: true }))],
+      headline: "1 fix to confirm",
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+    });
+    answer();
+    render(() => <App />);
+    const count = await screen.findByTitle("Show details");
+    expect(count.textContent).toBe("1 fix to confirmShow details");
+    expect(document.querySelector(".urgent")).toBeNull();
+    expect(screen.queryByText(/node\.js/)).toBeNull();
+    expect(sceneOf(shown)).toEqual({ mood: "clear" });
+    expect(sceneOf(overview())).toEqual({ mood: "unswept" });
+    expect(sceneOf(two()).mood).toBe("findings");
   });
 
   it("counts what is open when nothing needs you", async () => {

@@ -122,6 +122,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     status: { state: "idle" },
     busy: false,
     items: [],
+    reported: [],
     needs_you: 0,
     exploited: 0,
     counts: { critical: 0, high: 0, medium: 0, low: 0 },

@@ -33,17 +33,16 @@ export type OrbitActions = {
 };
 
 /** What the spiral shows for this overview. */
-function sceneOf(overview: Overview): Scene {
+export function sceneOf(overview: Overview): Scene {
   if (overview.status.state === "sweeping") {
     return { mood: "progress", progress: overview.status.percent / 100 };
   }
-  if (overview.all_clear) {
-    return { mood: "clear" };
+  if (overview.items.length > 0) {
+    return { mood: "findings", lit: overview.items.map(neon) };
   }
-  // Rust says all clear once a sweep found nothing, so no findings here means no sweep yet.
-  return overview.items.length > 0
-    ? { mood: "findings", lit: overview.items.map(neon) }
-    : { mood: "unswept" };
+  // Nothing open after a sweep is green, also while a reported fix waits for the next sweep:
+  // the owner asked that a fixed item show green, not open (2026-11-11).
+  return overview.last_swept === null ? { mood: "unswept" } : { mood: "clear" };
 }
 
 export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActions }) {

@@ -126,11 +126,23 @@ export type FixedItem = {
   readonly pull_request: string | null;
 };
 
+/** An item whose fix the agent reported done, which the next sweep confirms (the core's
+ * `ReportedFix`). It is not open, so nothing counts it. */
+export type ReportedFix = {
+  readonly item: Listed;
+  /** What its row says: "Fixed · the next sweep confirms it". */
+  readonly status: string;
+  readonly summary: string;
+  readonly fixed_at: string;
+};
+
 export type Overview = {
   readonly status: Status;
   readonly busy: boolean;
   /** The open items, ranked by risk. */
   readonly items: readonly Listed[];
+  /** Items whose fix was reported, newest fix first. */
+  readonly reported: readonly ReportedFix[];
   /** Fixes a later sweep confirmed that finished in the last 30 days, newest first. */
   readonly fixed: readonly FixedItem[];
   readonly needs_you: number;

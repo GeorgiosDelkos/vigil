@@ -21,6 +21,7 @@ import {
   type FixPreview,
   type Listed,
   type Overview,
+  type ReportedFix,
   type Severity,
   type Status,
   type TargetLine,
@@ -257,7 +258,7 @@ export function App() {
                   />
                 </Match>
                 <Match when={tab() === "fixed"}>
-                  <FixedRows items={o().fixed} now={now()} />
+                  <FixedRows reported={o().reported} fixed={o().fixed} now={now()} />
                 </Match>
               </Switch>
             </Match>
@@ -324,7 +325,7 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
     ["needs", "Needs you", props.overview.needs_you],
     ["targets", "Targets", props.overview.targets.length],
     ["all", "All open", props.overview.items.length],
-    ["fixed", "Fixed", props.overview.fixed.length],
+    ["fixed", "Fixed", props.overview.reported.length + props.overview.fixed.length],
   ];
   return (
     <div class="seg" role="tablist" aria-label="View">
@@ -344,15 +345,37 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
   );
 }
 
-/** Fixes a later sweep confirmed: what was fixed, where, when, and how. */
-function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
+/** Fixes the agent reported, which the next sweep confirms, then fixes a later sweep
+ * confirmed: what was fixed, where, when, and how. */
+function FixedRows(props: {
+  reported: readonly ReportedFix[];
+  fixed: readonly FixedItem[];
+  now: Date;
+}) {
   return (
     <Show
-      when={props.items.length > 0}
+      when={props.reported.length + props.fixed.length > 0}
       fallback={<p class="quiet">No confirmed fixes from the last 30 days.</p>}
     >
       <ul class="group list pane" aria-label="Fixed" tabindex="0">
-        <For each={props.items}>
+        <For each={props.reported}>
+          {(fix) => (
+            <li class="row fixed-row">
+              <Icon name="done" />
+              <span class="what">
+                <span class="t">
+                  {fix.item.name}
+                  <Show when={fix.item.lead.version}>{(v) => <span class="ver">{v()}</span>}</Show>
+                </span>
+                <span class="confirming">{fix.status}</span>
+                <span class="where">{fix.item.target}</span>
+                <span class="fix">{fix.summary}</span>
+              </span>
+              <span class="age">{ago(fix.fixed_at, props.now)}</span>
+            </li>
+          )}
+        </For>
+        <For each={props.fixed}>
           {(item) => (
             <li class="row fixed-row">
               <Icon name="done" />
@@ -953,7 +976,11 @@ function AllClear(props: { overview: Overview; now: Date }) {
       <Targets targets={props.overview.targets} now={props.now} />
       <Show when={props.overview.fixed.length > 0}>
         <h2 class="label">Fixed in the last 30 days</h2>
-        <FixedRows items={props.overview.fixed} now={props.now} />
+        <FixedRows
+          reported={props.overview.reported}
+          fixed={props.overview.fixed}
+          now={props.now}
+        />
       </Show>
     </section>
   );
