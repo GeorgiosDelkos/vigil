@@ -26,6 +26,11 @@ copy_vcs = true
 # no test may do that, so `Ok(())` in its place cannot be caught. `vigil report` without
 # `--open` is tested.
 #
+# `replace - with + in log_tail` changes the read bound `LOG_TAIL + (start - from)`, which is
+# larger than what is left of the file unless the log grows between reading its length and
+# reading its tail. The agent has exited by then, so no test can grow it in that gap: both
+# bounds read the same bytes, an equivalent mutant.
+#
 # `FixPlan::target` is a plain accessor whose only caller is the menu-bar app (the place in the
 # fix's headline), and the app's tests are not run against mutants (see `test_package`).
 exclude_re = [
@@ -34,5 +39,6 @@ exclude_re = [
     "replace < with <= in stop$",
     "replace == with != in tree$",
     "FixPlan::target",
+    "replace - with \\+ in log_tail$",
     "open_in_browser",
 ]
