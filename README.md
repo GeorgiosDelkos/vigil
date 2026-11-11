@@ -56,10 +56,11 @@ It sweeps three kinds of target in one pass:
   flagged and always kept, and the popover ranks them above everything else.
 - **Fixes you approve.** Nothing changes until you confirm a fix. A dependency fix in a
   repository is made on a branch and opened as a pull request.
-- **A fix is checked by the next sweep.** A fix the agent reports shows green, as "Fixed · the
-  next sweep confirms it", and counts no more; one that opened a pull request stays open as
-  "Pull request open". A later sweep that no longer finds the problem confirms the fix; one
-  that still finds it opens it again as "Still found after a fix".
+- **A fix is checked by the next sweep.** A fix the agent reports done shows green, as
+  "Fixed · the next sweep confirms it", and leaves the open counts; until a sweep confirms it,
+  Vigil says "1 fix to confirm" rather than all clear. One that opened a pull request stays
+  open as "Pull request open". A later sweep that no longer finds the problem confirms the
+  fix; one that still finds it marks it "Still found after a fix" and counts it as open.
 - **Quiet until it matters.** The menu-bar icon turns red for an open critical finding,
   orange for a high one, and stays green otherwise, and a notification arrives only for new critical or high findings and issues.
 - **Files you own.** Configuration, reports, dismissals and fix history are plain TOML, JSON
@@ -73,7 +74,7 @@ example targets.
 <table>
   <tr>
     <td width="33%" align="center"><img src="docs/images/findings.png" alt="The main view: five findings need you, one exploited in the wild, each target with its open findings by severity, and the startup disk's free space"><br><sub><b>At a glance.</b> What needs you, each target by severity, and free disk space.</sub></td>
-    <td width="33%" align="center"><img src="docs/images/targets.png" alt="A server's screen: its open findings with their fixes, and a Fix all button"><br><sub><b>Targets.</b> A target's findings and fixes, with Fix all for the lot.</sub></td>
+    <td width="33%" align="center"><img src="docs/images/targets.png" alt="A server's screen: its open findings with their fixes, and a Fix all button"><br><sub><b>A target.</b> Its findings and fixes, with Fix all when two or more have commands.</sub></td>
     <td width="33%" align="center"><img src="docs/images/detail.png" alt="The details of a finding with its explanation and fix commands"><br><sub><b>Details.</b> The agent's explanation and the exact fix.</sub></td>
   </tr>
   <tr>
@@ -82,8 +83,8 @@ example targets.
     <td align="center"><img src="docs/images/sweeping.png" alt="A sweep in progress: the percentage in the centre, one progress bar and a row per target"><br><sub><b>Sweeping.</b> Progress across targets, cancellable at any time.</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="docs/images/fixed.png" alt="The Fixed list: a reported fix in green that the next sweep confirms, then fixes a later sweep confirmed"><br><sub><b>Fixed.</b> Reported fixes in green until a sweep confirms them, then for 30 days.</sub></td>
-    <td align="center"><img src="docs/images/clear.png" alt="The main view when all is clear: every target swept, nothing open"><br><sub><b>All clear.</b> Every target swept, nothing open.</sub></td>
+    <td align="center"><img src="docs/images/fixed.png" alt="The Fixed list: a reported fix in green that the next sweep confirms, then fixes a later sweep confirmed"><br><sub><b>Fixed.</b> Reported fixes in green, and fixes a later sweep confirmed in the last 30 days.</sub></td>
+    <td align="center"><img src="docs/images/clear.png" alt="The main view when all is clear: nothing open after the last sweep"><br><sub><b>All clear.</b> Nothing open after the last sweep.</sub></td>
     <td align="center"><img src="docs/images/settings.png" alt="The settings view"><br><sub><b>Settings.</b> Agent, schedule, targets and NVD key.</sub></td>
   </tr>
 </table>
