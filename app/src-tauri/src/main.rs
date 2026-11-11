@@ -1,6 +1,6 @@
-//! Vigil's menu-bar app: a tray icon that shows the worst open finding, a popover
-//! with each target's findings and a Sweep now button, sweeps on the configured schedule, and
-//! a notification for each sweep that finds something new and critical or high.
+//! Vigil's menu-bar app: a tray icon that shows whether a critical or high finding is open, a
+//! popover with each target's findings and a Sweep now button, sweeps on the configured
+//! schedule, and a notification for each sweep that finds something new and critical or high.
 //!
 //! All the work is in `vigil-core`; this crate wires it to Tauri. The popover is
 //! the one window: it shows what [`overview`] returns and asks again on every `changed` event.
