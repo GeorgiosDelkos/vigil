@@ -122,6 +122,8 @@ pub struct Listed {
     pub id: String,
     /// Its target, as [`target_label`] shows it.
     pub target: String,
+    /// Its target as configured, the [`TargetLine::key`] of its target's line.
+    pub target_key: String,
     /// Its name: the component's (a Homebrew formula's own name, which can hold several
     /// products), or the issue's subject.
     pub name: String,
@@ -233,6 +235,10 @@ impl Counts {
 /// A target's line.
 #[derive(Debug, Serialize)]
 pub struct TargetLine {
+    /// The target as configured: `mac`, `github:owner/name` or `server:name`. Its items carry
+    /// it as [`Listed::target_key`], so the UI lists one target's items by this key, not by a
+    /// label two targets can share (`github:web` and `server:web` both read `web`).
+    pub key: String,
     /// Its name as shown.
     pub label: String,
     /// What it is, for its icon.
@@ -277,7 +283,7 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
     let mut all = Vec::new();
     for mut target in latest {
         let label = target_label(&target.target).to_owned();
-        let listed = items(&label, std::mem::take(&mut target.open));
+        let listed = items(&target.target, std::mem::take(&mut target.open));
         targets.push(target_line(&target, &listed));
         fixed.extend(target.fixed.into_iter().map(|fixed| FixedListed {
             fixed,
@@ -327,7 +333,7 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
 
 /// One target's open findings and issues as items, ranked by risk: one per installed
 /// component, holding every finding in it, and one per issue, with the items whose fix was
-/// reported set apart. `target` is the label each item carries.
+/// reported set apart. `target` is the target as configured (`mac`, `github:owner/name`).
 pub fn items(target: &str, open: Vec<Open>) -> Items {
     let mut groups: Vec<Vec<Open>> = Vec::new();
     let mut by_component = BTreeMap::new();
@@ -451,7 +457,8 @@ fn listed(target: &str, mut findings: Vec<Open>) -> Listed {
             .component
             .as_ref()
             .map_or_else(|| lead.key.to_string(), |c| c.key.to_string()),
-        target: target.to_owned(),
+        target: target_label(target).to_owned(),
+        target_key: target.to_owned(),
         name,
         severity,
         known_exploited,
@@ -501,6 +508,7 @@ fn target_kind(target: &str) -> TargetKind {
 /// The line of `latest`, whose findings are `items`.
 fn target_line(latest: &Latest, items: &Items) -> TargetLine {
     TargetLine {
+        key: latest.target.clone(),
         label: target_label(&latest.target).to_owned(),
         kind: target_kind(&latest.target),
         swept: latest.swept,
@@ -1093,6 +1101,57 @@ mod tests {
         assert_eq!(view.headline, "5 findings need you");
         assert_eq!(view.last_swept, Some(Timestamp::from_second(200).unwrap()));
         assert_eq!(view.dismissed, 2);
+    }
+
+    #[test]
+    fn items_and_reported_fixes_carry_their_target_lines_key() {
+        let view = popover_view(vec![
+            target(
+                "github:web",
+                Some(5),
+                vec![
+                    open(1, Severity::High, false, None),
+                    fix_reported(open(2, Severity::Low, false, None), 4, None),
+                ],
+                0,
+            ),
+            target(
+                "server:web",
+                Some(5),
+                vec![open(3, Severity::Critical, false, None)],
+                0,
+            ),
+        ]);
+
+        let lines: Vec<(&str, &str)> = view
+            .targets
+            .iter()
+            .map(|t| (t.key.as_str(), t.label.as_str()))
+            .collect();
+        assert_eq!(lines, [("github:web", "web"), ("server:web", "web")]);
+        let items: Vec<(&str, &str, &str)> = view
+            .items
+            .iter()
+            .map(|i| {
+                (
+                    i.lead.title.as_str(),
+                    i.target_key.as_str(),
+                    i.target.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            items,
+            [
+                ("finding 3", "server:web", "web"),
+                ("finding 1", "github:web", "web"),
+            ],
+            "one label, told apart by key"
+        );
+        let [reported] = &view.reported[..] else {
+            panic!("one fix reported: {:?}", view.reported);
+        };
+        assert_eq!(reported.item.target_key, "github:web");
     }
 
     #[test]
