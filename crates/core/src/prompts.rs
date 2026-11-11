@@ -31,10 +31,17 @@ pub(crate) enum Prompt {
     GitHub,
     Server,
     Fix,
+    FixAll,
 }
 
 impl Prompt {
-    const ALL: [Self; 4] = [Self::Mac, Self::GitHub, Self::Server, Self::Fix];
+    const ALL: [Self; 5] = [
+        Self::Mac,
+        Self::GitHub,
+        Self::Server,
+        Self::Fix,
+        Self::FixAll,
+    ];
 
     fn file_name(self) -> &'static str {
         match self {
@@ -42,6 +49,7 @@ impl Prompt {
             Self::GitHub => "sweep-github.md",
             Self::Server => "sweep-server.md",
             Self::Fix => "fix.md",
+            Self::FixAll => "fix-all.md",
         }
     }
 
@@ -52,6 +60,7 @@ impl Prompt {
             Self::GitHub => "sweep-github.default.md",
             Self::Server => "sweep-server.default.md",
             Self::Fix => "fix.default.md",
+            Self::FixAll => "fix-all.default.md",
         }
     }
 
@@ -61,6 +70,7 @@ impl Prompt {
             Self::GitHub => include_str!("prompts/sweep-github.md"),
             Self::Server => include_str!("prompts/sweep-server.md"),
             Self::Fix => include_str!("prompts/fix.md"),
+            Self::FixAll => include_str!("prompts/fix-all.md"),
         }
     }
 
@@ -91,6 +101,7 @@ impl Prompt {
                 0xafea_94d5_e019_3384,
             ],
             Self::Fix => &[0x77ef_cded_9b10_794c, 0x55ae_3d08_e3e0_8813],
+            Self::FixAll => &[0xd72c_2266_ddd2_d7f2],
         }
     }
 }

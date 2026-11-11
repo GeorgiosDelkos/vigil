@@ -22,6 +22,10 @@ n=$((n + 1))
 echo $n > "$FAKE_AGENT_COUNTER"
 test -f PROMPT.md || { echo "no PROMPT.md in $(pwd)" >&2; exit 9; }
 echo "args: $*"
+# A Fix all reports each item on a line of results.jsonl.
+report() {
+  printf '{"key": "%s", "outcome": "%s", "summary": "%s"}\n' "$1" "$2" "$3" >> results.jsonl
+}
 case "$FAKE_AGENT_MODE:$n" in
   ok:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   issue:*)
@@ -44,6 +48,28 @@ case "$FAKE_AGENT_MODE:$n" in
   hang:*|second-hangs:2) sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
   second-hangs:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   late-crash:*) echo '{"findings": [], "issues": []}' > findings.json; exit 3 ;;
+  server-issues:*)
+    if [ -f server/listening.txt ]; then
+      echo '{"findings": [], "issues": [
+        {"subject": {"file": "server/listening.txt"}, "severity": "high", "evidence": "e",
+         "explanation": "x", "fix": {"summary": "close redis", "steps": ["bind it locally"],
+         "commands": ["sudo systemctl stop redis"]}},
+        {"subject": {"file": "server/system.json"}, "severity": "medium", "evidence": "e",
+         "explanation": "x", "fix": {"summary": "upgrade openssl", "steps": [],
+         "commands": ["sudo apt-get install --only-upgrade openssl"]}}
+      ]}' > findings.json
+    else
+      echo '{"findings": [], "issues": []}' > findings.json
+    fi ;;
+  fix-all:*)
+    set -- $(grep -o '"key": "[0-9a-f]*"' fixes.json | cut -d'"' -f4)
+    report "$1" fixed "stopped redis"
+    echo 'not json' >> results.jsonl
+    report "$2" failed "apt is locked" ;;
+  fix-all-hang:*)
+    set -- $(grep -o '"key": "[0-9a-f]*"' fixes.json | cut -d'"' -f4)
+    report "$1" fixed "stopped redis"
+    sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
 esac
 "#;
 
@@ -781,6 +807,204 @@ fn only_a_current_undismissed_finding_is_fixed_and_a_silent_agent_fails() {
         "{}",
         text(&stale.stderr)
     );
+}
+
+const WEB: &str = "agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n\n[[servers]]\nname = \
+                   \"web\"\nssh = \"web\"\n";
+
+/// The keys of `server:web`'s issues in its newest report, in report order.
+fn web_keys(sandbox: &Sandbox) -> Vec<String> {
+    sandbox.newest_report("server-web")["issues"]
+        .as_array()
+        .expect("a report has issues")
+        .iter()
+        .map(|i| i["key"].as_str().expect("an issue has a key").to_owned())
+        .collect()
+}
+
+#[test]
+fn fix_all_asks_once_runs_one_agent_and_records_each_item() {
+    let sandbox = Sandbox::new(WEB);
+    assert!(sandbox.sweep("server-issues").status.success());
+    let keys = web_keys(&sandbox);
+    assert_eq!(keys.len(), 2);
+    let runs = sandbox.runs();
+
+    let declined = sandbox.fix(&["all", "server:web"], "n\n");
+    assert!(!declined.status.success());
+    let stdout = text(&declined.stdout);
+    assert!(
+        stdout.starts_with("Fix all 2 on the server web, through `ssh"),
+        "{stdout}"
+    );
+    // Ranked as the popover ranks them: the high one first.
+    let first = stdout
+        .find("1. server/listening.txt")
+        .expect("names the first");
+    let second = stdout
+        .find("2. server/system.json")
+        .expect("names the second");
+    assert!(first < second, "{stdout}");
+    assert!(stdout.contains("  - bind it locally\n  $ sudo systemctl stop redis\n"));
+    assert!(stdout.contains("  $ sudo apt-get install --only-upgrade openssl\n"));
+    let stderr = text(&declined.stderr);
+    assert!(
+        stderr.contains("Run these 2 fixes now with claude, with full access, in one run? [y/N]"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("not confirmed; nothing was run"));
+    assert_eq!(sandbox.runs(), runs, "the agent did not run");
+
+    let out = sandbox
+        .command("fix-all")
+        .args(["fix", "all", "server:web", "--yes"])
+        .output()
+        .unwrap();
+    let stdout = text(&out.stdout);
+    let stderr = text(&out.stderr);
+    assert!(!out.status.success(), "one fix failed: {stdout}");
+    assert!(
+        stderr.contains("not every fix finished: 1 of 2 fixed; "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("claude applies 2 fixes in one run"),
+        "{stderr}"
+    );
+    assert!(stdout.contains(": fixed: stopped redis\n"), "{stdout}");
+    assert!(stdout.contains(": failed: apt is locked\n"), "{stdout}");
+    let agent_runs: u32 = sandbox.runs().trim().parse().unwrap();
+    let before: u32 = runs.trim().parse().unwrap();
+    assert_eq!(agent_runs, before + 1, "one agent run for both");
+
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    let records: Vec<serde_json::Value> = history
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2, "one record per item: {history}");
+    assert_eq!(records[0]["key"], keys[0].as_str());
+    assert_eq!(records[0]["outcome"], "fixed");
+    assert_eq!(records[1]["key"], keys[1].as_str());
+    assert_eq!(records[1]["outcome"], "failed");
+    for record in &records {
+        assert_eq!(record["target"], "server:web");
+        assert_eq!(record["confirmed"], "yes_flag");
+        assert_eq!(record["exit_code"], 0);
+        assert_eq!(record["dir"], records[0]["dir"], "one fix folder");
+    }
+    let dir = PathBuf::from(records[0]["dir"].as_str().unwrap());
+    let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap();
+    assert!(prompt.starts_with("# Fix all: server:web"), "{prompt}");
+    assert!(prompt.contains("sh -s <<'VIGIL_END'"), "{prompt}");
+    assert!(!prompt.contains("{{"), "every placeholder is filled");
+    let briefs: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("fixes.json")).unwrap()).unwrap();
+    assert_eq!(briefs[0]["key"], keys[0].as_str());
+    assert!(
+        briefs[0].get("evidence").is_none(),
+        "the sweep's prose stays out"
+    );
+    assert!(sandbox.path().join("data/prompts/fix-all.md").exists());
+
+    // The fixed one is a reported fix and the failed one still open, each on its own.
+    let findings = text(&sandbox.run(&["findings"]).stdout);
+    assert!(findings.contains("server:web (swept "), "{findings}");
+    assert!(findings.contains("1 open, 1 fix reported"), "{findings}");
+
+    // With one item left Fix all still runs it from the CLI; a repository is refused.
+    let repo = sandbox.fix(&["all", "github:o/r", "--yes"], "");
+    assert!(
+        text(&repo.stderr).contains("each fix opens its own pull request"),
+        "{}",
+        text(&repo.stderr)
+    );
+    let mac = sandbox.fix(&["all", "mac", "--yes"], "");
+    assert!(
+        text(&mac.stderr).contains("mac has no open item with a fix to run"),
+        "{}",
+        text(&mac.stderr)
+    );
+    let unknown = sandbox.fix(&["all", "server:db", "--yes"], "");
+    assert!(text(&unknown.stderr).contains("server:db is not a configured target"));
+}
+
+#[test]
+fn fix_all_holds_off_every_other_run_and_keeps_what_was_reported() {
+    let sandbox = Sandbox::new(WEB);
+    assert!(sandbox.sweep("server-issues").status.success());
+    let keys = web_keys(&sandbox);
+
+    // While a Fix all's agent runs, no sweep, fix or other Fix all starts.
+    let cli = sandbox
+        .command("fix-all-hang")
+        .args(["fix", "all", "server:web", "--yes"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the CLI starts");
+    let child_pid = sandbox.path().join("counter.child");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !fs::read_to_string(&child_pid).is_ok_and(|t| t.ends_with('\n')) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake agent never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    for args in [
+        vec!["sweep"],
+        vec!["fix", &keys[1], "--yes"],
+        vec!["fix", "all", "server:web", "--yes"],
+    ] {
+        let refused = sandbox.command("ok").args(&args).output().unwrap();
+        assert!(!refused.status.success(), "{args:?}");
+        assert!(
+            text(&refused.stderr).contains("a sweep or fix is running"),
+            "{args:?}: {}",
+            text(&refused.stderr)
+        );
+    }
+    let interrupted = Command::new("/bin/kill")
+        .args(["-INT", &cli.id().to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(interrupted.success());
+    let out = cli.wait_with_output().expect("the CLI finishes");
+    assert!(!out.status.success());
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    let records: Vec<serde_json::Value> = history
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records.len(), 2, "{history}");
+    assert_eq!(
+        records[0]["outcome"], "fixed",
+        "what the agent reported before it was stopped is kept"
+    );
+    assert_eq!(records[0]["exit_code"], serde_json::Value::Null);
+    assert_eq!(records[1]["outcome"], "unknown");
+    assert!(
+        records[1]["summary"]
+            .as_str()
+            .unwrap()
+            .starts_with("the agent was stopped partway"),
+        "{history}"
+    );
+
+    // With both dismissed nothing is left to fix, and nothing runs.
+    let runs = sandbox.runs();
+    for key in &keys {
+        let dismissed = sandbox.run(&["dismiss", key, "--reason", "accepted"]);
+        assert!(dismissed.status.success());
+    }
+    let none = sandbox.fix(&["all", "server:web", "--yes"], "");
+    assert!(
+        text(&none.stderr).contains("server:web has no open item with a fix to run"),
+        "{}",
+        text(&none.stderr)
+    );
+    assert_eq!(sandbox.runs(), runs, "nothing ran");
 }
 
 #[test]

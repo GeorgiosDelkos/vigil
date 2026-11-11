@@ -259,6 +259,9 @@ pub struct TargetLine {
     pub to_confirm: Option<String>,
     /// How many findings are dismissed.
     pub dismissed: usize,
+    /// The label of its Fix all button, "Fix all 3", when [`fix_all_items`] takes two or more
+    /// of its items; `None` hides the button, as one item already has its own Fix.
+    pub fix_all: Option<String>,
 }
 
 /// What a target is.
@@ -517,7 +520,30 @@ fn target_line(latest: &Latest, items: &Items) -> TargetLine {
         open: items.open.len(),
         to_confirm: (!items.reported.is_empty()).then(|| to_confirm(items.reported.len())),
         dismissed: latest.dismissed,
+        fix_all: match fix_all_items(&latest.target, &items.open).count() {
+            0 | 1 => None,
+            n => Some(format!("Fix all {n}")),
+        },
     }
+}
+
+/// The open items of `target` that Fix all takes, in the order `open` ranks them: those whose
+/// lead's fix has commands to run. A fix without commands is manual (the sweep found nothing
+/// to run), so it keeps its own Fix rather than ride in a batch the user confirms as commands.
+///
+/// None for a repository. The owner's decision on Fix all (2026-11-11) left repositories to us:
+/// there each fix is a pull request on its own branch, reviewed and merged on its own, and a
+/// fix of a repository setting runs `gh api` instead. One pull request for all of them was
+/// weighed and not chosen: it needs a branch named after no one finding, and one merge would
+/// then stand for many fixes. Fix all is for the targets where fixes apply in place: this Mac
+/// and servers.
+pub(crate) fn fix_all_items<'a>(
+    target: &str,
+    open: &'a [Listed],
+) -> impl Iterator<Item = &'a Listed> {
+    let repo = matches!(target_kind(target), TargetKind::Repo);
+    open.iter()
+        .filter(move |item| !repo && !item.lead.commands.is_empty())
 }
 
 /// "1 fix to confirm", "2 fixes to confirm".
@@ -1246,5 +1272,47 @@ mod tests {
         assert_eq!(target_label("github:o/r"), "o/r");
         assert_eq!(target_label("server:web"), "web");
         assert_eq!(target_label("other"), "other");
+    }
+
+    /// A high finding of key `key` in the component `name`, whose fix runs `commands`.
+    fn fixable(key: u64, name: &str, commands: &[&str]) -> Open {
+        let mut finding = in_component(open(key, Severity::High, false, None), name, "1.0");
+        finding.commands = commands.iter().map(|&c| c.to_owned()).collect();
+        finding
+    }
+
+    #[test]
+    fn fix_all_shows_for_two_items_with_commands_and_never_for_a_repository() {
+        let line = |name: &str, open: Vec<Open>| {
+            popover_view(vec![target(name, Some(1), open, 0)])
+                .targets
+                .remove(0)
+                .fix_all
+        };
+        let four = || {
+            vec![
+                fixable(1, "curl", &["brew upgrade curl"]),
+                fixable(2, "ffmpeg", &["brew upgrade ffmpeg"]),
+                // A second advisory of curl: one item, counted once.
+                fixable(3, "curl", &["brew upgrade curl"]),
+                fixable(4, "manual", &[]),
+            ]
+        };
+        assert_eq!(line("mac", four()).as_deref(), Some("Fix all 2"));
+        assert_eq!(line("server:web", four()).as_deref(), Some("Fix all 2"));
+        assert_eq!(line("github:o/r", four()), None);
+
+        let one = vec![
+            fixable(1, "curl", &["brew upgrade curl"]),
+            fixable(4, "manual", &[]),
+        ];
+        assert_eq!(line("mac", one), None, "one item has its own Fix");
+        assert_eq!(line("mac", Vec::new()), None);
+
+        let listed = items("mac", four()).open;
+        let names: Vec<&str> = fix_all_items("mac", &listed)
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(names, ["curl", "ffmpeg"], "ranked, the manual fix left out");
     }
 }

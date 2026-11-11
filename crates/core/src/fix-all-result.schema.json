@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "results.jsonl line",
+  "description": "How one fix of the batch went: one such object per line of results.jsonl, appended as each fix is done.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key", "outcome", "summary"],
+  "properties": {
+    "key": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "The key of the entry in fixes.json."
+    },
+    "outcome": {
+      "enum": ["fixed", "partial", "failed"],
+      "description": "fixed: done and checked. partial: some of it done. failed: nothing changed."
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "One line: what changed and how it was checked, or why it failed."
+    }
+  }
+}
