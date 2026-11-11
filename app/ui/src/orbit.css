@@ -100,7 +100,9 @@
   gap: var(--space-8);
   padding: var(--space-12) var(--space-24) 0;
 }
+/* The wordmark keeps its width; a long target name beside it wraps instead. */
 .orbit-top b {
+  flex: none;
   font: 600 var(--text-11) / var(--leading-11) var(--ui);
   letter-spacing: 0.22em;
   text-transform: uppercase;
@@ -220,18 +222,12 @@
   font-weight: 600;
   font-size: var(--text-13);
   line-height: var(--leading-13);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .orbit .recent small {
   display: block;
   color: var(--n-ink2);
   font-size: var(--text-12);
   line-height: var(--leading-12);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .orbit .go {
   color: rgba(242, 244, 255, 0.5);
@@ -337,6 +333,7 @@
 .orbit-btn {
   flex: 1;
   height: var(--control-32);
+  white-space: nowrap;
   font: 600 var(--text-13) / 1 var(--ui);
   border: 0;
   border-radius: var(--radius-10);
@@ -375,11 +372,9 @@
   line-height: var(--leading-12);
   color: var(--n-ink2);
 }
+/* A long volume name wraps within its half of the line; the bar keeps the rest. */
 .orbit-disk .disk-name {
   max-width: 50%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .orbit-disk .disk-size {
   flex-shrink: 0;

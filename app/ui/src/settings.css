@@ -198,18 +198,16 @@ button.srow:active:not(:disabled) {
 .srow:disabled {
   opacity: 0.45;
 }
+/* A folder, repository or host wraps in full: an ellipsis would hide the part that tells two
+   long paths apart. */
 .srow .t {
   display: block;
   font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 .srow .s {
   display: block;
   font: var(--text-11) / var(--leading-11) var(--ui);
   color: var(--l3);
-  overflow-wrap: anywhere;
 }
 .lead-icon {
   display: grid;
@@ -249,9 +247,7 @@ button.srow:active:not(:disabled) {
 }
 .sum .val {
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  text-align: right;
 }
 .sum .warn {
   color: var(--medium);
@@ -427,6 +423,7 @@ button.srow:active:not(:disabled) {
   justify-content: center;
   gap: var(--space-8);
   height: var(--control-28);
+  white-space: nowrap;
   padding: 0 var(--space-8);
   border: 0;
   border-radius: var(--radius-6);
@@ -461,6 +458,7 @@ button.srow:active:not(:disabled) {
   align-items: center;
   gap: var(--space-8);
   height: var(--control-28);
+  white-space: nowrap;
   padding: 0 var(--space-8);
   border-radius: var(--radius-6);
   background: var(--group);
@@ -588,7 +586,6 @@ button.srow:active:not(:disabled) {
   min-width: 0;
   font: var(--text-11) / var(--leading-11) var(--ui);
   color: var(--l2);
-  overflow-wrap: anywhere;
   user-select: text;
 }
 .fld-foot {
