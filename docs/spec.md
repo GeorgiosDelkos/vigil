@@ -424,8 +424,9 @@ The owner asked for a Fix all button on a target's screen and chose "one run, on
   are refused while it runs.
 - While it runs, the popover's fixing view lists preparing, one step per item, and recording;
   the running item is the first the agent has not reported in `results.jsonl` yet, with one
-  spinner on it. When it ends, the banner says "2 of 3 fixed" and names each item not fixed; it
-  reads "failed" only when every item reported `failed`, and "partial" otherwise.
+  spinner on it. When it ends, the view stays with each item's result (see "Fix results" under
+  UI). The CLI's last line says "2 of 3 fixed" and names each item not fixed; it reads
+  "failed" only when every item reported `failed`, and "partial" otherwise.
 - CLI: `vigil fix all <target> [--yes]` shows every item, asks once, runs, prints a line per
   item and exits non-zero unless every item was fixed with exit code 0.
 
@@ -691,6 +692,33 @@ Built in step 9a (2026-11-06):
   recording the result) as done, now or next, as Rust reports them (`FixProgress`), with how
   long the current one has run, where the fix runs, and no Cancel button. Almost all of a fix
   is the agent's step, which has no known length, so there is no bar (decided 2026-11-08).
+- Fix results (the owner's decision, 2026-11-11, after a Fix all of 9 items ended in one red
+  banner at the top that ran every item's summary together): when a fix or Fix all ends, its
+  view stays until the user closes it, never as a banner at the top.
+  - One row per item, in the order they ran, with its final state: a green check for fixed,
+    amber for partial, red for failed, grey for no result, and Rust's word for it ("fixed",
+    "partial", "failed", "no result"). A `fixed` report counts only with exit code 0, as
+    everywhere else, so one without it reads "no result". A single fix's row is named by its
+    finding's title, a Fix all item's as its step was ("curl 8.1.2").
+  - Details on a row opens the agent's summary for it (why it is partial or failed, or what it
+    did), and a repository fix's pull request: plain wrapped text, shown and never acted on.
+  - Show log shows the end of the run's `agent.log`, its last 64 KiB from a whole line, in a
+    scrollable monospace block (the one place not in IBM Plex Sans: the owner asked for
+    monospace), each line plain. The app reads it through the core's `FixRun::log_tail`, from
+    the folder Rust kept, never a path from the UI. A missing or unreadable log says so.
+  - At the bottom, one line from Rust: "5 of 9 fixed · 4 partial" (then failed, then "with no
+    result", each only when there are any).
+  - Close, or Escape, returns to where the fix was started: the target's screen or the
+    finding's detail (the list, when the finding is no longer open).
+  - The results are a status of the app's runner (`Fixed`, after `Fixing`), made from the
+    records the run appended to `state/fixes.jsonl` and kept in memory: they survive the
+    popover hiding and showing, not a restart. A new sweep or fix replaces them; the minute's
+    schedule check does not write a failure over them. A fix that ends without records leaves
+    the app's failed status, "Last fix: ..." in the failure banner, kept in Rust so a popover
+    opened later still shows it: one refused before anything ran (the lock held by the CLI, a
+    sweep that landed under the lock), or, rarely, one whose records could not be appended
+    after the agent ran, which may have changed the target. Rust words the whole banner line
+    ("Last sweep: ..." or "Last fix: ...").
 - Every program a sweep or fix starts (the agent, `brew`, `gh`, `ssh`) runs under a small `sh`
   watchdog that leads its own process group and checks once a second that the app or CLI
   still runs. However that ends (quit, logout, `kill`, a crash, a closed terminal), the

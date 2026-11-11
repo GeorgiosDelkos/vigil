@@ -31,6 +31,8 @@ use vigil_core::Config;
 use vigil_core::DataDir;
 use vigil_core::Disk;
 use vigil_core::FindingKey;
+use vigil_core::FixRun;
+use vigil_core::LogTail;
 use vigil_core::ParseFindingKeyError;
 use vigil_core::PopoverView;
 use vigil_core::error_chain;
@@ -70,6 +72,8 @@ fn main() {
             fix,
             fix_all_preview,
             fix_all,
+            close_fix,
+            fix_log,
             dismiss,
             settings::settings_data,
             settings::detect_again,
@@ -172,6 +176,15 @@ enum StatusView {
         started: Timestamp,
         step_started: Timestamp,
     },
+    /// A fix's results, which stay until the user closes them: each item's row in its final
+    /// state, and the run's summary line, flattened in as `items` and `summary`.
+    Fixed {
+        title: String,
+        place: String,
+        #[serde(flatten)]
+        run: FixRun,
+        finished: Timestamp,
+    },
     Failed {
         error: String,
     },
@@ -233,6 +246,17 @@ impl StatusView {
                 },
                 started,
                 step_started,
+            },
+            Status::Fixed {
+                title,
+                place,
+                run,
+                finished,
+            } => Self::Fixed {
+                title,
+                place,
+                run,
+                finished,
             },
             Status::Failed { error } => Self::Failed { error },
         }
@@ -534,6 +558,27 @@ fn fix_all(
     runner::start_fix_all(&app, &target, &keys, found)
 }
 
+/// Closes the last fix's results (see [`runner::close_fix`]).
+#[tauri::command]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn close_fix(app: AppHandle) {
+    runner::close_fix(&app);
+}
+
+/// The end of the last fix's agent log, while its results show. Async, so reading the file
+/// never stalls the UI.
+#[tauri::command(async)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Tauri hands command arguments over by value"
+)]
+fn fix_log(app: AppHandle) -> Result<LogTail, String> {
+    runner::fix_log(&app)
+}
+
 /// Dismisses `key` for `reason`; it shows again when its advisory changes.
 #[tauri::command(async)]
 #[expect(
@@ -700,7 +745,7 @@ mod tests {
         )
         .unwrap();
         let status = Status::Fixing {
-            title: "grok applies 2 fixes in one run".to_owned(),
+            title: "2 fixes in one grok run".to_owned(),
             place: "This Mac".to_owned(),
             labels: [
                 "preparing the fixes",

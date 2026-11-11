@@ -601,13 +601,10 @@ impl FixAllPlan {
         &self.items
     }
 
-    /// One line saying what the run does: "grok applies 3 fixes in one run".
+    /// One line naming the run: "3 fixes in one grok run". No verb, so it reads right both while
+    /// the run goes and on the results it leaves, which keep the same title.
     pub fn title(&self) -> String {
-        format!(
-            "{} applies {} fixes in one run",
-            self.agent(),
-            self.items.len()
-        )
+        format!("{} fixes in one {} run", self.items.len(), self.agent())
     }
 
     /// The labels of its steps, in order: preparing, one per item ("fixing curl 8.1.2"),
@@ -906,6 +903,236 @@ pub fn fix_all_outcome(records: &[FixRecord]) -> (Outcome, String) {
 /// reported `fixed` and exited 0, as `vigil fix` requires to call it a success.
 pub(crate) fn succeeded(outcome: Outcome, exit_code: Option<i32>) -> bool {
     outcome == Outcome::Fixed && exit_code == Some(0)
+}
+
+/// A finished fix or Fix all as the app shows it until the user closes it: one row per item,
+/// in the order they ran, and one line for the whole run at the bottom.
+///
+/// The owner's decision (2026-11-11): after a fix, its progress view stays with each item in
+/// its final state, a summary line at the bottom and the run's log on request, instead of a
+/// banner at the top that ran every item's summary together. It is made from the records
+/// [`run_fix`] and [`run_fix_all`] return, the lines they append to `state/fixes.jsonl`, so
+/// it says nothing the history does not. It holds at least one item, and every item comes
+/// from one run folder: [`Self::single`] and [`Self::all`] are its only constructors.
+#[derive(Debug, Clone, Serialize)]
+pub struct FixRun {
+    /// One per item, in the order they ran.
+    items: Vec<FixRunItem>,
+    /// The line under the rows: "5 of 9 fixed · 4 partial".
+    summary: String,
+    /// The run's folder, where [`Self::log_tail`] reads `agent.log`. Not sent to the UI: the
+    /// app reads the log for it.
+    #[serde(skip)]
+    dir: PathBuf,
+}
+
+/// One item of a [`FixRun`].
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct FixRunItem {
+    /// What it fixed: a Fix all item's name ("curl 8.1.2"), or a single fix's finding title.
+    name: String,
+    /// How it ended, as the row shows it: [`Outcome::Unknown`] also when the agent reported
+    /// `fixed` but did not exit 0, as such a run does not count as a fix.
+    state: Outcome,
+    /// The state in a word for the row: "fixed", "partial", "failed" or "no result".
+    state_label: &'static str,
+    /// The agent's summary, or why there is none. Untrusted agent text, only ever shown.
+    summary: String,
+    /// The pull request the agent opened, for a repository.
+    pull_request: Option<String>,
+}
+
+impl FixRun {
+    /// The run of one fix, from the record [`run_fix`] returned. Its row is named by the
+    /// finding's title, as the fix history names it.
+    pub fn single(record: FixRecord) -> Self {
+        let name = record.title.clone();
+        Self::new(vec![(name, record)])
+    }
+
+    /// The run of the Fix all `plan`, from the records [`run_fix_all`] returned for it: one per
+    /// item, in order, each row named as its progress step named it.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `records` is not one record per item of `plan`.
+    pub fn all(plan: &FixAllPlan, records: Vec<FixRecord>) -> Self {
+        assert_eq!(
+            plan.items.len(),
+            records.len(),
+            "run_fix_all returns one record per item of its plan"
+        );
+        let names = plan.items.iter().map(|item| item.name.clone());
+        Self::new(names.zip(records).collect())
+    }
+
+    fn new(named: Vec<(String, FixRecord)>) -> Self {
+        let dir = named
+            .first()
+            .map(|(_, record)| record.dir.clone())
+            .expect("a run fixes at least one item: plans are never empty");
+        assert!(
+            named.iter().all(|(_, record)| record.dir == dir),
+            "every record of a run names its one folder"
+        );
+        let items: Vec<FixRunItem> = named
+            .into_iter()
+            .map(|(name, record)| {
+                let state = shown_state(&record);
+                FixRunItem {
+                    name: sweep::plain(&name),
+                    state,
+                    state_label: state_label(state),
+                    summary: sweep::plain(&record.summary),
+                    pull_request: record.pull_request,
+                }
+            })
+            .collect();
+        let summary = run_summary(&items);
+        Self {
+            items,
+            summary,
+            dir,
+        }
+    }
+
+    /// The end of the run's `agent.log`, at most its last 64 KiB. Reads the file each call.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the log is missing or cannot be read ([`FixError::Read`]).
+    pub fn log_tail(&self) -> Result<LogTail, FixError> {
+        log_tail(&self.dir.join(AGENT_LOG))
+    }
+}
+
+/// How `record` ends in its row: a `fixed` report counts only with exit code 0, as everywhere
+/// else, so one without it is shown as having no result.
+fn shown_state(record: &FixRecord) -> Outcome {
+    match record.outcome {
+        Outcome::Fixed if !succeeded(record.outcome, record.exit_code) => Outcome::Unknown,
+        outcome => outcome,
+    }
+}
+
+/// `state` in a word, for a row.
+fn state_label(state: Outcome) -> &'static str {
+    match state {
+        Outcome::Fixed => "fixed",
+        Outcome::Partial => "partial",
+        Outcome::Failed => "failed",
+        Outcome::Unknown => "no result",
+    }
+}
+
+/// "5 of 9 fixed", then how many ended each other way, those with none left out: "5 of 9
+/// fixed · 3 partial · 1 with no result". The rows name the items, so the line does not.
+fn run_summary(items: &[FixRunItem]) -> String {
+    let count = |state| items.iter().filter(|item| item.state == state).count();
+    let mut line = format!("{} of {} fixed", count(Outcome::Fixed), items.len());
+    for (state, words) in [
+        (Outcome::Partial, "partial"),
+        (Outcome::Failed, "failed"),
+        (Outcome::Unknown, "with no result"),
+    ] {
+        let n = count(state);
+        if n > 0 {
+            line.push_str(&format!(" · {n} {words}"));
+        }
+    }
+    line
+}
+
+/// How many bytes of a run's `agent.log` [`FixRun::log_tail`] reads: 64 KiB. Arbitrary within
+/// what works: the end of the log is where the agent says what it did last and why it
+/// stopped, a long Fix all can log megabytes, and 64 KiB is about a thousand lines, more than
+/// anyone scrolls in the popover, while it still crosses to the UI and lays out at once.
+const LOG_TAIL: u64 = 64 * 1024;
+
+/// The end of a run's log, for the results view.
+#[derive(Debug, Serialize)]
+pub struct LogTail {
+    /// The lines, each a plain line (control and invisible characters replaced). The agent's
+    /// own output, untrusted: only ever shown, never acted on.
+    pub text: String,
+    /// What the user should know about `text`: that it is only the end, or that the log is
+    /// empty. `None` when it is the whole log.
+    pub note: Option<String>,
+}
+
+/// The last [`LOG_TAIL`] bytes of the log at `path`. When the log is longer, the line cut by
+/// the start of those bytes is dropped, and the note says how much is shown. Bytes that are
+/// not UTF-8 (a multi-byte character cut by the start, or binary output) become U+FFFD.
+///
+/// Only a regular file is read. The agent ran with full access in the folder and could have
+/// put a link or a FIFO in the log's place: a link shows nothing it could not have written,
+/// but opening a FIFO would block the command for good.
+///
+/// Accepted gap: the check and the open are two steps, so a process that swaps the file in
+/// between still gets a FIFO opened. Only a process the agent started and that left its
+/// process group can still run then (the `cancel` module kills the group once the agent
+/// exits), and such a process already has the user's full access. Closing the gap needs
+/// `O_NONBLOCK | O_NOFOLLOW` on the open, whose values std does not export and this crate
+/// would need `libc` for.
+fn log_tail(path: &Path) -> Result<LogTail, FixError> {
+    let read_err = |source| FixError::Read {
+        path: path.to_owned(),
+        source,
+    };
+    if !fs::symlink_metadata(path).map_err(read_err)?.is_file() {
+        return Err(read_err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        )));
+    }
+    let mut file = fs::File::open(path).map_err(read_err)?;
+    let len = file.metadata().map_err(read_err)?.len();
+    let start = len.saturating_sub(LOG_TAIL);
+    // When the tail is cut, the byte before it is read too: a line break there means the tail
+    // starts on a whole line.
+    let from = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(from)).map_err(read_err)?;
+    let mut tail = Vec::new();
+    // Bounded again: the agent has exited, but the bound holds even if the file grew since
+    // its length was read.
+    file.take(LOG_TAIL + (start - from))
+        .read_to_end(&mut tail)
+        .map_err(read_err)?;
+
+    let cut = start > 0;
+    let whole_lines = match tail.split_first() {
+        Some((&before, rest)) if cut => from_whole_line(before, rest),
+        _ => &tail[..],
+    };
+    let text = String::from_utf8_lossy(whole_lines)
+        .lines()
+        .map(sweep::plain)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let note = if cut {
+        Some(format!(
+            "The last {} KB of {} KB.",
+            LOG_TAIL / 1024,
+            len.div_ceil(1024)
+        ))
+    } else if text.trim().is_empty() {
+        Some("The agent wrote nothing to its log.".to_owned())
+    } else {
+        None
+    };
+    Ok(LogTail { text, note })
+}
+
+/// `tail` from its first whole line, given the byte `before` it. A last line longer than the
+/// whole tail keeps its end, rather than leave nothing to show.
+fn from_whole_line(before: u8, tail: &[u8]) -> &[u8] {
+    if before == b'\n' {
+        return tail;
+    }
+    match tail.iter().position(|&b| b == b'\n') {
+        Some(at) if at + 1 < tail.len() => &tail[at + 1..],
+        _ => tail,
+    }
 }
 
 /// The valid lines of a Fix all's `results.jsonl`, by key. A line that does not parse, or
@@ -1701,7 +1928,7 @@ mod tests {
                 "recording the results"
             ]
         );
-        assert_eq!(plan.title(), "claude applies 2 fixes in one run");
+        assert_eq!(plan.title(), "2 fixes in one claude run");
         assert_eq!(plan.target(), "mac", "the target the app names in progress");
         assert_eq!(plan.destination(), "this Mac");
         assert_eq!(plan.agent(), AgentKind::Claude);
@@ -1818,6 +2045,190 @@ mod tests {
             confirmed: Confirmed::Asked,
             dir: PathBuf::from("/f"),
         }
+    }
+
+    /// `record(n)` ending as `outcome` with the agent's `exit_code`.
+    fn ended(n: u8, outcome: Outcome, exit_code: Option<i32>) -> FixRecord {
+        FixRecord {
+            exit_code,
+            outcome,
+            ..record(n)
+        }
+    }
+
+    /// A run's rows as name, state, label and summary.
+    fn rows(run: &FixRun) -> Vec<(&str, Outcome, &str, &str)> {
+        run.items
+            .iter()
+            .map(|i| (i.name.as_str(), i.state, i.state_label, i.summary.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn a_finished_fix_all_shows_each_item_in_its_final_state_and_one_line() {
+        let keys: Vec<FindingKey> = (0..5).map(|n| FindingKey::new(&[&n.to_string()])).collect();
+        let plan = fix_all_of(&keys, Path::new("/r"));
+        let run = FixRun::all(
+            &plan,
+            vec![
+                ended(0, Outcome::Fixed, Some(0)),
+                ended(1, Outcome::Partial, Some(0)),
+                ended(2, Outcome::Failed, Some(0)),
+                ended(3, Outcome::Unknown, None),
+                ended(4, Outcome::Fixed, Some(1)),
+            ],
+        );
+        assert_eq!(
+            rows(&run),
+            [
+                ("item 0", Outcome::Fixed, "fixed", "run 0"),
+                ("item 1", Outcome::Partial, "partial", "run 1"),
+                ("item 2", Outcome::Failed, "failed", "run 2"),
+                ("item 3", Outcome::Unknown, "no result", "run 3"),
+                // A fix counts only with exit code 0.
+                ("item 4", Outcome::Unknown, "no result", "run 4"),
+            ]
+        );
+        assert_eq!(
+            run.summary,
+            "1 of 5 fixed · 1 partial · 1 failed · 2 with no result"
+        );
+        let json = serde_json::to_value(&run).unwrap();
+        assert_eq!(json["items"][1]["state"], "partial");
+        assert_eq!(json["items"][3]["state_label"], "no result");
+        assert_eq!(json["summary"], run.summary);
+        assert!(json.get("dir").is_none(), "the folder stays in Rust");
+    }
+
+    #[test]
+    fn a_finished_fix_names_its_row_by_the_title_and_keeps_its_pull_request() {
+        let record = FixRecord {
+            title: "CVE-1 in curl 8.1.2, Homebrew formula curl".to_owned(),
+            summary: "upgraded\ncurl".to_owned(),
+            pull_request: Some("https://github.com/me/app/pull/7".to_owned()),
+            ..record(1)
+        };
+        let run = FixRun::single(record);
+        assert_eq!(
+            rows(&run),
+            [(
+                "CVE-1 in curl 8.1.2, Homebrew formula curl",
+                Outcome::Fixed,
+                "fixed",
+                "upgraded curl"
+            )]
+        );
+        assert_eq!(
+            run.items[0].pull_request.as_deref(),
+            Some("https://github.com/me/app/pull/7")
+        );
+        assert_eq!(run.summary, "1 of 1 fixed");
+        let partial = FixRun::single(ended(2, Outcome::Partial, Some(0)));
+        assert_eq!(partial.summary, "0 of 1 fixed · 1 partial");
+    }
+
+    #[test]
+    #[should_panic(expected = "one record per item")]
+    fn a_fix_all_s_run_needs_a_record_per_item() {
+        let keys = [FindingKey::new(&["a"]), FindingKey::new(&["b"])];
+        FixRun::all(&fix_all_of(&keys, Path::new("/r")), vec![record(1)]);
+    }
+
+    #[test]
+    fn the_log_tail_is_the_whole_short_log_as_plain_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run = FixRun::single(FixRecord {
+            dir: tmp.path().to_owned(),
+            ..record(1)
+        });
+        let err = run.log_tail().unwrap_err();
+        assert!(
+            matches!(&err, FixError::Read { path, .. } if *path == tmp.path().join(AGENT_LOG)),
+            "a missing log names the file: {err:?}"
+        );
+
+        fs::write(tmp.path().join(AGENT_LOG), "").unwrap();
+        let empty = run.log_tail().unwrap();
+        assert_eq!(
+            (empty.text.as_str(), empty.note.as_deref()),
+            ("", Some("The agent wrote nothing to its log."))
+        );
+
+        let bytes = b"reading fixes.json\r\nupgrading \x1b[1mcurl\xff\xfe\n\tdone\n";
+        fs::write(tmp.path().join(AGENT_LOG), bytes).unwrap();
+        let tail = run.log_tail().unwrap();
+        assert_eq!(
+            tail.text,
+            "reading fixes.json\nupgrading \u{fffd}[1mcurl\u{fffd}\u{fffd}\n done"
+        );
+        assert_eq!(tail.note, None, "the whole log");
+    }
+
+    #[test]
+    fn the_log_tail_of_a_long_log_is_its_end_from_a_whole_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join(AGENT_LOG);
+        let bound = usize::try_from(LOG_TAIL).unwrap();
+        // Each line is 100 bytes with its break, so the tail starts inside line 1344 of 2000
+        // (200000 - 65536 = 134464), which is dropped.
+        let lines = (0..2000).fold(String::new(), |mut text, n| {
+            text.push_str(&format!("{:<99}\n", format!("line {n}")));
+            text
+        });
+        fs::write(&log, lines).unwrap();
+        let tail = log_tail(&log).unwrap();
+        assert!(tail.text.starts_with("line 1345 "), "{}", &tail.text[..20]);
+        assert!(tail.text.trim_end().ends_with("line 1999"));
+        assert_eq!(tail.text.lines().count(), 2000 - 1345);
+        assert_eq!(tail.note.as_deref(), Some("The last 64 KB of 196 KB."));
+
+        // Exactly the bound is the whole log: nothing is cut.
+        let exact = "x".repeat(bound - 1) + "\n";
+        fs::write(&log, &exact).unwrap();
+        let tail = log_tail(&log).unwrap();
+        assert_eq!((tail.text.len(), tail.note), (bound - 1, None));
+        // One byte more and the first line, cut, is dropped.
+        fs::write(&log, format!("y{exact}end\n")).unwrap();
+        assert_eq!(log_tail(&log).unwrap().text, "end");
+
+        // 80001 bytes: the tail starts at byte 14465, inside a two-byte character. With no line
+        // break in it, the one line is kept and the cut character becomes U+FFFD.
+        let bytes = "é".repeat(40_000) + "a";
+        fs::write(&log, &bytes).unwrap();
+        let tail = log_tail(&log).unwrap();
+        assert!(tail.text.starts_with("\u{fffd}é"), "{}", &tail.text[..8]);
+        assert_eq!(tail.text.len(), bound - 1 + '\u{fffd}'.len_utf8());
+        assert!(tail.text.ends_with("éa"));
+
+        // A tail that starts right after a line break drops nothing.
+        let lines = format!("first\n{}\n", "x".repeat(bound - 7));
+        fs::write(&log, format!("p\n{lines}")).unwrap();
+        let tail = log_tail(&log).unwrap();
+        assert!(tail.text.starts_with("first\nxx"), "{}", &tail.text[..8]);
+        assert!(tail.note.is_some(), "still only the end");
+
+        // A last line longer than the tail keeps its end instead of showing nothing.
+        fs::write(&log, "z".repeat(bound + 10) + "\n").unwrap();
+        assert_eq!(log_tail(&log).unwrap().text, "z".repeat(bound - 1));
+    }
+
+    #[test]
+    fn the_log_tail_reads_only_a_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join(AGENT_LOG);
+        let secret = tmp.path().join("elsewhere");
+        fs::write(&secret, "not the log\n").unwrap();
+        std::os::unix::fs::symlink(&secret, &log).unwrap();
+        let err = log_tail(&log).unwrap_err();
+        assert!(
+            sweep::error_chain(&err).contains("not a regular file"),
+            "{}",
+            sweep::error_chain(&err)
+        );
+
+        fs::remove_file(&log).unwrap();
+        fs::create_dir(&log).unwrap();
+        assert!(matches!(log_tail(&log), Err(FixError::Read { .. })));
     }
 
     #[test]

@@ -870,10 +870,7 @@ fn fix_all_asks_once_runs_one_agent_and_records_each_item() {
         stderr.contains("not every fix finished: 1 of 2 fixed; "),
         "{stderr}"
     );
-    assert!(
-        stderr.contains("claude applies 2 fixes in one run"),
-        "{stderr}"
-    );
+    assert!(stderr.contains("2 fixes in one claude run"), "{stderr}");
     assert!(stdout.contains(": fixed: stopped redis\n"), "{stdout}");
     assert!(stdout.contains(": failed: apt is locked\n"), "{stdout}");
     let agent_runs: u32 = sandbox.runs().trim().parse().unwrap();
