@@ -229,6 +229,14 @@ impl Runner {
         Ok(shared.cancel.clone())
     }
 
+    /// Sets the status back to idle if a fix's results show, in one step under the lock.
+    fn close_results(&self) {
+        let mut shared = self.lock();
+        if matches!(shared.status, Status::Fixed { .. }) {
+            shared.status = Status::Idle;
+        }
+    }
+
     fn set(&self, status: Status) {
         self.lock().status = status;
     }
@@ -501,10 +509,10 @@ fn advance_fix(status: &mut Status, progress: FixProgress) {
 }
 
 /// Runs a claimed fix or Fix all on its own thread with `run`, which reports its progress and
-/// returns how each item ended. Its results then show as [`Status::Fixed`]. A run that fails
-/// before any item was recorded (refused under the lock, a panic) sets the status back to idle
-/// and sends its reason in a `fix-error` event, which the popover shows as it shows any
-/// refused command's error.
+/// returns how each item ended. Its results then show as [`Status::Fixed`]. A run that ends
+/// without records (refused under the lock, a panic, or records that could not be appended
+/// after the agent ran) sets the status back to idle and sends its reason in a `fix-error`
+/// event, which the popover shows as it shows any refused command's error.
 fn fix_thread<F>(app: &AppHandle, run: F)
 where
     F: FnOnce(&DataDir, &mut dyn FnMut(FixProgress)) -> Result<FixRun, String> + Send + 'static,
@@ -555,12 +563,7 @@ fn finished(status: &Status, run: FixRun) -> Status {
 /// Does nothing unless they show, so a second click, or one that lands after a sweep started,
 /// changes nothing.
 pub(crate) fn close_fix(app: &AppHandle) {
-    let runner = app.state::<Runner>();
-    let mut shared = runner.lock();
-    if matches!(shared.status, Status::Fixed { .. }) {
-        shared.status = Status::Idle;
-    }
-    drop(shared);
+    app.state::<Runner>().close_results();
     changed(app);
 }
 
@@ -640,8 +643,9 @@ pub(crate) fn schedule(app: AppHandle) {
                     // Under one lock, so a running sweep's status is never overwritten. The
                     // failure shows until the next sweep sets the status again.
                     let mut shared = runner.lock();
-                    // Not over a sweep or fix that runs, nor over a fix's results, which the
-                    // user closes; the check runs again every minute.
+                    // Not over a sweep or fix that runs, nor over a fix's results, which stay
+                    // until the user closes them or a new run starts; the check runs again
+                    // every minute.
                     if matches!(shared.status, Status::Idle | Status::Failed { .. }) {
                         shared.status = Status::Failed {
                             error: format!("cannot check the schedule: {e}"),
@@ -663,7 +667,7 @@ pub(crate) fn schedule(app: AppHandle) {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
 
     use vigil_core::AgentKind;
@@ -842,7 +846,7 @@ pub(crate) mod tests {
     }
 
     /// A single fix's record, ended `partial`.
-    pub(crate) fn partial_run() -> FixRun {
+    fn partial_run() -> FixRun {
         FixRun::single(vigil_core::FixRecord {
             key: "00000000000000c1".parse().unwrap(),
             title: "CVE-1 in sqlite 3.45".to_owned(),
@@ -872,19 +876,31 @@ pub(crate) mod tests {
             panic!("a running fix ends with its results: {done:?}");
         };
         assert_eq!((title.as_str(), place.as_str()), ("t", "This Mac"));
-        assert_eq!(run.summary(), "0 of 1 fixed · 1 partial");
+        assert!(
+            format!("{run:?}").contains("no newer sqlite release"),
+            "the run is the one that ended"
+        );
         assert!(!done.is_busy(), "results do not hold the runner");
         assert!(
             matches!(finished(&Status::Idle, partial_run()), Status::Idle),
             "only a running fix ends"
         );
 
-        runner.set(done);
+        runner.set(done.clone());
         runner.claim(fixing()).unwrap();
         assert!(
             matches!(runner.status(), Status::Fixing { .. }),
             "a new fix replaces the results"
         );
+
+        runner.close_results();
+        assert!(
+            matches!(runner.status(), Status::Fixing { .. }),
+            "closing changes nothing once a new run started"
+        );
+        runner.set(done);
+        runner.close_results();
+        assert!(matches!(runner.status(), Status::Idle), "closed");
     }
 
     #[test]

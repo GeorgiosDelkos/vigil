@@ -82,7 +82,6 @@ pub use crate::fix::FixPlan;
 pub use crate::fix::FixProgress;
 pub use crate::fix::FixRecord;
 pub use crate::fix::FixRun;
-pub use crate::fix::FixRunItem;
 pub use crate::fix::LogTail;
 pub use crate::fix::Outcome;
 pub use crate::fix::fix_all_outcome;

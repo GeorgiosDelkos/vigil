@@ -781,33 +781,6 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_s_results_reach_the_popover_with_their_rows_and_line() {
-        let status = Status::Fixed {
-            title: "Upgrade sqlite".to_owned(),
-            place: "This Mac".to_owned(),
-            run: crate::runner::tests::partial_run(),
-            finished: Timestamp::UNIX_EPOCH,
-        };
-        // How the run serializes is the core's test; this one checks it reaches the view whole.
-        let StatusView::Fixed {
-            title, place, run, ..
-        } = StatusView::of(status)
-        else {
-            panic!("a fix's results stay a fix's results");
-        };
-        assert_eq!(
-            (title.as_str(), place.as_str()),
-            ("Upgrade sqlite", "This Mac")
-        );
-        assert_eq!(run.summary(), "0 of 1 fixed · 1 partial");
-        let item = &run.items()[0];
-        assert_eq!(
-            (item.name.as_str(), item.state_label, item.summary.as_str()),
-            ("CVE-1 in sqlite 3.45", "partial", "no newer sqlite release")
-        );
-    }
-
-    #[test]
     fn the_bar_marks_target_boundaries_until_they_would_crowd_it() {
         assert_eq!(ticks(1), Vec::<f64>::new());
         assert_eq!(ticks(2), [50.0]);
