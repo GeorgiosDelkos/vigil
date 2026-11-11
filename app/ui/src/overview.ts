@@ -48,7 +48,21 @@ export type Status =
       readonly started: string;
       readonly step_started: string;
     }
+  | FixedStatus
   | { readonly state: "failed"; readonly error: string };
+
+/** A fix's results, which stay until the user closes them (the owner's decision,
+ * 2026-11-11). */
+export type FixedStatus = {
+  readonly state: "fixed";
+  readonly title: string;
+  readonly place: string;
+  /** One row per item, in the order they ran. */
+  readonly items: readonly FixRunItem[];
+  /** The line at the bottom: "5 of 9 fixed · 4 partial". */
+  readonly summary: string;
+  readonly finished: string;
+};
 
 /** One open finding or issue (the core's `Open`). */
 export type Finding = {
@@ -222,9 +236,23 @@ export type FixAllPreview = {
   readonly items: readonly FixAllPreviewItem[];
 };
 
-export type FixDone = {
-  readonly key: string;
-  readonly outcome: string;
+/** How one item of a finished fix ended (the core's `FixRunItem`). */
+export type FixRunItem = {
+  /** A Fix all item's name ("curl 8.1.2"), or a single fix's finding title. */
+  readonly name: string;
+  /** `unknown` also when the agent reported fixed but did not exit 0. */
+  readonly state: "fixed" | "partial" | "failed" | "unknown";
+  /** The state in a word: "fixed", "partial", "failed", "no result". */
+  readonly state_label: string;
+  /** The agent's summary, or why there is none: untrusted text, only shown. */
   readonly summary: string;
   readonly pull_request: string | null;
+};
+
+/** The end of a finished fix's agent log (the core's `LogTail`). */
+export type LogTail = {
+  /** Plain lines of the agent's output: untrusted text, only shown. */
+  readonly text: string;
+  /** That only the end is shown, or that the log is empty. */
+  readonly note: string | null;
 };

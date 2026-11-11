@@ -37,6 +37,8 @@ export type IconName =
   | "settings"
   | "check"
   | "done"
+  | "partial"
+  | "failed"
   | "wait"
   | "chev"
   | "agent"
@@ -61,6 +63,9 @@ const PATHS: Record<IconName, string> = {
     "M2 4.5h6.5M12.5 4.5H14M2 11.5h1.5M7.5 11.5H14M10.5 3a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM5.5 10a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z",
   check: "M3.5 8.4 6.6 11.4 12.5 4.8",
   done: "M5 8.2 7.1 10.2 11 5.9",
+  // A fix's end states beside done, on the same tinted disc: half done, and not done.
+  partial: "M5.2 8h5.6",
+  failed: "M5.8 5.8l4.4 4.4M10.2 5.8l-4.4 4.4",
   wait: "M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11z",
   chev: "M10 3.5 5.5 8l4.5 4.5",
   agent: "M2.5 4.5 6 8l-3.5 3.5M8 12h5.5",
@@ -74,11 +79,14 @@ const PATHS: Record<IconName, string> = {
     "M8 1.6 13.2 3.5v4.1c0 3.2-2.2 5.6-5.2 6.8-3-1.2-5.2-3.6-5.2-6.8V3.5zM5.6 8l1.7 1.7 3.2-3.4",
 };
 
+/** The marks drawn on a disc tinted with their own colour. */
+const DISCS: ReadonlySet<IconName> = new Set(["done", "partial", "failed"]);
+
 /** A line icon, drawn in the current text colour. */
 export function Icon(props: { name: IconName }) {
   return (
     <svg class={`icon ${props.name}`} viewBox="0 0 16 16" aria-hidden="true">
-      {props.name === "done" ? <circle cx="8" cy="8" r="6.5" class="done-disc" /> : null}
+      {DISCS.has(props.name) ? <circle cx="8" cy="8" r="6.5" class="disc" /> : null}
       <path d={PATHS[props.name]} />
     </svg>
   );

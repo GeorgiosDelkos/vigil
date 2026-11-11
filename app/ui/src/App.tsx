@@ -15,12 +15,14 @@ import {
 import {
   SEVERITIES,
   type Finding,
-  type FixDone,
   type FixedItem,
+  type FixedStatus,
+  type FixRunItem,
   type FixState,
   type FixAllPreview,
   type FixPreview,
   type Listed,
+  type LogTail,
   type Overview,
   type PendingFix,
   type ReportedFix,
@@ -32,7 +34,7 @@ import { Menu } from "./Menu.tsx";
 import { Orbit, TargetFigures } from "./Orbit.tsx";
 import { Settings } from "./Settings.tsx";
 import type { Section } from "./settings.ts";
-import { Glyph, Icon } from "./icons.tsx";
+import { Glyph, Icon, type IconName } from "./icons.tsx";
 import { ago, since } from "./time.ts";
 
 type Tab = "needs" | "targets" | "all" | "fixed";
@@ -44,6 +46,7 @@ type Screen = "orbit" | "list";
 type View =
   | "settings"
   | "fixing"
+  | "results"
   | "detail"
   | "target"
   | "orbit"
@@ -64,6 +67,10 @@ function viewOf(
   if (o.status.state === "fixing") {
     return "fixing";
   }
+  // Its results then stay until closed, over the screen it was started from.
+  if (o.status.state === "fixed") {
+    return "results";
+  }
   if (open.detail) {
     return "detail";
   }
@@ -83,6 +90,11 @@ function screenOf(o: Overview, screen: Screen): View {
   return blocked ?? (o.all_clear ? "clear" : "list");
 }
 
+/** The last fix's results, while they show. */
+function fixedOf(o: Overview): FixedStatus | null {
+  return o.status.state === "fixed" ? o.status : null;
+}
+
 /** What stops a sweep before it starts: settings Rust cannot read, or no agent. */
 function blocker(o: Overview): "problem" | "agent" | null {
   if (o.problem !== null && o.targets.length === 0) {
@@ -99,7 +111,6 @@ export function App() {
   const [selected, setSelected] = createSignal<string | null>(null);
   // The key of the target whose findings show, over the main view or the list.
   const [targetKey, setTargetKey] = createSignal<string | null>(null);
-  const [done, setDone] = createSignal<FixDone | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   // Settings open in the popover, at a section or at the list; `undefined` when closed.
   const [settings, setSettings] = createSignal<Section | null | undefined>(undefined);
@@ -110,10 +121,8 @@ export function App() {
       setNow(new Date());
       void refetch();
     }),
-    listen<FixDone>("fix-done", (event) => {
-      setDone(event.payload);
-      setSelected(null);
-    }),
+    // A fix that ran shows its results; this is one refused before anything was recorded.
+    listen<string>("fix-error", (event) => setError(event.payload)),
   ];
   onCleanup(() => {
     for (const u of unlisten) {
@@ -160,19 +169,6 @@ export function App() {
   return (
     <main class="pop" classList={{ "on-orbit": view() === "orbit" }}>
       <Show when={error()}>{(e) => <p class="banner bad">{e()}</p>}</Show>
-      <Show when={done()}>
-        {(d) => (
-          <p class={`banner ${d().outcome === "fixed" ? "good" : "bad"}`}>
-            <b>{d().outcome === "fixed" ? "Fixed" : `Fix ${d().outcome}`}:</b> {d().summary}
-            <Show when={d().pull_request}>
-              {(url) => <span class="pr">Pull request: {url()}</span>}
-            </Show>
-            <button type="button" class="ghost x" aria-label="Close" onClick={() => setDone(null)}>
-              ×
-            </button>
-          </p>
-        )}
-      </Show>
       <Show when={overview()} fallback={<p class="quiet">Reading the last sweep…</p>}>
         {(o) => (
           <Switch>
@@ -191,6 +187,15 @@ export function App() {
                 now={now()}
                 onCancel={() => run(() => invoke("cancel_sweep"))}
               />
+            </Match>
+            <Match when={view() === "results" && fixedOf(o())}>
+              {(status) => (
+                <FixResults
+                  status={status()}
+                  now={now()}
+                  onClose={() => run(() => invoke("close_fix"))}
+                />
+              )}
             </Match>
             <Match when={view() === "detail" && chosen()}>
               {(item) => (
@@ -1133,6 +1138,136 @@ function Busy(props: { status: Status; now: Date; onCancel: () => void }) {
         }}
       </Match>
     </Switch>
+  );
+}
+
+/** The icon of an item's final state: green check, amber dash, red cross, grey circle. */
+const RESULT_ICONS = {
+  fixed: "done",
+  partial: "partial",
+  failed: "failed",
+  unknown: "wait",
+} as const satisfies Record<FixRunItem["state"], IconName>;
+
+/** What Show log shows: the log's end, or why it could not be read. */
+type LogView = { readonly tail: LogTail } | { readonly error: string };
+
+/** A finished fix's results, where its steps were: each item in its final state, with the
+ * agent's summary a click away, the run's log on request, and Rust's summary line at the
+ * bottom. The owner's decision (2026-11-11): results stay here until closed, never in a banner
+ * at the top. Close, or Escape, returns to the screen the fix was started from. */
+function FixResults(props: { status: FixedStatus; now: Date; onClose: () => void }) {
+  const [log, setLog] = createSignal<LogView | null>(null);
+  const toggleLog = () => {
+    if (log() !== null) {
+      setLog(null);
+      return;
+    }
+    // Read each time it is shown, so it is never a stale copy.
+    invoke<LogTail>("fix_log")
+      .then((tail) => setLog({ tail }))
+      .catch((e: unknown) => setLog({ error: String(e) }));
+  };
+  const close = (event: KeyboardEvent) => {
+    if (event.key === "Escape") {
+      props.onClose();
+    }
+  };
+  onMount(() => window.addEventListener("keydown", close));
+  onCleanup(() => window.removeEventListener("keydown", close));
+  return (
+    <>
+      <section class="summary">
+        <div class="headline">
+          <div class="headline-text">
+            <h1>Fix finished</h1>
+            <p class="sub">
+              {props.status.place} · finished {ago(props.status.finished, props.now)}
+            </p>
+          </div>
+        </div>
+        <p class="fix-title">{props.status.title}</p>
+      </section>
+      <ol class="group steps results pane" aria-label="Fix results" tabindex="0">
+        <For each={props.status.items}>{(item) => <ResultRow item={item} />}</For>
+      </ol>
+      <Show when={log()}>
+        {(shown) => {
+          const view = shown();
+          return "error" in view ? (
+            <p class="log-error" role="alert">
+              {view.error}
+            </p>
+          ) : (
+            <LogBlock tail={view.tail} />
+          );
+        }}
+      </Show>
+      <div class="results-foot">
+        <p class="results-summary" role="status">
+          {props.status.summary}
+        </p>
+        <div class="dacts">
+          <button type="button" class="btn" aria-expanded={log() !== null} onClick={toggleLog}>
+            {log() === null ? "Show log" : "Hide log"}
+          </button>
+          <button type="button" class="btn primary" onClick={() => props.onClose()}>
+            Close
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** One item's final state, and Details, which opens the agent's summary under it. */
+function ResultRow(props: { item: FixRunItem }) {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <li class={`step result ${props.item.state}`}>
+      <Icon name={RESULT_ICONS[props.item.state]} />
+      <span class="result-name">{props.item.name}</span>
+      <span class="st">{props.item.state_label}</span>
+      <button
+        type="button"
+        class="details"
+        aria-expanded={open()}
+        aria-label={`Details: ${props.item.name}`}
+        onClick={() => setOpen(!open())}
+      >
+        Details
+        <Icon name="chev" />
+      </button>
+      <Show when={open()}>
+        {/* The agent's own words: shown as text, never acted on. */}
+        <p class="result-detail">
+          {props.item.summary}
+          <Show when={props.item.pull_request}>
+            {(url) => <span class="pr">Pull request: {url()}</span>}
+          </Show>
+        </p>
+      </Show>
+    </li>
+  );
+}
+
+/** The end of the run's log, scrolled to its last line, where the agent finished. */
+function LogBlock(props: { tail: LogTail }) {
+  let block: HTMLPreElement | undefined;
+  onMount(() => {
+    if (block !== undefined) {
+      block.scrollTop = block.scrollHeight;
+    }
+  });
+  return (
+    <>
+      <Show when={props.tail.note}>{(note) => <p class="hint">{note()}</p>}</Show>
+      <Show when={props.tail.text !== ""}>
+        <pre class="log pane" aria-label="Agent log" tabindex="0" ref={(el) => (block = el)}>
+          {props.tail.text}
+        </pre>
+      </Show>
+    </>
   );
 }
 

@@ -284,7 +284,7 @@ fn look(app: &AppHandle) -> Look {
         Status::Sweeping { .. } => return Look::Sweeping,
         Status::Fixing { .. } => return Look::Fixing,
         Status::Failed { .. } => Health::Failed,
-        Status::Idle => Health::Ok,
+        Status::Idle | Status::Fixed { .. } => Health::Ok,
     };
     let Ok(config) = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
     else {

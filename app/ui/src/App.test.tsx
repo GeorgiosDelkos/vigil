@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "./App.tsx";
 import { advisory, component, finding, overview, settingsView } from "./fixtures.ts";
 import { sceneOf } from "./Orbit.tsx";
-import type { Listed, Overview, ReportedFix, Status } from "./overview.ts";
+import type { FixRunItem, Listed, Overview, ReportedFix, Status } from "./overview.ts";
 
 const invoke = vi.hoisted(() => vi.fn());
 const handlers = vi.hoisted(() => new Map<string, (event: { payload: unknown }) => void>());
@@ -267,6 +267,28 @@ function fixing(): Status {
     ],
     started: new Date().toISOString(),
     step_started: new Date(Date.now() - 2 * 60_000).toISOString(),
+  };
+}
+
+/** One item of a fix's results, with no pull request. */
+function runItem(name: string, state: FixRunItem["state"], label: string, summary: string) {
+  return { name, state, state_label: label, summary, pull_request: null };
+}
+
+/** A Fix all's results, one item in each final state, as Rust reports them. */
+function fixRun(): Extract<Status, { state: "fixed" }> {
+  return {
+    state: "fixed",
+    title: "Upgrade 4 components",
+    place: "This Mac",
+    items: [
+      runItem("curl 8.1.2", "fixed", "fixed", "upgraded curl"),
+      runItem("sqlite 3.45.1", "partial", "partial", "no newer sqlite release"),
+      runItem("ffmpeg 8.1.2", "failed", "failed", "brew failed"),
+      runItem("zlib 1.3", "unknown", "no result", "the agent reported nothing for it"),
+    ],
+    summary: "1 of 4 fixed · 1 partial · 1 failed · 1 with no result",
+    finished: new Date().toISOString(),
   };
 }
 
@@ -1113,25 +1135,175 @@ describe("the detail", () => {
 });
 
 describe("a finished fix", () => {
-  it.each([
-    ["fixed", "Fixed:", "banner good", "https://github.com/me/app/pull/7"],
-    ["failed", "Fix failed:", "banner bad", null],
-  ])("reads %s, and closes", async (outcome, label, className, pr) => {
+  it("stays after the run, each item in its final state, its line at the bottom", async () => {
+    shown = { ...two(), status: fixing() };
+    answer();
+    render(() => <App />);
+    expect(await screen.findByRole("list", { name: "Fix progress" })).toBeTruthy();
+
+    shown = { ...two(), status: fixRun() };
+    handlers.get("changed")?.({ payload: null });
+    const results = await screen.findByRole("list", { name: "Fix results" });
+    const rows = within(results).getAllByRole("listitem");
+    expect(rows.map((r) => r.className)).toEqual([
+      "step result fixed",
+      "step result partial",
+      "step result failed",
+      "step result unknown",
+    ]);
+    expect(rows.map((r) => r.querySelector(".st")?.textContent)).toEqual([
+      "fixed",
+      "partial",
+      "failed",
+      "no result",
+    ]);
+    expect(rows.map((r) => r.querySelector(".icon")?.getAttribute("class"))).toEqual([
+      "icon done",
+      "icon partial",
+      "icon failed",
+      "icon wait",
+    ]);
+    expect(screen.getByText("Upgrade 4 components")).toBeTruthy();
+    expect(screen.getByText(/^This Mac · finished/)).toBeTruthy();
+    // The summaries wait behind Details: the rows stay one line each.
+    expect(screen.queryByText("no newer sqlite release")).toBeNull();
+
+    // The line is Rust's, below the rows, and no banner at the top says it again.
+    const line = screen.getByRole("status");
+    expect(line.textContent).toBe("1 of 4 fixed · 1 partial · 1 failed · 1 with no result");
+    expect(results.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(document.querySelector(".banner")).toBeNull();
+    expect(screen.queryByText(/^Fix (partial|failed)/)).toBeNull();
+
+    // It stays when the popover asks again, until it is closed.
+    handlers.get("changed")?.({ payload: null });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(screen.getByRole("list", { name: "Fix results" })).toBeTruthy();
+  });
+
+  it("opens one row's summary with its Details", async () => {
+    shown = { ...two(), status: fixRun() };
+    answer();
+    render(() => <App />);
+    const details = await screen.findByRole("button", { name: "Details: sqlite 3.45.1" });
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("true");
+    const opened = details.closest("li") as HTMLElement;
+    expect(within(opened).getByText("no newer sqlite release")).toBeTruthy();
+    // Only that row.
+    expect(screen.queryByText("upgraded curl")).toBeNull();
+    expect(screen.queryByText("brew failed")).toBeNull();
+    fireEvent.click(details);
+    expect(screen.queryByText("no newer sqlite release")).toBeNull();
+  });
+
+  it("shows a repository fix's pull request in its details", async () => {
+    const one: Status = {
+      ...fixRun(),
+      items: [
+        {
+          name: "CVE-1 in lodash 1.0.0",
+          state: "fixed",
+          state_label: "fixed",
+          summary: "opened a pull request",
+          pull_request: "https://github.com/me/app/pull/7",
+        },
+      ],
+      summary: "1 of 1 fixed",
+    };
+    shown = { ...two(), status: one };
+    answer();
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: /^Details/ }));
+    expect(screen.getByText("Pull request: https://github.com/me/app/pull/7")).toBeTruthy();
+  });
+
+  it("shows the log's end on Show log, and why when it cannot be read", async () => {
+    shown = { ...two(), status: fixRun() };
+    let missing = false;
+    answer({
+      fix_log: () =>
+        missing
+          ? Promise.reject("cannot read /fixes/x/agent.log: No such file or directory")
+          : {
+              text: "reading fixes.json\nno newer sqlite release",
+              note: "The last 64 KB of 196 KB.",
+            },
+    });
+    render(() => <App />);
+    const toggle = await screen.findByRole("button", { name: "Show log" });
+    expect(screen.queryByLabelText("Agent log")).toBeNull();
+    fireEvent.click(toggle);
+    const log = await screen.findByLabelText("Agent log");
+    expect(invoke).toHaveBeenCalledWith("fix_log");
+    expect(log.tagName).toBe("PRE");
+    expect(log.textContent).toBe("reading fixes.json\nno newer sqlite release");
+    expect(screen.getByText("The last 64 KB of 196 KB.")).toBeTruthy();
+    expect(toggle.textContent).toBe("Hide log");
+    fireEvent.click(toggle);
+    expect(screen.queryByLabelText("Agent log")).toBeNull();
+
+    missing = true;
+    fireEvent.click(screen.getByRole("button", { name: "Show log" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "cannot read /fixes/x/agent.log: No such file or directory",
+    );
+    expect(screen.queryByLabelText("Agent log")).toBeNull();
+  });
+
+  it("closes back to the finding it was started from, with Close or Escape", async () => {
+    shown = two();
+    answer({ close_fix: () => null });
+    await openList();
+    fireEvent.click(await screen.findByText("openssl"));
+    expect(screen.getByText("Fix…")).toBeTruthy();
+
+    shown = { ...two(), status: fixRun() };
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByRole("list", { name: "Fix results" });
+    expect(screen.queryByText("Fix…")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(invoke).toHaveBeenCalledWith("close_fix");
+    // Rust closes them; the next overview has no results, and the finding shows again.
+    shown = two();
+    handlers.get("changed")?.({ payload: null });
+    expect(await screen.findByText("Fix…")).toBeTruthy();
+
+    shown = { ...two(), status: fixRun() };
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByRole("list", { name: "Fix results" });
+    invoke.mockClear();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(invoke).toHaveBeenCalledWith("close_fix");
+  });
+
+  it("closes back to the target a Fix all was started from", async () => {
+    shown = sameLabel();
+    answer({ close_fix: () => null });
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: /^web, 2 open/ }));
+    expect(names()).toEqual(["glibc", "nginx"]);
+
+    shown = { ...sameLabel(), status: fixRun() };
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByRole("list", { name: "Fix results" });
+    expect(names()).toEqual([]);
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    shown = sameLabel();
+    handlers.get("changed")?.({ payload: null });
+    await vi.waitFor(() => expect(names()).toEqual(["glibc", "nginx"]));
+    expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
+  });
+
+  it("shows a fix refused before it ran as an error, not as results", async () => {
     shown = two();
     answer();
     await openList();
     await screen.findByText("2 findings need you");
-    handlers.get("fix-done")?.({
-      payload: { key: "a", outcome, summary: "Updated openssl", pull_request: pr },
-    });
-    const banner = (await screen.findByText(label)).closest("p") as HTMLElement;
-    expect(banner.className).toBe(className);
-    expect(banner.querySelector(".pr")?.textContent ?? null).toBe(
-      pr === null ? null : `Pull request: ${pr}`,
-    );
-    expect(banner.textContent).toContain("Updated openssl");
-    fireEvent.click(within(banner).getByLabelText("Close"));
-    expect(screen.queryByText(label)).toBeNull();
+    handlers.get("fix-error")?.({ payload: "a sweep or fix is running" });
+    expect(await screen.findByText("a sweep or fix is running")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Fix results" })).toBeNull();
   });
 });
 
@@ -1232,19 +1404,6 @@ describe("state across commands", () => {
     expect(await screen.findByText("busy")).toBeTruthy();
     fireEvent.click(screen.getByText("Sweep"));
     expect(screen.queryByText("busy")).toBeNull();
-  });
-
-  it("closes the detail when its fix finishes", async () => {
-    shown = two();
-    answer();
-    await openList();
-    fireEvent.click(await screen.findByText("openssl"));
-    expect(screen.getByText("Fix…")).toBeTruthy();
-    handlers.get("fix-done")?.({
-      payload: { key: "a", outcome: "fixed", summary: "done", pull_request: null },
-    });
-    await screen.findByText("Fixed:");
-    expect(screen.queryByText("Fix…")).toBeNull();
   });
 
   it("says nothing about dismissals when there are none", async () => {

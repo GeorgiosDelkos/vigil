@@ -24,7 +24,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use jiff::Timestamp;
-use serde::Serialize;
 use tauri::AppHandle;
 use tauri::Emitter as _;
 use tauri::Manager as _;
@@ -37,6 +36,8 @@ use vigil_core::FindingKey;
 use vigil_core::FixAllItem;
 use vigil_core::FixPlan;
 use vigil_core::FixProgress;
+use vigil_core::FixRun;
+use vigil_core::LogTail;
 use vigil_core::Progress;
 use vigil_core::Report;
 use vigil_core::SweepError;
@@ -44,7 +45,6 @@ use vigil_core::Targets;
 use vigil_core::alerts;
 use vigil_core::clean_up_interrupted;
 use vigil_core::error_chain;
-use vigil_core::fix_all_outcome;
 use vigil_core::last_sweep_started;
 use vigil_core::plan_fix;
 use vigil_core::plan_fix_all;
@@ -144,6 +144,19 @@ pub(crate) enum Status {
         /// When the current step started.
         step_started: Timestamp,
     },
+    /// A fix or Fix all ran, and its results show until the user closes them ([`close_fix`])
+    /// or a sweep or fix starts. The owner's decision (2026-11-11): the progress view stays,
+    /// each item in its final state, instead of a banner at the top.
+    Fixed {
+        /// What it fixed, one line, as [`Self::Fixing`] showed it.
+        title: String,
+        /// Its target, as [`Self::Fixing`] showed it.
+        place: String,
+        /// How each item ended, and the run's folder for its log.
+        run: FixRun,
+        /// When it finished.
+        finished: Timestamp,
+    },
     /// The last sweep stopped, a target in it got no verdict, or the schedule could not be
     /// checked.
     Failed {
@@ -205,7 +218,8 @@ impl Runner {
         match shared.status {
             Status::Sweeping { .. } => return Err("a sweep is running"),
             Status::Fixing { .. } => return Err("a fix is running"),
-            Status::Idle | Status::Failed { .. } => {}
+            // A new sweep or fix replaces the last fix's results.
+            Status::Idle | Status::Fixed { .. } | Status::Failed { .. } => {}
         }
         if matches!(status, Status::Sweeping { .. }) {
             shared.started = Some(Timestamp::now());
@@ -385,17 +399,8 @@ fn advance(status: &mut Status, progress: &Progress<'_>) {
     *step_started = Timestamp::now();
 }
 
-/// How a fix ended, for the popover.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct FixDone {
-    key: String,
-    outcome: String,
-    summary: String,
-    pull_request: Option<String>,
-}
-
-/// Runs the confirmed fix of `key` on its own thread, and tells the popover how it ended with
-/// a `fix-done` event.
+/// Runs the confirmed fix of `key` on its own thread; its results then show as
+/// [`Status::Fixed`].
 ///
 /// The fix is planned again and runs only when it comes from the sweep that found the one the
 /// user confirmed (`found`, from the preview), so a sweep that landed since the preview is
@@ -417,21 +422,16 @@ pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> R
         FixProgress::labels(plan.agent()),
     ))?;
     changed(app);
-    fix_thread(app, key.to_string(), move |data_dir, progress| {
+    fix_thread(app, move |data_dir, progress| {
         let record = run_fix(data_dir, &plan, Confirmed::Asked, progress, &cancel)
             .map_err(|e| e.to_string())?;
-        Ok(FixDone {
-            key: key.to_string(),
-            outcome: record.outcome.to_string(),
-            summary: record.summary,
-            pull_request: record.pull_request,
-        })
+        Ok(FixRun::single(record))
     });
     Ok(())
 }
 
-/// Runs the confirmed Fix all of `target` on its own thread, as one agent run, and tells the
-/// popover how it ended with a `fix-done` event.
+/// Runs the confirmed Fix all of `target` on its own thread, as one agent run; its results then
+/// show as [`Status::Fixed`].
 ///
 /// As for one fix, it is planned again and runs only when it is the list the user confirmed:
 /// the same items, in the same order (`keys`), from the sweep that found them (`found`), both
@@ -467,16 +467,10 @@ pub(crate) fn start_fix_all(
         plan.labels(),
     ))?;
     changed(app);
-    fix_thread(app, target.to_owned(), move |data_dir, progress| {
+    fix_thread(app, move |data_dir, progress| {
         let records = run_fix_all(data_dir, &plan, Confirmed::Asked, progress, &cancel)
             .map_err(|e| error_chain(&e))?;
-        let (outcome, summary) = fix_all_outcome(&records);
-        Ok(FixDone {
-            key: plan.target().to_owned(),
-            outcome: outcome.to_string(),
-            summary,
-            pull_request: None,
-        })
+        Ok(FixRun::all(&plan, records))
     });
     Ok(())
 }
@@ -506,13 +500,14 @@ fn advance_fix(status: &mut Status, progress: FixProgress) {
     }
 }
 
-/// Runs a claimed fix, then tells the popover how it ended.
 /// Runs a claimed fix or Fix all on its own thread with `run`, which reports its progress and
-/// says how it ended; then sets the status back to idle and tells the popover with a
-/// `fix-done` event for `key` (the finding's key, or the target of a Fix all).
-fn fix_thread<F>(app: &AppHandle, key: String, run: F)
+/// returns how each item ended. Its results then show as [`Status::Fixed`]. A run that fails
+/// before any item was recorded (refused under the lock, a panic) sets the status back to idle
+/// and sends its reason in a `fix-error` event, which the popover shows as it shows any
+/// refused command's error.
+fn fix_thread<F>(app: &AppHandle, run: F)
 where
-    F: FnOnce(&DataDir, &mut dyn FnMut(FixProgress)) -> Result<FixDone, String> + Send + 'static,
+    F: FnOnce(&DataDir, &mut dyn FnMut(FixProgress)) -> Result<FixRun, String> + Send + 'static,
 {
     let app = app.clone();
     thread::spawn(move || {
@@ -525,16 +520,61 @@ where
             run(runner.data_dir(), &mut progress)
         }))
         .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
-        let event = done.unwrap_or_else(|error| FixDone {
-            key,
-            outcome: "failed".to_owned(),
-            summary: error,
-            pull_request: None,
-        });
-        app.state::<Runner>().set(Status::Idle);
-        drop(app.emit("fix-done", event));
+        let runner = app.state::<Runner>();
+        match done {
+            Ok(run) => {
+                let mut shared = runner.lock();
+                shared.status = finished(&shared.status, run);
+            }
+            Err(error) => {
+                runner.set(Status::Idle);
+                // Best effort, as for `changed`: no window may be listening.
+                drop(app.emit("fix-error", error));
+            }
+        }
         changed(&app);
     });
+}
+
+/// The status a fix leaves when it ends with `run`: its results, under the title and place
+/// `status`, the running fix's, showed. Only the fix's own thread changes a
+/// [`Status::Fixing`], so `status` is one; anything else is left as it is.
+fn finished(status: &Status, run: FixRun) -> Status {
+    match status {
+        Status::Fixing { title, place, .. } => Status::Fixed {
+            title: title.clone(),
+            place: place.clone(),
+            run,
+            finished: Timestamp::now(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Closes the last fix's results, and the popover goes back to where the fix was started.
+/// Does nothing unless they show, so a second click, or one that lands after a sweep started,
+/// changes nothing.
+pub(crate) fn close_fix(app: &AppHandle) {
+    let runner = app.state::<Runner>();
+    let mut shared = runner.lock();
+    if matches!(shared.status, Status::Fixed { .. }) {
+        shared.status = Status::Idle;
+    }
+    drop(shared);
+    changed(app);
+}
+
+/// The end of the last fix's `agent.log`, while its results show.
+///
+/// # Errors
+///
+/// Fails when no fix's results show, or when the log is missing or cannot be read.
+pub(crate) fn fix_log(app: &AppHandle) -> Result<LogTail, String> {
+    // `status` clones the run out, so the file is read without the lock held.
+    let Status::Fixed { run, .. } = app.state::<Runner>().status() else {
+        return Err("no fix's results are showing".to_owned());
+    };
+    run.log_tail().map_err(|e| error_chain(&e))
 }
 
 fn plan(app: &AppHandle, key: FindingKey) -> Result<FixPlan, String> {
@@ -600,7 +640,9 @@ pub(crate) fn schedule(app: AppHandle) {
                     // Under one lock, so a running sweep's status is never overwritten. The
                     // failure shows until the next sweep sets the status again.
                     let mut shared = runner.lock();
-                    if !shared.status.is_busy() {
+                    // Not over a sweep or fix that runs, nor over a fix's results, which the
+                    // user closes; the check runs again every minute.
+                    if matches!(shared.status, Status::Idle | Status::Failed { .. }) {
                         shared.status = Status::Failed {
                             error: format!("cannot check the schedule: {e}"),
                         };
@@ -621,7 +663,7 @@ pub(crate) fn schedule(app: AppHandle) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     use vigil_core::AgentKind;
@@ -797,6 +839,52 @@ mod tests {
         runner.set(Status::Idle);
         runner.claim(sweep).unwrap();
         assert_eq!(runner.claim(fix_all()).unwrap_err(), "a sweep is running");
+    }
+
+    /// A single fix's record, ended `partial`.
+    pub(crate) fn partial_run() -> FixRun {
+        FixRun::single(vigil_core::FixRecord {
+            key: "00000000000000c1".parse().unwrap(),
+            title: "CVE-1 in sqlite 3.45".to_owned(),
+            found: Timestamp::UNIX_EPOCH,
+            target: "mac".to_owned(),
+            agent: AgentKind::Grok,
+            started: Timestamp::UNIX_EPOCH,
+            finished: Timestamp::UNIX_EPOCH,
+            exit_code: Some(0),
+            outcome: vigil_core::Outcome::Partial,
+            summary: "no newer sqlite release".to_owned(),
+            pull_request: None,
+            confirmed: Confirmed::Asked,
+            dir: PathBuf::from("/fixes/x"),
+        })
+    }
+
+    #[test]
+    fn a_finished_fix_keeps_its_results_until_a_new_run_replaces_them() {
+        let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
+        runner.claim(fixing()).unwrap();
+        let done = finished(&runner.status(), partial_run());
+        let Status::Fixed {
+            title, place, run, ..
+        } = &done
+        else {
+            panic!("a running fix ends with its results: {done:?}");
+        };
+        assert_eq!((title.as_str(), place.as_str()), ("t", "This Mac"));
+        assert_eq!(run.summary(), "0 of 1 fixed · 1 partial");
+        assert!(!done.is_busy(), "results do not hold the runner");
+        assert!(
+            matches!(finished(&Status::Idle, partial_run()), Status::Idle),
+            "only a running fix ends"
+        );
+
+        runner.set(done);
+        runner.claim(fixing()).unwrap();
+        assert!(
+            matches!(runner.status(), Status::Fixing { .. }),
+            "a new fix replaces the results"
+        );
     }
 
     #[test]
