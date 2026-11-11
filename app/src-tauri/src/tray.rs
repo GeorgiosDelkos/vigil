@@ -1,7 +1,7 @@
 //! The menu-bar icon, Vigil's mark: the main view's vortex in brief, three streaks on each of
 //! three arms. The colour of its outer streaks shows whether a critical or high finding is
-//! open, or a sweep or fix is running ([`Look`]), a missing arm shows a failure, a left click shows or hides the popover under it, and
-//! a right click opens a menu with Quit.
+//! open, or a sweep or fix is running ([`Look`]), a missing arm shows a failure, a left click
+//! shows or hides the popover under it, and a right click opens a menu with Quit.
 
 use std::sync::Mutex;
 use std::sync::MutexGuard;
