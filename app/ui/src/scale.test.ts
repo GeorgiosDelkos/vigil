@@ -2,7 +2,8 @@
 // only in a pinned token's definition, as a hairline on a border, outline or shadow, as paint
 // (a blur, a shadow's offset, a gradient's stops), as em in letter-spacing, or in a listed
 // declaration with its exact value and reason. Anything else fails, naming file, rule and value.
-// At-rule headers (`@media (...)`) are not scanned, only the rules inside them.
+// At-rule headers (`@media (...)`) are not scanned, only the rules inside them. It also keeps
+// long text wrapping: see "long text" at the end.
 
 import { describe, expect, it } from "vitest";
 
@@ -212,5 +213,62 @@ describe("the size scale", () => {
   it("lists only declarations that exist", () => {
     const present = new Set(all.map((d) => key(d.selector, d.property, d.value)));
     expect([...LISTED_KEYS].filter((listed) => !present.has(listed))).toEqual([]);
+  });
+});
+
+/** Rules that keep text on one line, as selector, property, value and reason. Text anywhere
+ * else wraps: `.pop` sets `overflow-wrap: anywhere` for every view, so no name, path or command
+ * is wider than the popover (the owner's rule, 2026-11-11). Two of these cut text short with
+ * an ellipsis: the main view's fixed rows by design, and a closed native menu, which cannot
+ * wrap and shows its whole label when opened. */
+const ONE_LINE: readonly (readonly [string, string, string, string])[] = [
+  [".pill", "white-space", "nowrap", "a control of fixed height with a short label"],
+  [".seg button", "white-space", "nowrap", "a control of fixed height with a short label"],
+  [".btn", "white-space", "nowrap", "a control of fixed height with a short label"],
+  [".details", "white-space", "nowrap", "a control of fixed height with a short label"],
+  [".menu button, .menu .menuitem", "white-space", "nowrap", "a menu item of fixed height"],
+  [".foot-btn", "white-space", "nowrap", "a control of fixed height with a short label"],
+  [".orbit-btn", "white-space", "nowrap", "a control of fixed height with a short label"],
+  [".tool", "white-space", "nowrap", "a chip of fixed height naming a tool from a fixed list"],
+  [".tag", "white-space", "nowrap", "a badge with a fixed label"],
+  [".state", "white-space", "nowrap", "a badge with a fixed label"],
+  [".age", "white-space", "nowrap", "a short time beside a row's title"],
+  [".target .open", "white-space", "nowrap", "Rust's short count beside a target's name"],
+  [".tcount", "white-space", "nowrap", "a number and its severity in a fixed column"],
+  [".sr-only", "white-space", "nowrap", "visually hidden, still read"],
+  [".menu-pick select", "white-space", "nowrap", "a native menu shows one line; it opens in full"],
+  [".menu-pick select", "text-overflow", "ellipsis", "a native menu shows one line"],
+  [".orbit .tname, .orbit .tsub", "white-space", "nowrap", "the main view's 100 high rows"],
+  [".orbit .tname, .orbit .tsub", "text-overflow", "ellipsis", "the main view's 100 high rows"],
+];
+
+describe("long text", () => {
+  it("wraps anywhere in every view", () => {
+    const wrap = all.filter((d) => d.property === "overflow-wrap" || d.property === "word-break");
+    expect(wrap.map((d) => key(d.selector, d.property, d.value))).toEqual([
+      key(".pop", "overflow-wrap", "anywhere"),
+    ]);
+  });
+
+  it("stays on one line only where listed", () => {
+    const listed = new Set(ONE_LINE.map(([s, p, v]) => key(s, p, v)));
+    const oneLine = all
+      .filter(
+        (d) =>
+          (d.property === "white-space" && !["pre-wrap", "normal"].includes(d.value)) ||
+          d.property === "text-overflow",
+      )
+      .map((d) => key(d.selector, d.property, d.value));
+    expect(oneLine.filter((found) => !listed.has(found))).toEqual([]);
+    expect([...listed].filter((entry) => !oneLine.includes(entry))).toEqual([]);
+  });
+
+  // A <pre> is `white-space: pre` by default, where overflow-wrap does nothing: each block
+  // must turn wrapping back on, keeping its line breaks.
+  it("wraps the command, log and agent-summary blocks", () => {
+    const preWrap = all
+      .filter((d) => d.property === "white-space" && d.value === "pre-wrap")
+      .map((d) => d.selector);
+    expect(preWrap.toSorted()).toEqual([".cmd", ".log", ".result-detail"]);
   });
 });

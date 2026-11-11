@@ -880,13 +880,17 @@ function Advisory(props: { finding: Finding; onDismiss: (reason: string) => void
       <details class="adv">
         <summary>
           <Glyph severity={f().severity} />
-          <span class="id">{f().advisories.join(" · ")}</span>
-          <Show when={f().known_exploited}>
-            <span class="tag kev">Exploited</span>
-          </Show>
-          <Show when={f().fix_state}>
-            {(state) => <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>}
-          </Show>
+          {/* As in a list row: the badges follow the ids, and move under them when both do not
+              fit on one line. */}
+          <span class="tagline">
+            <span class="id">{f().advisories.join(" · ")}</span>
+            <Show when={f().known_exploited}>
+              <span class="tag kev">Exploited</span>
+            </Show>
+            <Show when={f().fix_state}>
+              {(state) => <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>}
+            </Show>
+          </span>
           <span class="adv-sev">{f().severity}</span>
         </summary>
         <div class="adv-body">
