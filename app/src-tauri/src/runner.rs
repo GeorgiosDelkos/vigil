@@ -157,10 +157,14 @@ pub(crate) enum Status {
         /// When it finished.
         finished: Timestamp,
     },
-    /// The last sweep stopped, a target in it got no verdict, or the schedule could not be
-    /// checked.
+    /// Something failed that the popover shows until the next sweep or fix: the last sweep
+    /// stopped, a target in it got no verdict, the schedule could not be checked, or a fix
+    /// ended without results (refused under the lock, a panic, or records that could not be
+    /// appended after the agent ran). Kept in the status rather than sent as an event, so it
+    /// shows whenever the popover next opens.
     Failed {
-        /// Why, one line.
+        /// What failed and why, one line as the popover shows it: "Last sweep: ..." or
+        /// "Last fix: ...".
         error: String,
     },
 }
@@ -237,6 +241,15 @@ impl Runner {
         }
     }
 
+    /// The end of the last fix's `agent.log`, while its results show.
+    fn fix_log(&self) -> Result<LogTail, String> {
+        // `status` clones the run out, so the file is read without the lock held.
+        let Status::Fixed { run, .. } = self.status() else {
+            return Err("no fix's results are showing".to_owned());
+        };
+        run.log_tail().map_err(|e| error_chain(&e))
+    }
+
     fn set(&self, status: Status) {
         self.lock().status = status;
     }
@@ -279,7 +292,7 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
         // every later start would be refused.
         let status = panic::catch_unwind(AssertUnwindSafe(|| run(&app, config, &cancel)))
             .unwrap_or_else(|_| Status::Failed {
-                error: "the sweep stopped unexpectedly".to_owned(),
+                error: "Last sweep: the sweep stopped unexpectedly".to_owned(),
             });
         app.state::<Runner>().set(status);
         changed(&app);
@@ -376,7 +389,9 @@ fn run(app: &AppHandle, config: Result<Config, String>, cancel: &Cancel) -> Stat
             }
             verdicts(&reports)
         }
-        Err(error) => Status::Failed { error },
+        Err(error) => Status::Failed {
+            error: format!("Last sweep: {error}"),
+        },
     }
 }
 
@@ -509,10 +524,8 @@ fn advance_fix(status: &mut Status, progress: FixProgress) {
 }
 
 /// Runs a claimed fix or Fix all on its own thread with `run`, which reports its progress and
-/// returns how each item ended. Its results then show as [`Status::Fixed`]. A run that ends
-/// without records (refused under the lock, a panic, or records that could not be appended
-/// after the agent ran) sets the status back to idle and sends its reason in a `fix-error`
-/// event, which the popover shows as it shows any refused command's error.
+/// returns how each item ended. Its results then show as [`Status::Fixed`]; a run that ends
+/// without them leaves [`Status::Failed`] with why.
 fn fix_thread<F>(app: &AppHandle, run: F)
 where
     F: FnOnce(&DataDir, &mut dyn FnMut(FixProgress)) -> Result<FixRun, String> + Send + 'static,
@@ -534,11 +547,9 @@ where
                 let mut shared = runner.lock();
                 shared.status = finished(&shared.status, run);
             }
-            Err(error) => {
-                runner.set(Status::Idle);
-                // Best effort, as for `changed`: no window may be listening.
-                drop(app.emit("fix-error", error));
-            }
+            Err(error) => runner.set(Status::Failed {
+                error: format!("Last fix: {error}"),
+            }),
         }
         changed(&app);
     });
@@ -573,11 +584,7 @@ pub(crate) fn close_fix(app: &AppHandle) {
 ///
 /// Fails when no fix's results show, or when the log is missing or cannot be read.
 pub(crate) fn fix_log(app: &AppHandle) -> Result<LogTail, String> {
-    // `status` clones the run out, so the file is read without the lock held.
-    let Status::Fixed { run, .. } = app.state::<Runner>().status() else {
-        return Err("no fix's results are showing".to_owned());
-    };
-    run.log_tail().map_err(|e| error_chain(&e))
+    app.state::<Runner>().fix_log()
 }
 
 fn plan(app: &AppHandle, key: FindingKey) -> Result<FixPlan, String> {
@@ -594,10 +601,20 @@ fn verdicts(reports: &[Report]) -> Status {
         .find_map(|r| {
             let failure = r.failure.as_ref()?;
             Some(Status::Failed {
-                error: format!("{}: {failure}", r.target),
+                error: format!("Last sweep: {}: {failure}", r.target),
             })
         })
         .unwrap_or(Status::Idle)
+}
+
+/// Shows that the schedule could not be checked, as `error`, unless that would hide something:
+/// a sweep or fix that runs, or a fix's results, which stay until the user closes them or a
+/// new run starts. The check runs again every minute, so the failure shows once they are gone.
+fn schedule_failed(status: &mut Status, error: String) {
+    match status {
+        Status::Idle | Status::Failed { .. } => *status = Status::Failed { error },
+        Status::Sweeping { .. } | Status::Fixing { .. } | Status::Fixed { .. } => {}
+    }
 }
 
 /// The title and body of the notification for `alerts`, or `None` when there are none.
@@ -642,16 +659,10 @@ pub(crate) fn schedule(app: AppHandle) {
                 Err(e) => {
                     // Under one lock, so a running sweep's status is never overwritten. The
                     // failure shows until the next sweep sets the status again.
-                    let mut shared = runner.lock();
-                    // Not over a sweep or fix that runs, nor over a fix's results, which stay
-                    // until the user closes them or a new run starts; the check runs again
-                    // every minute.
-                    if matches!(shared.status, Status::Idle | Status::Failed { .. }) {
-                        shared.status = Status::Failed {
-                            error: format!("cannot check the schedule: {e}"),
-                        };
-                    }
-                    drop(shared);
+                    schedule_failed(
+                        &mut runner.lock().status,
+                        format!("Last sweep: cannot check the schedule: {e}"),
+                    );
                     changed(&app);
                     continue;
                 }
@@ -901,6 +912,49 @@ mod tests {
         runner.set(done);
         runner.close_results();
         assert!(matches!(runner.status(), Status::Idle), "closed");
+    }
+
+    #[test]
+    fn the_schedule_s_failure_hides_no_run_and_no_results() {
+        let failed = || Status::Failed {
+            error: "Last sweep: older".to_owned(),
+        };
+        let fixed = || finished(&fixing(), partial_run());
+        for (mut status, shown) in [
+            (Status::Idle, true),
+            (failed(), true),
+            (fixing(), false),
+            (fixed(), false),
+        ] {
+            schedule_failed(
+                &mut status,
+                "Last sweep: cannot check the schedule".to_owned(),
+            );
+            let error = match &status {
+                Status::Failed { error } => Some(error.as_str()),
+                _ => None,
+            };
+            assert_eq!(
+                error == Some("Last sweep: cannot check the schedule"),
+                shown,
+                "{status:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_log_shows_only_while_a_fix_s_results_do() {
+        let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
+        assert_eq!(
+            runner.fix_log().unwrap_err(),
+            "no fix's results are showing"
+        );
+        runner.set(finished(&fixing(), partial_run()));
+        let err = runner.fix_log().unwrap_err();
+        assert!(
+            err.contains("/fixes/x/agent.log"),
+            "the run's own log: {err}"
+        );
     }
 
     #[test]

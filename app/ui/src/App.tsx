@@ -123,8 +123,6 @@ export function App() {
       setNow(new Date());
       void refetch();
     }),
-    // A fix that ran shows its results; this is one refused before anything was recorded.
-    listen<string>("fix-error", (event) => setError(event.payload)),
   ];
   onCleanup(() => {
     for (const u of unlisten) {
@@ -330,7 +328,7 @@ function Summary(props: { overview: Overview; now: Date; onSweep: () => void }) 
           Sweep
         </button>
       </div>
-      <Show when={failed()}>{(f) => <p class="banner bad">Last sweep: {f().error}</p>}</Show>
+      <Show when={failed()}>{(f) => <p class="banner bad">{f().error}</p>}</Show>
       <Show when={props.overview.items.length > 0}>
         <div
           class="bar"

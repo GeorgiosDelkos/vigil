@@ -836,7 +836,7 @@ describe("the summary", () => {
   it("shows a failed sweep, and why Sweep was refused", async () => {
     shown = {
       ...two(),
-      status: { state: "failed", error: "no agent chosen" },
+      status: { state: "failed", error: "Last sweep: no agent chosen" },
     };
     answer();
     invoke.mockImplementation((command: string) =>
@@ -1298,10 +1298,9 @@ describe("a finished fix", () => {
 
   it("clears an older error when a fix starts, so none sits over its results", async () => {
     shown = two();
-    answer();
+    answer({ sweep_now: () => Promise.reject("an older refusal") });
     await openList();
-    await screen.findByText("2 findings need you");
-    handlers.get("fix-error")?.({ payload: "an older refusal" });
+    fireEvent.click(await screen.findByText("Sweep"));
     expect(await screen.findByText("an older refusal")).toBeTruthy();
 
     shown = { ...two(), status: fixing() };
@@ -1314,14 +1313,16 @@ describe("a finished fix", () => {
     expect(document.querySelector(".banner")).toBeNull();
   });
 
-  it("shows a fix refused before it ran as an error, not as results", async () => {
-    shown = two();
+  it("shows a fix that ended without results as Rust's failure, whenever it opens", async () => {
+    // Rust keeps it in the status, so a popover opened later still shows it.
+    shown = { ...two(), status: { state: "failed", error: "Last fix: a sweep or fix is running" } };
     answer();
-    await openList();
-    await screen.findByText("2 findings need you");
-    handlers.get("fix-error")?.({ payload: "a sweep or fix is running" });
-    expect(await screen.findByText("a sweep or fix is running")).toBeTruthy();
+    render(() => <App />);
+    const banner = await screen.findByText("Last fix: a sweep or fix is running");
+    expect(banner.className).toBe("banner bad");
     expect(screen.queryByRole("list", { name: "Fix results" })).toBeNull();
+    fireEvent.click(screen.getByTitle("Show details"));
+    expect(screen.getByText("Last fix: a sweep or fix is running")).toBeTruthy();
   });
 });
 
@@ -1731,7 +1732,7 @@ describe("the main view", () => {
   });
 
   it("shows why the last sweep failed", async () => {
-    shown = { ...two(), status: { state: "failed", error: "grok exited with 1" } };
+    shown = { ...two(), status: { state: "failed", error: "Last sweep: grok exited with 1" } };
     answer();
     render(() => <App />);
     expect(await screen.findByText("Last sweep: grok exited with 1")).toBeTruthy();

@@ -713,10 +713,12 @@ Built in step 9a (2026-11-06):
   - The results are a status of the app's runner (`Fixed`, after `Fixing`), made from the
     records the run appended to `state/fixes.jsonl` and kept in memory: they survive the
     popover hiding and showing, not a restart. A new sweep or fix replaces them; the minute's
-    schedule check does not write a failure over them. A fix that ends without records shows
-    as an error, as a refused click does: one refused before anything ran (the lock held by the
-    CLI, a sweep that landed under the lock), or, rarely, one whose records could not be
-    appended after the agent ran, which may have changed the target.
+    schedule check does not write a failure over them. A fix that ends without records leaves
+    the app's failed status, "Last fix: ..." in the failure banner, kept in Rust so a popover
+    opened later still shows it: one refused before anything ran (the lock held by the CLI, a
+    sweep that landed under the lock), or, rarely, one whose records could not be appended
+    after the agent ran, which may have changed the target. Rust words the whole banner line
+    ("Last sweep: ..." or "Last fix: ...").
 - Every program a sweep or fix starts (the agent, `brew`, `gh`, `ssh`) runs under a small `sh`
   watchdog that leads its own process group and checks once a second that the app or CLI
   still runs. However that ends (quit, logout, `kill`, a crash, a closed terminal), the

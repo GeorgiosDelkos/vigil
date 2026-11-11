@@ -1067,6 +1067,13 @@ pub struct LogTail {
 /// Only a regular file is read. The agent ran with full access in the folder and could have
 /// put a link or a FIFO in the log's place: a link shows nothing it could not have written,
 /// but opening a FIFO would block the command for good.
+///
+/// Accepted gap: the check and the open are two steps, so a process that swaps the file in
+/// between still gets a FIFO opened. Only a process the agent started and that left its
+/// process group can still run then (the `cancel` module kills the group once the agent
+/// exits), and such a process already has the user's full access. Closing the gap needs
+/// `O_NONBLOCK | O_NOFOLLOW` on the open, whose values std does not export and this crate
+/// would need `libc` for.
 fn log_tail(path: &Path) -> Result<LogTail, FixError> {
     let read_err = |source| FixError::Read {
         path: path.to_owned(),

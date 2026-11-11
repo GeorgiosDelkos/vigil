@@ -68,7 +68,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
         </span>
         <Menu onSettings={props.actions.onSettings} onError={props.actions.onError} />
       </div>
-      <Show when={failed()}>{(f) => <p class="banner bad">Last sweep: {f().error}</p>}</Show>
+      <Show when={failed()}>{(f) => <p class="banner bad">{f().error}</p>}</Show>
       <div class="stage">
         <Spiral scene={sceneOf(props.overview)} />
         <button

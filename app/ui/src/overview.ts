@@ -49,6 +49,7 @@ export type Status =
       readonly step_started: string;
     }
   | FixedStatus
+  /** What failed and why, one line as Rust words it: "Last sweep: ..." or "Last fix: ...". */
   | { readonly state: "failed"; readonly error: string };
 
 /** A fix's results, which stay until the user closes them (the owner's decision,
