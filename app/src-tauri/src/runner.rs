@@ -896,10 +896,10 @@ mod tests {
             "only a running fix ends"
         );
         let failed = finished(&fixing(), Err("cannot save the history".to_owned()));
-        assert!(
-            matches!(&failed, Status::Failed { error } if error == "Last fix: cannot save the history"),
-            "a fix without results keeps its reason: {failed:?}"
-        );
+        let Status::Failed { error } = &failed else {
+            panic!("a fix without results keeps its reason: {failed:?}");
+        };
+        assert_eq!(error, "Last fix: cannot save the history");
         assert!(
             matches!(finished(&Status::Idle, Err("x".to_owned())), Status::Idle),
             "only a running fix fails"
