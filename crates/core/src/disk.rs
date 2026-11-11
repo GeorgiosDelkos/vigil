@@ -9,12 +9,18 @@
 //! All three come from one `diskutil info -plist /`. The alternatives weighed: `statfs` and
 //! `getattrlist(ATTR_VOL_NAME)` are C calls that std does not wrap, and the workspace forbids
 //! `unsafe`; `df` gives the sizes but not the name. diskutil takes about 0.3 seconds, so the
-//! app reads it beside the reports rather than after them.
+//! app reads it beside the reports rather than after them, and it is given up on after
+//! [`DISKUTIL_TIMEOUT`].
 //!
 //! Sizes are in decimal units (1 GB = 10^9 bytes), as Finder, About This Mac and `df -H` show
 //! them, not the GiB of `df -h`.
 
+use std::io::Read as _;
 use std::process::Command;
+use std::process::Stdio;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use serde::Serialize;
 
@@ -23,6 +29,14 @@ const DISKUTIL: &str = "/usr/sbin/diskutil";
 
 /// The `PATH` diskutil runs with: launchd's default, so nothing from the user's shell runs.
 const FIXED_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// How long diskutil may take before the row is left out. Arbitrary: ten times the 0.3 seconds
+/// it takes on a 2026 Mac laptop, and short enough that a stuck disk service does not hold up the
+/// popover, which waits for the disk with the rest of its overview.
+const DISKUTIL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How often the deadline is checked. Arbitrary: small beside diskutil's 0.3 seconds.
+const POLL: Duration = Duration::from_millis(10);
 
 /// The startup disk as the popover shows it. Its fields are private so that only
 /// `Disk::new` builds one, keeping free at most the total and the shares summing to 100; the
@@ -76,18 +90,51 @@ impl Disk {
 /// Reads the startup disk with diskutil. `None` when diskutil fails or its output lacks the
 /// name or the APFS container's sizes; the popover then hides the row.
 ///
-/// Spawns diskutil and waits for it, about 0.3 seconds.
+/// Spawns diskutil and waits for it, about 0.3 seconds; one that takes longer than
+/// [`DISKUTIL_TIMEOUT`] is killed and gives `None`.
 pub fn startup_disk() -> Option<Disk> {
-    let out = Command::new(DISKUTIL)
+    let mut diskutil = Command::new(DISKUTIL);
+    diskutil
         .args(["info", "-plist", "/"])
         .env_clear()
-        .env("PATH", FIXED_PATH)
-        .output()
+        .env("PATH", FIXED_PATH);
+    let out = stdout_within(&mut diskutil, DISKUTIL_TIMEOUT)?;
+    parse_info(&String::from_utf8(out).ok()?)
+}
+
+/// What `command` prints, if it exits successfully within `timeout`. Past it, the command is
+/// killed and the answer is `None`.
+fn stdout_within(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
         .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_info(&String::from_utf8(out.stdout).ok()?)
+    // Read on its own thread, so output larger than the pipe's buffer cannot stall the
+    // command while this side waits for it to exit. It ends at EOF, once the command exits or
+    // is killed.
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let reader = thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).ok().map(|_| out)
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(POLL),
+            Ok(None) | Err(_) => {
+                // Best effort: the child may have exited since the check, and either way the
+                // answer is None.
+                drop(child.kill());
+                drop(child.wait());
+                return None;
+            }
+        }
+    };
+    let out = reader.join().expect("the reader thread does not panic")?;
+    status.success().then_some(out)
 }
 
 /// The disk from the plist `diskutil info -plist /` prints.
@@ -202,6 +249,26 @@ mod tests {
         assert_ne!(disk.name, "");
         assert!(disk.total > 0);
         assert!(disk.free <= disk.total);
+    }
+
+    #[test]
+    fn gives_up_on_a_command_that_outlives_its_deadline() {
+        let mut slow = Command::new("/bin/sh");
+        slow.args(["-c", "echo early; sleep 5"]);
+        assert_eq!(stdout_within(&mut slow, Duration::from_millis(100)), None);
+    }
+
+    #[test]
+    fn returns_what_a_command_prints_only_when_it_succeeds() {
+        let mut ok = Command::new("/bin/sh");
+        ok.args(["-c", "echo done"]);
+        assert_eq!(
+            stdout_within(&mut ok, DISKUTIL_TIMEOUT),
+            Some(b"done\n".to_vec())
+        );
+        let mut failed = Command::new("/bin/sh");
+        failed.args(["-c", "echo partial; exit 1"]);
+        assert_eq!(stdout_within(&mut failed, DISKUTIL_TIMEOUT), None);
     }
 
     #[test]
