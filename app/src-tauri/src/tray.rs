@@ -119,8 +119,8 @@ pub(crate) fn hide_on_blur(window: &Window) {
 ///
 /// The owner decided on 2026-11-11 that only critical and high findings colour the icon: red
 /// for critical, orange for high, and green when neither is open, medium and low included,
-/// which stay visible in the popover. A sweep or a fix is blue, and a failed sweep keeps the
-/// monochrome mark with an arm missing. So there is no look for medium or low.
+/// which stay visible in the popover. A sweep or a fix keeps the cyan sweeping look, and a failed
+/// sweep the monochrome mark with an arm missing. So there is no look for medium or low.
 #[derive(Debug, Clone, Copy)]
 enum Look {
     Critical,
