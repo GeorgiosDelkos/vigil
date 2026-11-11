@@ -2,13 +2,14 @@
 # house additions. Runs whenever a PR is opened or updated,
 # and daily on main:
 # - fmt: checks that the code is formatted according to rustfmt
-# - clippy: on macOS, no warnings on stable (blocking); beta, daily only, is non-blocking early
-#   warning of new lints. RUSTUP_TOOLCHAIN overrides the pin in rust-toolchain.toml.
+# - clippy: on macOS, no warnings on stable (blocking); beta, daily only, is early warning of
+#   new lints. RUSTUP_TOOLCHAIN overrides the pin in rust-toolchain.toml.
 # - release: the release build on macOS, the only platform the app ships on
 permissions:
   contents: read
-# PRs run only the stable checks; the toolchains a PR cannot break run daily (decided with the
-# owner on 2026-11-11 to cut macOS minutes). There is no push trigger: a merge reran every check
+# PRs run only the stable checks; beta and nightly run daily, so a PR that trips a new beta lint
+# or test failure is reported the next morning, not on the PR (decided with the owner on
+# 2026-11-11 to cut macOS minutes). There is no push trigger: a merge reran every check
 # on code its PR had just passed. The daily run tests main instead and keeps the README badge,
 # which shows the latest run on main, current. workflow_dispatch runs it by hand.
 on:
@@ -20,8 +21,7 @@ on:
 # A draft PR gets no CI: it is opened for its review, whose fixes would supersede the run. Every
 # job that runs on PRs, here and in the other workflows, carries
 # `if: ${{ !github.event.pull_request.draft }}`, and `ready_for_review` above starts the one run
-# that counts. The skip is safe for required checks
-# only because no job has `needs:`: a job's check run is created when its run queues, so the
+# that counts. The skip is safe for required checks only because no job has `needs:`: a job's check run is created when its run queues, so the
 # skipped (green) result on a draft is replaced the moment the PR is marked ready. A job behind
 # `needs:` gets its check run only after its needs finish, which leaves that stale green showing
 # meanwhile; in a workflow with such a required job, fail the draft in the first job instead.
@@ -58,9 +58,8 @@ jobs:
       RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     name: ${{ matrix.toolchain }} / clippy
     # Stable blocks the PR. Beta gives early warning of new lints, which are regularly introduced
-    # in beta channels, without failing the PR. A PR cannot break beta, so beta runs only on the
-    # daily schedule and by hand.
-    continue-on-error: ${{ matrix.toolchain == 'beta' }}
+    # in beta channels; it runs only on the daily schedule and by hand, so it never blocks a PR.
+    # No continue-on-error: there it would turn the only warning, a failed daily run, green.
     strategy:
       fail-fast: false
       matrix:
