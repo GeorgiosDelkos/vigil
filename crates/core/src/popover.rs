@@ -292,13 +292,15 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
     all.sort_by_key(|item| risk(item.known_exploited, item.severity, item.first_seen));
 
     let needs_you = all.iter().filter(|item| item.needs_you).count();
+    // One test for both fields, so the centre's number and the tab it opens cannot disagree.
+    let only_reported = all.is_empty() && !reported.is_empty();
     PopoverView {
-        list_tab: if all.is_empty() && !reported.is_empty() {
+        list_tab: if only_reported {
             ListTab::Fixed
         } else {
             ListTab::Needs
         },
-        to_confirm: (all.is_empty() && !reported.is_empty()).then(|| Figure {
+        to_confirm: only_reported.then(|| Figure {
             count: reported.len(),
             label: "to confirm".to_owned(),
         }),
