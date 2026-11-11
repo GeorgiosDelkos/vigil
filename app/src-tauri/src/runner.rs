@@ -551,9 +551,9 @@ where
 }
 
 /// The status a fix leaves when it ends with `done`: its results, under the title and place
-/// `status`, the running fix's, showed; or, when it ended without results, the reason, kept
-/// until the popover shows it. Only the fix's own thread changes a [`Status::Fixing`], so
-/// `status` is one; anything else is left as it is.
+/// `status`, the running fix's, showed; or, when it ended without results, [`Status::Failed`]
+/// with the reason. Only the fix's own thread changes a [`Status::Fixing`], so `status` is
+/// one; anything else is left as it is.
 fn finished(status: &Status, done: Result<FixRun, String>) -> Status {
     match (status, done) {
         (Status::Fixing { title, place, .. }, Ok(run)) => Status::Fixed {
