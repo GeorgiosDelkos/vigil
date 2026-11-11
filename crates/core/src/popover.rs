@@ -12,6 +12,13 @@
 //! severity, then the newest. Findings inside an item are ranked the same way, and the first
 //! leads it: its fix is the item's. An item "needs you" when any of its findings is
 //! exploited, or its worst is critical or high.
+//!
+//! An item whose fix the agent reported done is not open. The owner verified such a fix by
+//! hand and decided on 2026-11-11, replacing the 2026-11-08 rule that kept it counted, that it
+//! shows green and says it is fixed. It is a [`ReportedFix`], kept apart from the open
+//! [`Listed`] items, so nothing counts it by mistake. The next sweep still confirms it: one
+//! that still finds it marks it "Still found after a fix" and it is open again, and one that
+//! no longer finds it lists it under [`PopoverView::fixed`].
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -20,6 +27,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::findings::Severity;
+use crate::lifecycle::FixState;
 use crate::lifecycle::Fixed;
 use crate::lifecycle::Latest;
 use crate::lifecycle::Open;
@@ -29,8 +37,10 @@ use crate::lifecycle::Open;
 pub struct PopoverView {
     /// Every open item across targets, ranked by risk.
     pub items: Vec<Listed>,
-    /// Confirmed fixes that finished in the last 30 days, newest first. A fix only reported
-    /// is still in `items`, marked by its lead's `fix_state`.
+    /// Items whose fix the agent reported done, newest fix first; the next sweep confirms
+    /// them. Not open, so counted nowhere else.
+    pub reported: Vec<ReportedFix>,
+    /// Confirmed fixes that finished in the last 30 days, newest first.
     pub fixed: Vec<FixedListed>,
     /// How many items need the user.
     pub needs_you: usize,
@@ -38,7 +48,7 @@ pub struct PopoverView {
     pub exploited: usize,
     /// How many items there are at each worst severity.
     pub counts: Counts,
-    /// The top line: "2 findings need you", "All clear".
+    /// The top line: "2 findings need you", "1 fix to confirm", "All clear".
     pub headline: String,
     /// When the newest sweep of any target started.
     pub last_swept: Option<Timestamp>,
@@ -46,7 +56,7 @@ pub struct PopoverView {
     /// headline already says "Not swept yet", so the line under it does not repeat it. None
     /// once a sweep time is known, when the line says how long ago that was.
     pub first_sweep_hint: Option<String>,
-    /// Whether a sweep ran and nothing is open.
+    /// Whether a sweep ran, nothing is open, and no reported fix waits for the next sweep.
     pub all_clear: bool,
     /// How many targets there are: "1 target", "3 targets".
     pub target_count: String,
@@ -96,6 +106,32 @@ impl Listed {
     pub fn findings(&self) -> impl Iterator<Item = &Open> {
         std::iter::once(&self.lead).chain(&self.others)
     }
+}
+
+/// One target's items: the open ones, and those whose fix the agent reported done.
+#[derive(Debug)]
+pub struct Items {
+    /// The open items, ranked by risk.
+    pub open: Vec<Listed>,
+    /// The items whose fix was reported, ranked the same way.
+    pub reported: Vec<ReportedFix>,
+}
+
+/// An item whose lead's last fix ended `fixed`, planned from the report the item is in, with
+/// no pull request: the fix is done on the target, and the next sweep confirms it.
+///
+/// The lead decides because Fix runs the lead's key, so the item's fix is recorded under that
+/// key alone; the other findings in the component never get that run's state.
+#[derive(Debug, Serialize)]
+pub struct ReportedFix {
+    /// The item as the sweep found it.
+    pub item: Listed,
+    /// What its row says: "Fixed · the next sweep confirms it".
+    pub status: String,
+    /// The agent's one-line summary of what it did.
+    pub summary: String,
+    /// When the fix finished.
+    pub fixed_at: Timestamp,
 }
 
 /// A fixed finding, with its target.
@@ -176,18 +212,21 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
     let dismissed = latest.iter().map(|t| t.dismissed).sum();
     let mut targets = Vec::new();
     let mut fixed = Vec::new();
+    let mut reported = Vec::new();
     let mut all = Vec::new();
     for mut target in latest {
         let label = target_label(&target.target).to_owned();
         let listed = items(&label, std::mem::take(&mut target.open));
-        targets.push(target_line(&target, &listed));
+        targets.push(target_line(&target, &listed.open));
         fixed.extend(target.fixed.into_iter().map(|fixed| FixedListed {
             fixed,
             target: label.clone(),
         }));
-        all.extend(listed);
+        all.extend(listed.open);
+        reported.extend(listed.reported);
     }
     fixed.sort_by_key(|f| Reverse(f.fixed.fixed_at));
+    reported.sort_by_key(|r| Reverse(r.fixed_at));
     // Stable, so items that tie keep their targets' sweep order.
     all.sort_by_key(|item| risk(item.known_exploited, item.severity, item.first_seen));
 
@@ -196,8 +235,8 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
         needs_you,
         exploited: all.iter().filter(|item| item.known_exploited).count(),
         counts: Counts::of(&all),
-        headline: headline(needs_you, all.len(), last_swept),
-        all_clear: all.is_empty() && last_swept.is_some(),
+        headline: headline(needs_you, all.len(), reported.len(), last_swept),
+        all_clear: all.is_empty() && reported.is_empty() && last_swept.is_some(),
         first_sweep_hint: last_swept
             .is_none()
             .then(|| "Sweep checks your targets against the newest advisories.".to_owned()),
@@ -206,6 +245,7 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
             n => format!("{n} targets"),
         },
         items: all,
+        reported,
         fixed,
         last_swept,
         targets,
@@ -214,9 +254,9 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
 }
 
 /// One target's open findings and issues as items, ranked by risk: one per installed
-/// component, holding every finding in it, and one per issue. `target` is the label each item
-/// carries.
-pub fn items(target: &str, open: Vec<Open>) -> Vec<Listed> {
+/// component, holding every finding in it, and one per issue, with the items whose fix was
+/// reported set apart. `target` is the label each item carries.
+pub fn items(target: &str, open: Vec<Open>) -> Items {
     let mut groups: Vec<Vec<Open>> = Vec::new();
     let mut by_component = BTreeMap::new();
     for finding in open {
@@ -235,7 +275,36 @@ pub fn items(target: &str, open: Vec<Open>) -> Vec<Listed> {
         .map(|findings| listed(target, findings))
         .collect();
     items.sort_by_key(|item| risk(item.known_exploited, item.severity, item.first_seen));
-    items
+    let mut split = Items {
+        open: Vec::new(),
+        reported: Vec::new(),
+    };
+    for item in items {
+        match fix_done(&item) {
+            Some((summary, fixed_at)) => split.reported.push(ReportedFix {
+                item,
+                status: "Fixed · the next sweep confirms it".to_owned(),
+                summary,
+                fixed_at,
+            }),
+            None => split.open.push(item),
+        }
+    }
+    split
+}
+
+/// The agent's summary and when the fix finished, when `item`'s lead's fix was reported done;
+/// `None` while the item is open. A fix that opened a pull request lands only once that is
+/// merged, so its item stays open and counted.
+fn fix_done(item: &Listed) -> Option<(String, Timestamp)> {
+    match &item.lead.fix_state {
+        Some(FixState::Reported {
+            at,
+            summary,
+            pull_request: None,
+        }) => Some((summary.clone(), *at)),
+        Some(FixState::Reported { .. } | FixState::NotHeld { .. }) | None => None,
+    }
 }
 
 /// The item of `findings`, one or more in one component, or one issue.
@@ -344,11 +413,23 @@ fn checked(components: usize) -> String {
     }
 }
 
-fn headline(needs_you: usize, open: usize, last_swept: Option<Timestamp>) -> String {
+/// The top line. With nothing open but fixes reported, it says how many the next sweep
+/// confirms: "All clear" would claim more than the agent's word, and a count of open items
+/// would call fixed ones open.
+fn headline(
+    needs_you: usize,
+    open: usize,
+    reported: usize,
+    last_swept: Option<Timestamp>,
+) -> String {
     match (needs_you, open) {
         (0, 0) if last_swept.is_none() => "Not swept yet".to_owned(),
         (1, _) => "1 finding needs you".to_owned(),
-        (0, 0) => "All clear".to_owned(),
+        (0, 0) => match reported {
+            0 => "All clear".to_owned(),
+            1 => "1 fix to confirm".to_owned(),
+            n => format!("{n} fixes to confirm"),
+        },
         (0, n) => format!("{n} open, none urgent"),
         (n, _) => format!("{n} findings need you"),
     }
@@ -426,7 +507,8 @@ mod tests {
                 ffmpeg(2, Severity::Critical, 10),
                 ffmpeg(3, Severity::Critical, 20),
             ],
-        );
+        )
+        .open;
         let [item] = &listed[..] else {
             panic!("one component, one item: {listed:?}");
         };
@@ -469,7 +551,8 @@ mod tests {
                 open(4, Severity::Low, false, None),
                 open(5, Severity::Low, false, None),
             ],
-        );
+        )
+        .open;
         let shape: Vec<(Option<&str>, usize)> = listed
             .iter()
             .map(|i| (i.lead.version.as_deref(), 1 + i.others.len()))
@@ -503,7 +586,8 @@ mod tests {
                 pnpm(3, Severity::Medium, true),
                 new,
             ],
-        );
+        )
+        .open;
         let [item] = &listed[..] else {
             panic!("one component, one item: {listed:?}");
         };
@@ -592,6 +676,130 @@ mod tests {
         assert!(view.all_clear, "nothing is open");
     }
 
+    /// `finding` with a fix reported at second `at`, which opened `pull_request` if any.
+    fn fix_reported(mut finding: Open, at: i64, pull_request: Option<&str>) -> Open {
+        finding.fix_state = Some(FixState::Reported {
+            at: Timestamp::from_second(at).unwrap(),
+            summary: format!("fixed {}", finding.title),
+            pull_request: pull_request.map(str::to_owned),
+        });
+        finding
+    }
+
+    #[test]
+    fn a_reported_fix_is_not_open_and_counted_nowhere() {
+        let node = in_component(
+            open(1, Severity::Critical, true, None),
+            "node.js",
+            "22.22.2",
+        );
+        let view = popover_view(vec![target(
+            "github:o/r",
+            Some(100),
+            vec![
+                fix_reported(node, 50, None),
+                fix_reported(open(2, Severity::High, false, None), 60, Some("pr 7")),
+                open(3, Severity::Low, false, None),
+            ],
+            0,
+        )]);
+
+        assert_eq!(
+            keys(&view),
+            ["finding 2", "finding 3"],
+            "a fix with an open pull request has not landed, so it stays open"
+        );
+        let [reported] = &view.reported[..] else {
+            panic!("one fix reported: {:?}", view.reported);
+        };
+        assert_eq!(reported.item.name, "node.js");
+        assert_eq!(reported.item.target, "o/r");
+        assert_eq!(reported.status, "Fixed · the next sweep confirms it");
+        assert_eq!(reported.summary, "fixed finding 1");
+        assert_eq!(reported.fixed_at, Timestamp::from_second(50).unwrap());
+
+        assert_eq!((view.needs_you, view.exploited), (1, 0));
+        let c = &view.counts;
+        assert_eq!((c.critical, c.high, c.medium, c.low), (0, 1, 0, 1));
+        assert_eq!(view.headline, "1 finding needs you");
+        let line = &view.targets[0];
+        assert_eq!(
+            (line.open, line.counts.critical, line.counts.high),
+            (2, 0, 1)
+        );
+        assert!(!view.all_clear);
+    }
+
+    #[test]
+    fn with_only_reported_fixes_left_the_headline_counts_fixes_to_confirm() {
+        let one = popover_view(vec![target(
+            "mac",
+            Some(100),
+            vec![fix_reported(open(1, Severity::High, false, None), 10, None)],
+            0,
+        )]);
+        assert!(one.items.is_empty());
+        assert_eq!(one.headline, "1 fix to confirm");
+        assert!(!one.all_clear, "not clear until a sweep confirms the fix");
+        assert_eq!((one.needs_you, one.targets[0].open), (0, 0));
+
+        let two = popover_view(vec![target(
+            "mac",
+            Some(100),
+            vec![
+                fix_reported(open(1, Severity::High, false, None), 10, None),
+                fix_reported(open(2, Severity::Low, false, None), 20, None),
+            ],
+            0,
+        )]);
+        assert_eq!(two.headline, "2 fixes to confirm");
+        let titles: Vec<&str> = two
+            .reported
+            .iter()
+            .map(|r| r.item.lead.title.as_str())
+            .collect();
+        assert_eq!(titles, ["finding 2", "finding 1"], "newest fix first");
+    }
+
+    #[test]
+    fn the_lead_s_fix_decides_whether_an_item_is_fixed() {
+        let curl = |key, severity| in_component(open(key, severity, false, None), "curl", "8");
+        let listed = items(
+            "This Mac",
+            vec![
+                curl(1, Severity::High),
+                fix_reported(curl(2, Severity::Low), 10, None),
+            ],
+        );
+        assert_eq!(
+            listed.open.len(),
+            1,
+            "Fix runs the lead's key; this lead has none"
+        );
+        assert!(listed.reported.is_empty());
+
+        let listed = items(
+            "This Mac",
+            vec![
+                fix_reported(curl(1, Severity::High), 10, None),
+                curl(2, Severity::Low),
+            ],
+        );
+        assert!(listed.open.is_empty());
+        assert_eq!(titles(&listed.reported[0].item.others), ["finding 2"]);
+
+        let mut not_held = curl(1, Severity::High);
+        not_held.fix_state = Some(FixState::NotHeld {
+            at: Timestamp::UNIX_EPOCH,
+        });
+        let listed = items("This Mac", vec![not_held]);
+        assert_eq!(
+            listed.open.len(),
+            1,
+            "a fix that did not hold is open again"
+        );
+    }
+
     #[test]
     fn items_rank_exploited_then_by_severity_then_newest() {
         let view = popover_view(vec![
@@ -677,21 +885,30 @@ mod tests {
 
     #[test]
     fn the_headline_names_what_needs_the_user() {
-        assert_eq!(headline(0, 0, Some(Timestamp::UNIX_EPOCH)), "All clear");
-        assert_eq!(headline(0, 0, None), "Not swept yet");
+        assert_eq!(headline(0, 0, 0, Some(Timestamp::UNIX_EPOCH)), "All clear");
+        assert_eq!(headline(0, 0, 0, None), "Not swept yet");
         assert_eq!(
-            headline(0, 1, Some(Timestamp::UNIX_EPOCH)),
+            headline(0, 1, 0, Some(Timestamp::UNIX_EPOCH)),
             "1 open, none urgent"
         );
         assert_eq!(
-            headline(0, 3, Some(Timestamp::UNIX_EPOCH)),
+            headline(0, 3, 0, Some(Timestamp::UNIX_EPOCH)),
             "3 open, none urgent"
         );
         assert_eq!(
-            headline(1, 4, Some(Timestamp::UNIX_EPOCH)),
+            headline(1, 4, 0, Some(Timestamp::UNIX_EPOCH)),
             "1 finding needs you"
         );
-        assert_eq!(headline(2, 4, None), "2 findings need you");
+        assert_eq!(headline(2, 4, 0, None), "2 findings need you");
+        let swept = Some(Timestamp::UNIX_EPOCH);
+        assert_eq!(headline(0, 0, 1, swept), "1 fix to confirm");
+        assert_eq!(headline(0, 0, 3, swept), "3 fixes to confirm");
+        assert_eq!(
+            headline(0, 2, 1, swept),
+            "2 open, none urgent",
+            "open comes first"
+        );
+        assert_eq!(headline(0, 0, 1, None), "Not swept yet");
         let view = popover_view(Vec::new());
         assert_eq!(view.headline, "Not swept yet");
         assert_eq!(view.last_swept, None);

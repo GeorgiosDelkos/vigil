@@ -373,7 +373,9 @@ pub struct Fixed {
 #[derive(Debug, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum FixState {
-    /// A fix of this very report ended `fixed`; the next sweep confirms it. Still counted.
+    /// A fix of this very report ended `fixed`; the next sweep confirms it. Without a pull
+    /// request the popover shows its item as fixed, not open
+    /// ([`ReportedFix`](crate::popover::ReportedFix)).
     Reported {
         /// When it finished.
         at: Timestamp,
