@@ -1061,7 +1061,8 @@ pub enum FixError {
     },
     /// A sweep or a dismissal changed a Fix all's items while the list was being confirmed.
     #[error(
-        "a sweep or dismissal changed it while the list was being confirmed; run `fix all {target}` again to see the current fixes"
+        "a sweep or dismissal changed it while the list was being confirmed; run `fix all \
+         {target}` again to see the current fixes"
     )]
     ListChanged {
         /// The target.
