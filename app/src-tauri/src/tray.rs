@@ -120,17 +120,18 @@ pub(crate) fn hide_on_blur(window: &Window) {
 /// The owner decided on 2026-11-11 that only critical and high findings colour the icon: red
 /// for critical, orange for high, and green when neither is open, medium and low included,
 /// which stay visible in the popover. A sweep or a fix keeps the cyan sweeping look, and a
-/// failed sweep the monochrome mark with an arm missing. So there is no look for medium or low.
+/// failure of any kind the monochrome mark with an arm missing. So there is no look for medium
+/// or low.
 ///
 /// The owner clarified the same day that a failure must not hide an open critical: with a
 /// critical or high finding open in the last reports, the icon stays red or orange after a
 /// failed sweep, and only the tooltip and the popover's banner tell of the failure. The
 /// missing arm shows only when nothing critical or high is open, which is why `Clear` carries
-/// no [`LastSweep`]: a failure with nothing to show in colour is `Failed`.
+/// no [`Health`]: a failure with nothing to show in colour is `Failed`.
 #[derive(Debug, Clone, Copy)]
 enum Look {
-    Critical(LastSweep),
-    High(LastSweep),
+    Critical(Health),
+    High(Health),
     Clear,
     Sweeping,
     Fixing,
@@ -138,22 +139,21 @@ enum Look {
 }
 
 /// Whether the runner's status is `Failed`: the last sweep stopped, a target in it got no
-/// verdict, or the schedule could not be checked. The tooltips say "something failed", not
-/// "the last sweep failed", as the failure need not be a sweep's.
+/// verdict, or the schedule could not be checked.
 #[derive(Debug, Clone, Copy)]
-enum LastSweep {
-    Succeeded,
+enum Health {
+    Ok,
     Failed,
 }
 
 impl Look {
     /// The look of an app running nothing, whose worst open item is `worst`.
-    fn of(worst: Option<Severity>, last: LastSweep) -> Self {
+    fn of(worst: Option<Severity>, last: Health) -> Self {
         match (worst, last) {
             (Some(Severity::Critical), _) => Self::Critical(last),
             (Some(Severity::High), _) => Self::High(last),
-            (Some(Severity::Medium | Severity::Low) | None, LastSweep::Succeeded) => Self::Clear,
-            (Some(Severity::Medium | Severity::Low) | None, LastSweep::Failed) => Self::Failed,
+            (Some(Severity::Medium | Severity::Low) | None, Health::Ok) => Self::Clear,
+            (Some(Severity::Medium | Severity::Low) | None, Health::Failed) => Self::Failed,
         }
     }
 
@@ -177,12 +177,12 @@ impl Look {
 
     fn tooltip(self) -> &'static str {
         match self {
-            Self::Critical(LastSweep::Succeeded) => "Vigil: critical findings open",
-            Self::Critical(LastSweep::Failed) => {
+            Self::Critical(Health::Ok) => "Vigil: critical findings open",
+            Self::Critical(Health::Failed) => {
                 "Vigil: critical findings open; something failed, open Vigil to see it"
             }
-            Self::High(LastSweep::Succeeded) => "Vigil: high findings open",
-            Self::High(LastSweep::Failed) => {
+            Self::High(Health::Ok) => "Vigil: high findings open",
+            Self::High(Health::Failed) => {
                 "Vigil: high findings open; something failed, open Vigil to see it"
             }
             Self::Clear => "Vigil: no critical or high findings open",
@@ -283,8 +283,8 @@ fn look(app: &AppHandle) -> Look {
     let last = match runner.status() {
         Status::Sweeping { .. } => return Look::Sweeping,
         Status::Fixing { .. } => return Look::Fixing,
-        Status::Failed { .. } => LastSweep::Failed,
-        Status::Idle => LastSweep::Succeeded,
+        Status::Failed { .. } => Health::Failed,
+        Status::Idle => Health::Ok,
     };
     let Ok(config) = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
     else {
@@ -330,10 +330,10 @@ mod tests {
     use super::*;
 
     const LOOKS: [Look; 8] = [
-        Look::Critical(LastSweep::Succeeded),
-        Look::Critical(LastSweep::Failed),
-        Look::High(LastSweep::Succeeded),
-        Look::High(LastSweep::Failed),
+        Look::Critical(Health::Ok),
+        Look::Critical(Health::Failed),
+        Look::High(Health::Ok),
+        Look::High(Health::Failed),
         Look::Clear,
         Look::Sweeping,
         Look::Fixing,
@@ -342,15 +342,12 @@ mod tests {
 
     #[test]
     fn only_critical_and_high_colour_the_icon() {
-        let of = |worst| Look::of(worst, LastSweep::Succeeded);
+        let of = |worst| Look::of(worst, Health::Ok);
         assert!(matches!(
             of(Some(Severity::Critical)),
-            Look::Critical(LastSweep::Succeeded)
+            Look::Critical(Health::Ok)
         ));
-        assert!(matches!(
-            of(Some(Severity::High)),
-            Look::High(LastSweep::Succeeded)
-        ));
+        assert!(matches!(of(Some(Severity::High)), Look::High(Health::Ok)));
         assert!(matches!(of(Some(Severity::Medium)), Look::Clear));
         assert!(matches!(of(Some(Severity::Low)), Look::Clear));
         assert!(matches!(of(None), Look::Clear));
@@ -373,25 +370,25 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_sweep_keeps_an_open_critical_or_high_in_colour() {
-        let of = |worst| Look::of(worst, LastSweep::Failed);
+    fn a_failure_keeps_an_open_critical_or_high_in_colour() {
+        let of = |worst| Look::of(worst, Health::Failed);
         let critical = of(Some(Severity::Critical));
-        assert!(matches!(critical, Look::Critical(LastSweep::Failed)));
+        assert!(matches!(critical, Look::Critical(Health::Failed)));
         assert_eq!(
             critical.tooltip(),
             "Vigil: critical findings open; something failed, open Vigil to see it"
         );
         let high = of(Some(Severity::High));
-        assert!(matches!(high, Look::High(LastSweep::Failed)));
+        assert!(matches!(high, Look::High(Health::Failed)));
         assert_eq!(
             high.tooltip(),
             "Vigil: high findings open; something failed, open Vigil to see it"
         );
         // The same coloured icon as after a sweep that succeeded; only the tooltip differs.
         for bar in [Bar::Dark, Bar::Light] {
-            let succeeded = Look::of(Some(Severity::Critical), LastSweep::Succeeded);
+            let succeeded = Look::of(Some(Severity::Critical), Health::Ok);
             assert_eq!(critical.png(bar), succeeded.png(bar));
-            let succeeded = Look::of(Some(Severity::High), LastSweep::Succeeded);
+            let succeeded = Look::of(Some(Severity::High), Health::Ok);
             assert_eq!(high.png(bar), succeeded.png(bar));
         }
         // With nothing critical or high open the failure shows as the missing arm.
@@ -402,20 +399,20 @@ mod tests {
 
     #[test]
     fn the_worst_open_item_of_the_popover_decides() {
-        let of = |open| Look::of(popover_view(swept(open)).worst(), LastSweep::Succeeded);
+        let of = |open| Look::of(popover_view(swept(open)).worst(), Health::Ok);
         assert!(matches!(
             of(vec![
                 finding(1, Severity::Low),
                 finding(2, Severity::Critical)
             ]),
-            Look::Critical(LastSweep::Succeeded)
+            Look::Critical(Health::Ok)
         ));
         assert!(matches!(
             of(vec![
                 finding(1, Severity::Medium),
                 finding(2, Severity::High)
             ]),
-            Look::High(LastSweep::Succeeded)
+            Look::High(Health::Ok)
         ));
         // That a reported fix is not open is the core's `PopoverView::worst`, tested there.
         assert!(matches!(of(Vec::new()), Look::Clear));
