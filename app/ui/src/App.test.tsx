@@ -95,6 +95,55 @@ const two = () =>
     first_sweep_hint: null,
   });
 
+/** A repository and a server that both read "web", each with its own items as Rust keys them,
+ * a fix reported on the server, and This Mac with nothing open. */
+function sameLabel(): Overview {
+  const [line] = overview().targets;
+  if (line === undefined) {
+    throw new Error("the fixture has a target");
+  }
+  const swept = "2026-11-06T11:00:00Z";
+  const server = { target: "web", target_key: "server:web" };
+  return overview({
+    items: [
+      finding("g", { name: "glibc", severity: "critical", ...server }),
+      finding("l", { name: "lodash", target: "web", target_key: "github:me/web" }),
+      finding("n", { name: "nginx", severity: "medium", needs_you: false, ...server }),
+    ],
+    reported: [reportedFix(finding("z", { name: "zlib", ...server }))],
+    needs_you: 2,
+    counts: { critical: 1, high: 1, medium: 1, low: 0 },
+    headline: "2 findings need you",
+    last_swept: swept,
+    first_sweep_hint: null,
+    targets: [
+      {
+        ...line,
+        key: "github:me/web",
+        label: "web",
+        kind: "repo",
+        swept,
+        checked: "3 components checked",
+        counts: { critical: 0, high: 1, medium: 0, low: 0 },
+        open: 1,
+      },
+      {
+        ...line,
+        key: "server:web",
+        label: "web",
+        kind: "server",
+        swept,
+        checked: "139 components checked",
+        counts: { critical: 1, high: 0, medium: 1, low: 0 },
+        open: 2,
+        to_confirm: "1 fix to confirm",
+        dismissed: 1,
+      },
+      { ...line, swept, checked: "12 components checked" },
+    ],
+  });
+}
+
 /** How often the spiral's canvas was painted, and the browser events that repaint it. */
 const canvas = vi.hoisted(() => ({
   paints: 0,
@@ -649,18 +698,12 @@ describe("a component", () => {
     expect((await screen.findByRole("heading")).textContent).toBe("curl 8.11.0");
   });
 
-  it("is what the main view counts and names first", async () => {
+  it("is what the main view counts", async () => {
     shown = grouped();
     answer();
     render(() => <App />);
     const count = await screen.findByTitle("Show details");
     expect(count.textContent).toBe("1need you1 exploitedShow details");
-    const urgent = screen.getByText("ffmpeg 8.1.2").closest("button") as HTMLElement;
-    expect(
-      within(urgent).getByText("exploited in the wild · 3 advisories · This Mac"),
-    ).toBeTruthy();
-    fireEvent.click(urgent);
-    expect(await screen.findByRole("list", { name: "Advisories" })).toBeTruthy();
   });
 
   it("lists each advisory with its own severity, explanation and evidence", async () => {
@@ -834,6 +877,7 @@ describe("the tabs", () => {
       ...two(),
       targets: [
         {
+          key: "mac",
           label: "This Mac",
           kind: "mac",
           swept: "2026-11-06T11:00:00Z",
@@ -844,6 +888,7 @@ describe("the tabs", () => {
           dismissed: 1,
         },
         {
+          key: "server:web",
           label: "web",
           kind: "server",
           swept: "2026-11-06T11:00:00Z",
@@ -854,6 +899,7 @@ describe("the tabs", () => {
           dismissed: 0,
         },
         {
+          key: "github:me/app",
           label: "me/app",
           kind: "repo",
           swept: null,
@@ -864,6 +910,7 @@ describe("the tabs", () => {
           dismissed: 0,
         },
         {
+          key: "server:db",
           label: "db",
           kind: "server",
           swept: "2026-11-06T11:00:00Z",
@@ -909,8 +956,8 @@ describe("the tabs", () => {
       "true",
     );
     // Long lists scroll in their own focusable pane, under the summary and tabs.
-    expect(screen.getByRole("list", { name: "Targets" }).classList.contains("pane")).toBe(true);
-    expect(screen.getByRole("list", { name: "Targets" }).tabIndex).toBe(0);
+    expect(screen.getByRole("group", { name: "Targets" }).classList.contains("pane")).toBe(true);
+    expect(screen.getByRole("group", { name: "Targets" }).tabIndex).toBe(0);
     expect(
       within(listTarget("me/app")).getByText("not swept yet", { selector: ".tsub" }),
     ).toBeTruthy();
@@ -1210,7 +1257,7 @@ describe("state across commands", () => {
 });
 
 describe("the main view", () => {
-  it("shows what needs you, the most urgent finding and the targets", async () => {
+  it("shows what needs you and the targets, and no finding", async () => {
     shown = two();
     answer();
     render(() => <App />);
@@ -1218,8 +1265,9 @@ describe("the main view", () => {
     expect(within(count).getByText("2")).toBeTruthy();
     expect(within(count).getByText("need you")).toBeTruthy();
     expect(within(count).getByText("1 exploited")).toBeTruthy();
-    const urgent = screen.getByText("openssl 1.0.0").closest("button") as HTMLElement;
-    expect(within(urgent).getByText("exploited in the wild · This Mac")).toBeTruthy();
+    // The owner removed the most urgent finding's card (2026-11-11): a target leads to it.
+    expect(screen.queryByText(/openssl/)).toBeNull();
+    expect(document.querySelector(".orbit .recent")).toBeNull();
     expect(screen.getByRole("button", { name: /^This Mac/ })).toBeTruthy();
     expect(screen.getByText(/^swept .* ago$/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sweep now" })).toBeTruthy();
@@ -1227,16 +1275,6 @@ describe("the main view", () => {
     // The settings menu moves to the top; the footer would not fit under the spiral.
     expect(document.querySelector(".foot")).toBeNull();
     expect(screen.getByRole("button", { name: "Settings" })).toBeTruthy();
-  });
-
-  it("shows the next open item, not a reported fix, as the urgent card", async () => {
-    const node = finding("n", { name: "node.js", version: "22.22.2", known_exploited: true });
-    shown = { ...two(), reported: [reportedFix(node)] };
-    answer();
-    render(() => <App />);
-    await screen.findByTitle("Show details");
-    expect(screen.getByText("openssl 1.0.0").closest("button")).not.toBeNull();
-    expect(screen.queryByText(/node\.js/)).toBeNull();
   });
 
   it("with only reported fixes left, shows them to confirm, green, and opens Fixed", async () => {
@@ -1264,7 +1302,7 @@ describe("the main view", () => {
     expect(count.textContent).toBe("1to confirmShow details");
     expect(within(count).getByText("1").classList.contains("n")).toBe(true);
     expect(within(count).getByText("to confirm").classList.contains("l")).toBe(true);
-    expect(document.querySelector(".urgent")).toBeNull();
+    expect(document.querySelector(".recent")).toBeNull();
     expect(screen.queryByText(/node\.js/)).toBeNull();
     expect(sceneOf(shown)).toEqual({ mood: "clear" });
     expect(sceneOf(overview())).toEqual({ mood: "unswept" });
@@ -1303,7 +1341,6 @@ describe("the main view", () => {
     render(() => <App />);
     const count = await screen.findByTitle("Show details");
     expect(count.textContent).toBe("1openShow details");
-    expect(screen.getByText("low · This Mac")).toBeTruthy();
   });
 
   it("says when nothing was swept yet", async () => {
@@ -1388,16 +1425,6 @@ describe("the main view", () => {
     expect(await screen.findByTitle("Show details")).toBeTruthy();
     fireEvent.click(screen.getByTitle("Show details"));
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(await screen.findByTitle("Show details")).toBeTruthy();
-  });
-
-  it("opens the most urgent finding, and goes back to the main view", async () => {
-    shown = two();
-    answer();
-    render(() => <App />);
-    fireEvent.click((await screen.findByText("openssl 1.0.0")).closest("button") as HTMLElement);
-    expect(await screen.findByText("Reachable from the app.")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "Back" }));
     expect(await screen.findByTitle("Show details")).toBeTruthy();
   });
 
@@ -1491,12 +1518,50 @@ describe("the main view", () => {
     expect(await screen.findByText("sweeping This Mac")).toBeTruthy();
   });
 
-  it("opens the list at the targets from a target", async () => {
-    shown = two();
+  it("opens a target's findings, then one's detail with Fix, and goes back step by step", async () => {
+    shown = sameLabel();
+    answer();
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: /^web, 2 open/ }));
+
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("web");
+    expect(screen.getByText(/^139 components checked · swept .* ago · 1 dismissed$/)).toBeTruthy();
+    // Picked by key: the repository also reads "web", and its lodash is not here.
+    expect(names()).toEqual(["glibc", "nginx"]);
+    const fixed = screen.getByRole("list", { name: "Fixed" });
+    expect(within(fixed).getByText("zlib")).toBeTruthy();
+    expect(within(fixed).getByText("Fixed · the next sweep confirms it")).toBeTruthy();
+
+    fireEvent.click(row("glibc"));
+    expect((await screen.findByRole("heading", { level: 2 })).textContent).toBe("glibc 1.0.0");
+    expect(screen.getByRole("button", { name: "Fix…" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(names()).toEqual(["glibc", "nginx"]);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByTitle("Show details")).toBeTruthy();
+  });
+
+  it("opens a target's findings from the list's Targets tab, and goes back to the tab", async () => {
+    shown = sameLabel();
+    answer();
+    await openList();
+    fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
+    fireEvent.click(listTarget("This Mac"));
+
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("This Mac");
+    expect(screen.getByText("Nothing is open.")).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Fixed" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByRole("tab", { name: /Targets/ }).getAttribute("aria-selected")).toBe("true");
+  });
+
+  it("says a target not swept yet has nothing to show", async () => {
+    shown = overview();
     answer();
     render(() => <App />);
     fireEvent.click(await screen.findByRole("button", { name: /^This Mac/ }));
-    expect(screen.getByRole("tab", { name: /Targets/ }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("not swept yet", { selector: ".sub" })).toBeTruthy();
+    expect(screen.getByText("Not swept yet.")).toBeTruthy();
   });
 
   it("sweeps and opens the report, and shows why the report did not open", async () => {

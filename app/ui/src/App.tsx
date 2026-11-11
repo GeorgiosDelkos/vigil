@@ -44,6 +44,7 @@ type View =
   | "settings"
   | "fixing"
   | "detail"
+  | "target"
   | "orbit"
   | "busy"
   | "problem"
@@ -51,7 +52,10 @@ type View =
   | "clear"
   | "list";
 
-function viewOf(o: Overview, open: { settings: boolean; detail: boolean; screen: Screen }): View {
+function viewOf(
+  o: Overview,
+  open: { settings: boolean; detail: boolean; target: boolean; screen: Screen },
+): View {
   if (open.settings) {
     return "settings";
   }
@@ -59,7 +63,11 @@ function viewOf(o: Overview, open: { settings: boolean; detail: boolean; screen:
   if (o.status.state === "fixing") {
     return "fixing";
   }
-  return open.detail ? "detail" : screenOf(o, open.screen);
+  if (open.detail) {
+    return "detail";
+  }
+  // A target's findings cover the screen it was opened from, which Back returns to.
+  return open.target ? "target" : screenOf(o, open.screen);
 }
 
 /** The main view or the list, unless a problem stops sweeps; a running sweep shows either. */
@@ -88,6 +96,8 @@ export function App() {
   const [screen, setScreen] = createSignal<Screen>("orbit");
   const [tab, setTab] = createSignal<Tab>("needs");
   const [selected, setSelected] = createSignal<string | null>(null);
+  // The key of the target whose findings show, over the main view or the list.
+  const [targetKey, setTargetKey] = createSignal<string | null>(null);
   const [done, setDone] = createSignal<FixDone | null>(null);
   const [error, setError] = createSignal<string | null>(null);
   // Settings open in the popover, at a section or at the list; `undefined` when closed.
@@ -123,6 +133,7 @@ export function App() {
 
   const listed = () => overview()?.items ?? [];
   const chosen = createMemo(() => listed().find((o) => o.id === selected()) ?? null);
+  const target = createMemo(() => overview()?.targets.find((t) => t.key === targetKey()) ?? null);
 
   const run = (action: () => Promise<unknown>) => {
     setError(null);
@@ -135,6 +146,7 @@ export function App() {
       : viewOf(o, {
           settings: settings() !== undefined,
           detail: chosen() !== null,
+          target: target() !== null,
           screen: screen(),
         });
   };
@@ -190,14 +202,21 @@ export function App() {
                 />
               )}
             </Match>
+            <Match when={view() === "target" && target()}>
+              {(line) => (
+                <>
+                  <Nav onBack={() => setTargetKey(null)} />
+                  <TargetFindings line={line()} overview={o()} now={now()} onOpen={setSelected} />
+                </>
+              )}
+            </Match>
             <Match when={view() === "orbit"}>
               <Orbit
                 overview={o()}
                 now={now()}
                 actions={{
                   onList: () => list(o().list_tab),
-                  onTargets: () => list("targets"),
-                  onFinding: setSelected,
+                  onTarget: setTargetKey,
                   onSweep: () => run(() => invoke("sweep_now")),
                   onCancel: () => run(() => invoke("cancel_sweep")),
                   onReport: () => run(() => invoke("open_report")),
@@ -232,7 +251,7 @@ export function App() {
             </Match>
             <Match when={view() === "clear"}>
               <Nav onBack={back} />
-              <AllClear overview={o()} now={now()} />
+              <AllClear overview={o()} now={now()} onTarget={setTargetKey} />
             </Match>
             <Match when={view() === "list"}>
               <Nav onBack={back} />
@@ -248,7 +267,7 @@ export function App() {
                   />
                 </Match>
                 <Match when={tab() === "targets"}>
-                  <Targets targets={o().targets} now={now()} />
+                  <Targets targets={o().targets} now={now()} onOpen={setTargetKey} />
                 </Match>
                 <Match when={tab() === "all"}>
                   <Rows
@@ -488,26 +507,33 @@ const SEVERITY_COLOURS: Readonly<Record<Severity, string>> = {
   low: "var(--low)",
 };
 
+/** What a target's last sweep checked, when, and how many findings are dismissed there:
+ * "139 components checked · swept 1 h ago · 2 dismissed". */
+function sweptLine(t: TargetLine, now: Date): string {
+  const parts =
+    t.swept === null ? ["not swept yet"] : [t.checked, `swept ${since(t.swept, now)} ago`];
+  if (t.dismissed > 0) {
+    parts.push(`${t.dismissed} dismissed`);
+  }
+  return parts.filter((part) => part !== null).join(" · ");
+}
+
 /** One row per target, laid out as the main view's target rows (Orbit.tsx): the name and its
- * open count, what was checked and when across the full width, then the counts and the bar. */
-function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
+ * open count, what was checked and when across the full width, then the counts and the bar.
+ * A row opens that target's findings. */
+function Targets(props: {
+  targets: readonly TargetLine[];
+  now: Date;
+  onOpen: (key: string) => void;
+}) {
   return (
-    <div class="group list pane" role="list" aria-label="Targets" tabindex="0">
+    <div class="group list pane" role="group" aria-label="Targets" tabindex="0">
       <For each={props.targets}>
         {(t) => (
-          <div class="trow target" role="listitem">
+          <button type="button" class="trow target" onClick={() => props.onOpen(t.key)}>
             <Icon name={t.kind} />
             <span class="tname">{t.label}</span>
-            <span class="tsub">
-              <Show when={t.swept} fallback="not swept yet">
-                {(swept) =>
-                  [t.checked, `swept ${since(swept(), props.now)} ago`]
-                    .filter((part) => part !== null)
-                    .join(" · ")
-                }
-              </Show>
-              <Show when={t.dismissed > 0}> · {t.dismissed} dismissed</Show>
-            </span>
+            <span class="tsub">{sweptLine(t, props.now)}</span>
             <TargetFigures target={t} colours={SEVERITY_COLOURS} />
             {/* TargetFigures says the open count in its sentence, so it is not read twice. */}
             <span class="open" aria-hidden="true">
@@ -531,10 +557,45 @@ function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
                 </Show>
               </Show>
             </span>
-          </div>
+          </button>
         )}
       </For>
     </div>
+  );
+}
+
+/** One target's findings: its name and what its last sweep checked, its open items in the order
+ * Rust ranked them, then the fixes of its items the next sweep confirms, as the Fixed tab shows
+ * them. Both lists are Rust's, picked by the target's key. */
+function TargetFindings(props: {
+  line: TargetLine;
+  overview: Overview;
+  now: Date;
+  onOpen: (id: string) => void;
+}) {
+  const items = () => props.overview.items.filter((i) => i.target_key === props.line.key);
+  const reported = () =>
+    props.overview.reported.filter((r) => r.item.target_key === props.line.key);
+  return (
+    <>
+      <section class="summary">
+        <div class="headline">
+          <div class="headline-text">
+            <h1>{props.line.label}</h1>
+            <p class="sub">{sweptLine(props.line, props.now)}</p>
+          </div>
+        </div>
+      </section>
+      <Rows
+        items={items()}
+        now={props.now}
+        empty={props.line.swept === null ? "Not swept yet." : "Nothing is open."}
+        onOpen={props.onOpen}
+      />
+      <Show when={reported().length > 0}>
+        <FixedRows reported={reported()} fixed={[]} now={props.now} />
+      </Show>
+    </>
   );
 }
 
@@ -979,7 +1040,7 @@ function Busy(props: { status: Status; now: Date; onCancel: () => void }) {
   );
 }
 
-function AllClear(props: { overview: Overview; now: Date }) {
+function AllClear(props: { overview: Overview; now: Date; onTarget: (key: string) => void }) {
   const swept = () => props.overview.last_swept;
   const dismissed = () => props.overview.dismissed;
   return (
@@ -992,7 +1053,7 @@ function AllClear(props: { overview: Overview; now: Date }) {
         {props.overview.target_count} swept {since(swept() ?? "", props.now)} ago. Nothing open
         <Show when={dismissed() > 0}>; {dismissed()} dismissed</Show>.
       </p>
-      <Targets targets={props.overview.targets} now={props.now} />
+      <Targets targets={props.overview.targets} now={props.now} onOpen={props.onTarget} />
       <Show when={props.overview.fixed.length > 0}>
         <h2 class="label">Fixed in the last 30 days</h2>
         <FixedRows

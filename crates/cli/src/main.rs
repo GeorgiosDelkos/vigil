@@ -737,6 +737,7 @@ mod tests {
         let item = Listed {
             id: "00000000000000ff".to_owned(),
             target: "This Mac".to_owned(),
+            target_key: "mac".to_owned(),
             name: "ffmpeg".to_owned(),
             lead,
             others: vec![finding("0000000000000002", Severity::Low, "CVE-2")],
