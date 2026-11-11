@@ -18,9 +18,9 @@
 use std::io::Read as _;
 use std::process::Command;
 use std::process::Stdio;
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use std::time::Instant;
 
 use serde::Serialize;
 
@@ -35,20 +35,13 @@ const FIXED_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 /// popover, which waits for the disk with the rest of its overview.
 const DISKUTIL_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// How often the deadline is checked. Arbitrary: small beside diskutil's 0.3 seconds.
-const POLL: Duration = Duration::from_millis(10);
-
 /// The startup disk as the popover shows it. Its fields are private so that only
-/// `Disk::new` builds one, keeping free at most the total and the shares summing to 100; the
-/// app only serializes it.
+/// `Disk::new` builds one, keeping the shares summing to 100; the app only serializes it. The
+/// byte counts are not sent: the UI shows only these strings and shares.
 #[derive(Debug, Serialize)]
 pub struct Disk {
     /// The startup volume's name: "Macintosh HD".
     name: String,
-    /// The container's size, in bytes.
-    total: u64,
-    /// The bytes available to the user, at most `total`.
-    free: u64,
     /// The container's size for display: "245 GB".
     size: String,
     /// The whole row in words, for screen readers and the tooltip:
@@ -77,8 +70,6 @@ impl Disk {
         let label = format!("{name}: {} free of {size}", decimal_size(free));
         Some(Self {
             name,
-            total,
-            free,
             size,
             label,
             used_percent: 100.0 - free_percent,
@@ -90,7 +81,7 @@ impl Disk {
 /// Reads the startup disk with diskutil. `None` when diskutil fails or its output lacks the
 /// name or the APFS container's sizes; the popover then hides the row.
 ///
-/// Spawns diskutil and waits for it, about 0.3 seconds; one that takes longer than
+/// Spawns diskutil and waits for it, about 0.3 seconds; one whose output has not ended within
 /// [`DISKUTIL_TIMEOUT`] is killed and gives `None`.
 pub fn startup_disk() -> Option<Disk> {
     let mut diskutil = Command::new(DISKUTIL);
@@ -102,8 +93,9 @@ pub fn startup_disk() -> Option<Disk> {
     parse_info(&String::from_utf8(out).ok()?)
 }
 
-/// What `command` prints, if it exits successfully within `timeout`. Past it, the command is
-/// killed and the answer is `None`.
+/// What `command` prints, if its output ends within `timeout` and it then exits successfully.
+/// Past the timeout the command is killed and the answer is `None`; a process it started that
+/// still holds its output open is left to end on its own, with the thread reading from it.
 fn stdout_within(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
     let mut child = command
         .stdin(Stdio::null())
@@ -111,29 +103,24 @@ fn stdout_within(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    // Read on its own thread, so output larger than the pipe's buffer cannot stall the
-    // command while this side waits for it to exit. It ends at EOF, once the command exits or
-    // is killed.
+    // Read on its own thread, so output larger than the pipe's buffer cannot stall the command
+    // while this side waits, and so the wait can have a deadline. Capacity 1: the one result
+    // is sent without blocking, even after this side stopped listening.
     let mut stdout = child.stdout.take().expect("stdout is piped");
-    let reader = thread::spawn(move || {
+    let (send, receive) = mpsc::sync_channel(1);
+    thread::spawn(move || {
         let mut out = Vec::new();
-        stdout.read_to_end(&mut out).ok().map(|_| out)
+        // The receiver is gone after a timeout; the result is then unwanted.
+        drop(send.send(stdout.read_to_end(&mut out).ok().map(|_| out)));
     });
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(POLL),
-            Ok(None) | Err(_) => {
-                // Best effort: the child may have exited since the check, and either way the
-                // answer is None.
-                drop(child.kill());
-                drop(child.wait());
-                return None;
-            }
-        }
+    let Ok(Some(out)) = receive.recv_timeout(timeout) else {
+        // Best effort: the child may have exited already, and either way the answer is None.
+        drop(child.kill());
+        drop(child.wait());
+        return None;
     };
-    let out = reader.join().expect("the reader thread does not panic")?;
+    // Its output has ended, so it has exited or is about to.
+    let status = child.wait().ok()?;
     status.success().then_some(out)
 }
 
@@ -236,8 +223,6 @@ mod tests {
     fn reads_the_container_s_size_and_free_space_and_the_volume_s_name() {
         let disk = parse_info(INFO).unwrap();
         assert_eq!(disk.name, "Macintosh HD");
-        assert_eq!(disk.total, 245_107_195_904);
-        assert_eq!(disk.free, 27_953_098_752);
         assert_eq!(disk.size, "245 GB");
         assert_eq!(disk.label, "Macintosh HD: 28 GB free of 245 GB");
     }
@@ -247,8 +232,8 @@ mod tests {
     fn reads_this_mac_s_startup_disk_with_a_minimal_environment() {
         let disk = startup_disk().expect("diskutil describes the startup disk");
         assert_ne!(disk.name, "");
-        assert!(disk.total > 0);
-        assert!(disk.free <= disk.total);
+        assert!(disk.label.starts_with(&disk.name), "{}", disk.label);
+        assert!((disk.used_percent + disk.free_percent - 100.0).abs() < 1e-9);
     }
 
     #[test]
@@ -256,6 +241,14 @@ mod tests {
         let mut slow = Command::new("/bin/sh");
         slow.args(["-c", "echo early; sleep 5"]);
         assert_eq!(stdout_within(&mut slow, Duration::from_millis(100)), None);
+    }
+
+    #[test]
+    fn reads_output_larger_than_the_pipe_s_buffer() {
+        let mut large = Command::new("/bin/sh");
+        large.args(["-c", "head -c 200000 /dev/zero"]);
+        let out = stdout_within(&mut large, DISKUTIL_TIMEOUT).expect("head succeeds");
+        assert_eq!(out.len(), 200_000);
     }
 
     #[test]
@@ -303,7 +296,6 @@ mod tests {
     #[test]
     fn takes_free_space_above_the_size_as_all_of_it() {
         let disk = Disk::new("Odd".into(), 1_000_000_000, 2_000_000_000).unwrap();
-        assert_eq!(disk.free, 1_000_000_000);
         assert!((disk.free_percent - 100.0).abs() < f64::EPSILON);
         assert!(disk.used_percent.abs() < f64::EPSILON);
         assert_eq!(disk.label, "Odd: 1 GB free of 1 GB");
@@ -343,7 +335,6 @@ mod tests {
         #[test]
         fn used_and_free_are_shares_of_one_hundred(total in 1..u64::MAX, free: u64) {
             let disk = Disk::new("Any".into(), total, free).unwrap();
-            prop_assert!(disk.free <= disk.total);
             prop_assert!((0.0..=100.0).contains(&disk.used_percent));
             prop_assert!((0.0..=100.0).contains(&disk.free_percent));
             prop_assert!((disk.used_percent + disk.free_percent - 100.0).abs() < 1e-9);

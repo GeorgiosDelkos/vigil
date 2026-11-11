@@ -151,8 +151,6 @@ export type ReportedFix = {
 /** The startup disk (the core's `Disk`): its name, size and how much is used and free. */
 export type Disk = {
   readonly name: string;
-  readonly total: number;
-  readonly free: number;
   /** The size for display: "245 GB". */
   readonly size: string;
   /** The row in words: "Macintosh HD: 28 GB free of 245 GB". */

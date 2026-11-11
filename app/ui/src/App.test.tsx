@@ -1357,8 +1357,6 @@ describe("the main view", () => {
     shown = overview({
       disk: {
         name: "Macintosh HD",
-        total: 245_107_195_904,
-        free: 27_953_098_752,
         size: "245 GB",
         label: "Macintosh HD: 28 GB free of 245 GB",
         used_percent: 88.6,
@@ -1382,8 +1380,6 @@ describe("the main view", () => {
   it("draws no empty part of the disk's bar", async () => {
     const full = {
       name: "Full",
-      total: 1,
-      free: 0,
       size: "0 GB",
       label: "Full: 0 GB free of 0 GB",
     };
