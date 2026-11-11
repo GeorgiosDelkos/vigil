@@ -925,7 +925,7 @@ function Busy(props: { status: Status; now: Date; onCancel: () => void }) {
                     {f().place} · started {ago(f().started, props.now)}
                   </p>
                 </div>
-                <span class="spin" aria-hidden="true" />
+                {/* No spinner here: the running step has one, and two at once distract. */}
               </div>
               <p class="fix-title">{f().title}</p>
               <ol class="group steps" role="list" aria-label="Fix progress">
