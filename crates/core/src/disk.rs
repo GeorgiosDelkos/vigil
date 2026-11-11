@@ -24,24 +24,26 @@ const DISKUTIL: &str = "/usr/sbin/diskutil";
 /// The `PATH` diskutil runs with: launchd's default, so nothing from the user's shell runs.
 const FIXED_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// The startup disk as the popover shows it.
+/// The startup disk as the popover shows it. Its fields are private so that only
+/// `Disk::new` builds one, keeping free at most the total and the shares summing to 100; the
+/// app only serializes it.
 #[derive(Debug, Serialize)]
 pub struct Disk {
     /// The startup volume's name: "Macintosh HD".
-    pub name: String,
+    name: String,
     /// The container's size, in bytes.
-    pub total: u64,
+    total: u64,
     /// The bytes available to the user, at most `total`.
-    pub free: u64,
+    free: u64,
     /// The container's size for display: "245 GB".
-    pub size: String,
+    size: String,
     /// The whole row in words, for screen readers and the tooltip:
     /// "Macintosh HD: 28 GB free of 245 GB".
-    pub label: String,
+    label: String,
     /// How much of the disk is used, from 0 to 100.
-    pub used_percent: f64,
+    used_percent: f64,
     /// How much of the disk is free, from 0 to 100; `used_percent` plus this is 100.
-    pub free_percent: f64,
+    free_percent: f64,
 }
 
 impl Disk {
@@ -100,8 +102,9 @@ fn parse_info(plist: &str) -> Option<Disk> {
     Disk::new(name, total, free)
 }
 
-/// The text of the `<tag>` element right after `<key>key</key>`. diskutil's info plist is one
-/// flat dictionary, so the first such key is the one meant.
+/// The text of the `<tag>` element right after the first `<key>key</key>`. The plist's nested
+/// dictionaries (`APFSPhysicalStores`, the SMART keys) use none of the keys read here, so the
+/// first match is the top-level one; the test fixture keeps both in place to check it.
 fn plist_value<'a>(plist: &'a str, key: &str, tag: &str) -> Option<&'a str> {
     let key = format!("<key>{key}</key>");
     let after_key = &plist[plist.find(&key)? + key.len()..];
@@ -149,7 +152,8 @@ mod tests {
     use super::*;
 
     /// The parts of `diskutil info -plist /` that matter, from macOS 27 on an APFS startup disk,
-    /// with the neighbouring keys that hold other sizes, so the lookup must pick the right one.
+    /// with the neighbouring keys that hold other sizes and the two nested dictionaries, in the
+    /// real output's order, so the lookup must pick the right one.
     const INFO: &str = r"<?xml version='1.0' encoding='UTF-8'?>
 <plist version='1.0'>
 <dict>
@@ -159,8 +163,20 @@ mod tests {
 	<string>disk3</string>
 	<key>APFSContainerSize</key>
 	<integer>245107195904</integer>
+	<key>APFSPhysicalStores</key>
+	<array>
+		<dict>
+			<key>APFSPhysicalStore</key>
+			<string>disk0s2</string>
+		</dict>
+	</array>
 	<key>FreeSpace</key>
 	<integer>0</integer>
+	<key>SMARTDeviceSpecificKeysMayVaryNotGuaranteed</key>
+	<dict>
+		<key>AVAILABLE_SPARE</key>
+		<integer>100</integer>
+	</dict>
 	<key>VolumeName</key>
 	<string>Macintosh HD</string>
 	<key>VolumeSize</key>
