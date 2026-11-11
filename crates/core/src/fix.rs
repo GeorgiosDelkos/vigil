@@ -358,14 +358,14 @@ impl FixProgress {
     /// [`FixAllPlan::labels`]. While the agent runs a Fix all, its step is the first item, in
     /// order, that `results.jsonl` has no valid line for, which this reads; once all have one,
     /// the last item stays the step until the agent exits, as it may still be checking it.
+    /// A single fix has no `results.jsonl`, so its one item is the step while the agent runs.
     pub fn step(&self, labels: &[String]) -> usize {
         match self {
             Self::Preparing => 0,
-            Self::Agent { keys, .. } if keys.len() < 2 => 1,
             Self::Agent { dir, keys } => {
                 let reported = read_results(&dir.join(RESULTS_FILE));
                 let at = keys.iter().position(|key| !reported.contains_key(key));
-                1 + at.unwrap_or(keys.len() - 1)
+                1 + at.unwrap_or(keys.len().saturating_sub(1))
             }
             Self::Recording => labels.len().saturating_sub(1),
         }
@@ -1645,13 +1645,47 @@ mod tests {
         );
         assert_eq!(FixProgress::Recording.step(&labels), 4);
 
+        // Two items: the second runs once the first is reported.
+        let two = FixProgress::Agent {
+            dir: tmp.path().to_owned(),
+            keys: vec![a, b],
+        };
+        let labels = ["prepare", "a", "b", "record"].map(str::to_owned);
+        report(&[]);
+        assert_eq!(two.step(&labels), 1);
+        report(&[a]);
+        assert_eq!(two.step(&labels), 2);
+        report(&[a, b]);
+        assert_eq!(two.step(&labels), 2, "the last stays the step");
+        assert_eq!(FixProgress::Recording.step(&labels), 3);
+
+        // One item, reported or not, has one agent step.
         let single = FixProgress::Agent {
             dir: tmp.path().to_owned(),
             keys: vec![c],
         };
         let labels = FixProgress::labels(AgentKind::Grok);
         assert_eq!(single.step(&labels), 1, "a single fix has one agent step");
+        report(&[c]);
+        assert_eq!(single.step(&labels), 1);
         assert_eq!(FixProgress::Recording.step(&labels), 2);
+    }
+
+    #[test]
+    fn only_a_running_agent_has_activity() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join(AGENT_LOG),
+            "reading fixes.json\nupgrading curl\n",
+        )
+        .unwrap();
+        let agent = FixProgress::Agent {
+            dir: tmp.path().to_owned(),
+            keys: Vec::new(),
+        };
+        assert_eq!(agent.activity().as_deref(), Some("upgrading curl"));
+        assert_eq!(FixProgress::Preparing.activity(), None);
+        assert_eq!(FixProgress::Recording.activity(), None);
     }
 
     #[test]
@@ -1668,6 +1702,8 @@ mod tests {
             ]
         );
         assert_eq!(plan.title(), "claude applies 2 fixes in one run");
+        assert_eq!(plan.target(), "mac", "the target the app names in progress");
+        assert_eq!(plan.destination(), "this Mac");
         assert_eq!(plan.agent(), AgentKind::Claude);
         assert_eq!(plan.items()[1].key(), keys[1]);
     }
