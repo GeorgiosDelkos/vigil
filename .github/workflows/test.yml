@@ -31,7 +31,7 @@ jobs:
     strategy:
       matrix:
         # run on stable and beta to ensure that tests won't break on the next version of the rust
-        # toolchain; beta only daily and by hand, since a PR cannot break it
+        # toolchain; beta only daily and by hand (see check.yml)
         toolchain: ${{ fromJSON(github.event_name == 'pull_request' && '["stable"]' || '["stable", "beta"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
@@ -45,10 +45,11 @@ jobs:
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master
         with:
           toolchain: ${{ matrix.toolchain }}
+      # The version mutants.yml pins, so the two agree on what passes.
       - name: cargo install cargo-nextest
         uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # tag=v2.88.0
         with:
-          tool: cargo-nextest
+          tool: cargo-nextest@0.9.150
       # https://twitter.com/jonhoo/status/1571290371124260865
       - name: cargo nextest run --locked
         run: cargo nextest run --locked --all-features --all-targets
