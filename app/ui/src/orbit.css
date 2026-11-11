@@ -362,3 +362,43 @@
   opacity: 0.5;
   cursor: default;
 }
+
+/* The startup disk, mirroring the header at the bottom: a line of 12 on the header's 24 edges,
+   12 below the actions and 12 above the border. Used is the critical red, free the ok green, as
+   two parts of one bar like the severity bars. */
+.orbit-disk {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  padding: 0 var(--space-24) var(--space-12);
+  font-size: var(--text-12);
+  line-height: var(--leading-12);
+  color: var(--n-ink2);
+}
+.orbit-disk .disk-name {
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.orbit-disk .disk-size {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+}
+.orbit-disk .disk-bar {
+  flex: 1;
+  display: flex;
+  gap: var(--space-2);
+  height: var(--space-4);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+.orbit-disk .disk-bar i {
+  flex-basis: 0;
+}
+.orbit-disk .disk-bar .used {
+  background: var(--critical);
+}
+.orbit-disk .disk-bar .free {
+  background: var(--ok);
+}

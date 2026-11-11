@@ -9,6 +9,7 @@ import { Menu } from "./Menu.tsx";
 import { NEON, neon, vortex, type Box, type Scene, type Streak, type Vortex } from "./orbit.ts";
 import {
   SEVERITIES,
+  type Disk,
   type Overview,
   type Severity,
   type Status,
@@ -108,6 +109,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
         onOpen={props.actions.onTarget}
       />
       <Actions sweeping={sweeping()} actions={props.actions} />
+      <Show when={props.overview.disk}>{(disk) => <DiskRow disk={disk()} />}</Show>
     </section>
   );
 }
@@ -217,7 +219,7 @@ function rowStatus(target: TargetLine): string {
 
 /** One row per target, every row the same shape: the name, what was checked, a count for each
  * severity in fixed columns, the number above its name so four digits fit at the popover's
- * 360px width (a zero is dimmed, so a severity sits in the same place in every row), and a bar split by severity. The owner asked for standard sizes and positions over tags
+ * 380px width (a zero is dimmed, so a severity sits in the same place in every row), and a bar split by severity. The owner asked for standard sizes and positions over tags
  * that wrapped and moved with the counts (2026-11-10). Every bar is the full width, so it shows
  * the mix within its target, not its size beside the others. During a sweep the rows dim: their
  * counts are from the last sweep. The card grows with its rows until the vortex has only the
@@ -331,6 +333,32 @@ function Actions(props: { sweeping: Sweeping | null; actions: OrbitActions }) {
         </Show>
         <span aria-hidden="true"> ↗</span>
       </button>
+    </div>
+  );
+}
+
+/** The startup disk under the actions, as the header's mirror at the bottom: its name, a bar
+ * of used (red) and free (green) space, and its size, in one line on the header's 24 edges.
+ * Screen readers get the label Rust wrote, with the free amount, in place of the two words;
+ * the tooltip shows it too. */
+function DiskRow(props: { disk: Disk }) {
+  return (
+    <div class="orbit-disk" title={props.disk.label}>
+      <span class="disk-name" aria-hidden="true">
+        {props.disk.name}
+      </span>
+      <span class="disk-bar" role="img" aria-label={props.disk.label}>
+        {/* An empty part would still leave the gap between parts at the bar's end. */}
+        <Show when={props.disk.used_percent > 0}>
+          <i class="used" style={{ "flex-grow": props.disk.used_percent }} />
+        </Show>
+        <Show when={props.disk.free_percent > 0}>
+          <i class="free" style={{ "flex-grow": props.disk.free_percent }} />
+        </Show>
+      </span>
+      <span class="disk-size" aria-hidden="true">
+        {props.disk.size}
+      </span>
     </div>
   );
 }

@@ -29,6 +29,7 @@ use tauri_plugin_autostart::MacosLauncher;
 use vigil_core::AgentKind;
 use vigil_core::Config;
 use vigil_core::DataDir;
+use vigil_core::Disk;
 use vigil_core::FindingKey;
 use vigil_core::FixProgress;
 use vigil_core::ParseFindingKeyError;
@@ -37,6 +38,7 @@ use vigil_core::last_activity;
 use vigil_core::latest;
 use vigil_core::plan_fix;
 use vigil_core::popover_view;
+use vigil_core::startup_disk;
 use vigil_core::target_label;
 use vigil_core::write_html_report;
 
@@ -126,6 +128,9 @@ struct Overview {
     config: PathBuf,
     /// Why the config or the reports could not be read.
     problem: Option<String>,
+    /// The startup disk's size and free space; `None` when diskutil cannot say, and the row
+    /// is hidden.
+    disk: Option<Disk>,
 }
 
 /// The status as the popover shows it: targets by their labels, and where the sweep is.
@@ -277,8 +282,8 @@ fn ticks(total: usize) -> Vec<f64> {
         .collect()
 }
 
-/// How many targets the bar still marks apart. Arbitrary: in a 320 px bar, twelve leave
-/// about 25 px between marks.
+/// How many targets the bar still marks apart. Arbitrary: in a 340 px bar, twelve leave
+/// about 28 px between marks.
 const MAX_MARKED_TARGETS: usize = 12;
 
 // Async: Tauri runs it off the main thread, so reading every report never stalls the UI.
@@ -288,29 +293,36 @@ const MAX_MARKED_TARGETS: usize = 12;
     reason = "Tauri hands command arguments over by value"
 )]
 fn overview(runner: State<'_, Runner>) -> Overview {
-    let status = runner.status();
-    let busy = status.is_busy();
-    let config_path = runner.data_dir().config_file();
-    let (config, problem) = match Config::load_or_default(&config_path, runner.home()) {
-        Ok(config) => (Some(config), None),
-        Err(e) => (None, Some(e.to_string())),
-    };
-    let (targets, problem) = match (&config, problem) {
-        (Some(config), None) => match latest(runner.data_dir(), config) {
-            Ok(targets) => (targets, None),
-            Err(e) => (Vec::new(), Some(e.to_string())),
-        },
-        (_, problem) => (Vec::new(), problem),
-    };
-    Overview {
-        status: StatusView::of(status),
-        busy,
-        view: popover_view(targets),
-        agent: config.as_ref().and_then(|c| c.agent).map(AgentKind::name),
-        schedule: config.map(|c| c.schedule.to_string()).unwrap_or_default(),
-        config: config_path,
-        problem,
-    }
+    // diskutil takes about 0.3 seconds, so it runs while the reports are read, not after.
+    thread::scope(|scope| {
+        let disk = scope.spawn(startup_disk);
+        let status = runner.status();
+        let busy = status.is_busy();
+        let config_path = runner.data_dir().config_file();
+        let (config, problem) = match Config::load_or_default(&config_path, runner.home()) {
+            Ok(config) => (Some(config), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
+        let (targets, problem) = match (&config, problem) {
+            (Some(config), None) => match latest(runner.data_dir(), config) {
+                Ok(targets) => (targets, None),
+                Err(e) => (Vec::new(), Some(e.to_string())),
+            },
+            (_, problem) => (Vec::new(), problem),
+        };
+        Overview {
+            status: StatusView::of(status),
+            busy,
+            view: popover_view(targets),
+            agent: config.as_ref().and_then(|c| c.agent).map(AgentKind::name),
+            schedule: config.map(|c| c.schedule.to_string()).unwrap_or_default(),
+            config: config_path,
+            problem,
+            disk: disk
+                .join()
+                .expect("startup_disk returns None on failure and does not panic"),
+        }
+    })
 }
 
 /// Async, so reading the config to list the targets never stalls the UI.

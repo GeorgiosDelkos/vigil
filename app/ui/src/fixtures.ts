@@ -154,6 +154,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     schedule: "manual",
     config: "/Users/me/Library/Application Support/io.github.georgiosdelkos.vigil/config.toml",
     problem: null,
+    disk: null,
     ...changes,
   };
 }
