@@ -649,7 +649,7 @@ button.trow:hover {
   white-space: nowrap;
 }
 /* 15 pixel figures on the 16 pixel line of the 11 size: digits have no descenders, and the
-   tighter line keeps a main-view row at exactly 100, three to its 300 card. */
+   tighter line keeps a main-view row at exactly 100. */
 .tcount b {
   font-size: var(--text-15);
   line-height: var(--leading-11);
