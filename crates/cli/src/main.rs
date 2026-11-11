@@ -30,6 +30,7 @@ use vigil_core::SshConn;
 use vigil_core::SweepError;
 use vigil_core::Targets;
 use vigil_core::dismiss;
+use vigil_core::error_chain;
 use vigil_core::fix_all_outcome;
 use vigil_core::items;
 use vigil_core::latest;
@@ -654,17 +655,6 @@ fn incomplete(failures: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Renders an error and its sources as `outer: inner: innermost`.
-fn error_chain(error: &dyn std::error::Error) -> String {
-    let mut text = error.to_string();
-    let mut source = error.source();
-    while let Some(e) = source {
-        text.push_str(&format!(": {e}"));
-        source = e.source();
-    }
-    text
-}
-
 fn load_config(data_dir: &DataDir, home: &Path) -> anyhow::Result<Config> {
     Config::load(&data_dir.config_file(), home).map_err(|e| match e {
         LoadConfigError::Missing { .. } => anyhow::Error::new(e).context("run `vigil init` first"),
@@ -892,14 +882,6 @@ mod tests {
             fix_line(&FixState::NotHeld { at }),
             "still found after a fix at 2026-11-05T11:00:00Z"
         );
-    }
-
-    #[test]
-    fn error_chain_joins_sources() {
-        let inner = std::io::Error::other("disk on fire");
-        let outer = anyhow::Error::new(inner).context("reading cache");
-        let outer: &dyn std::error::Error = outer.as_ref();
-        assert_eq!(error_chain(outer), "reading cache: disk on fire");
     }
 
     #[test]

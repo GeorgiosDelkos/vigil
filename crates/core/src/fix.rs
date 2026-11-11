@@ -649,6 +649,9 @@ impl FixAllPlan {
                 .expect("lists that differ have an item at their first difference");
             return Err(self.changed(name));
         }
+        // The lists match, so every item is open, undismissed and in the newest report. The
+        // lock keeps sweeps out, but dismissals do not take it: what follows catches only a
+        // dismissal that lands between the two reads, a race a test cannot stage.
         for item in &self.items {
             match still_current(data_dir, &item.finding) {
                 Ok(true) => {}
@@ -667,6 +670,17 @@ impl FixAllPlan {
             }
         }
         Ok(())
+    }
+
+    /// Fails, naming the first item that differs, unless every item was found by the same
+    /// sweep. Each item reads the newest report that has its key, so a sweep that landed
+    /// between the reads would mix two reports.
+    fn check_one_report(&self) -> Result<(), FixError> {
+        let found = self.found();
+        match self.items.iter().find(|item| item.finding.found != found) {
+            Some(other) => Err(self.changed(other.name.clone())),
+            None => Ok(()),
+        }
     }
 
     /// The batch error for the item `name`, which a sweep, a fix or a dismissal changed since
@@ -765,35 +779,15 @@ pub fn plan_fix_all(
     let first = items.first().ok_or_else(|| FixError::NothingToFixAll {
         target: target.to_owned(),
     })?;
-    one_report(target, &items)?;
     let setup = setup(config, target, first.finding.key)?;
-    Ok(FixAllPlan {
+    let plan = FixAllPlan {
         target: target.to_owned(),
         dir_name,
         setup,
         items,
-    })
-}
-
-/// Fails, naming the first item that differs, unless every item of `target` was found by the
-/// same sweep. Each item reads the newest report that has its key, so a sweep that landed
-/// between the reads would mix two reports.
-fn one_report(target: &str, items: &[FixAllItem]) -> Result<(), FixError> {
-    let Some(first) = items.first() else {
-        return Ok(());
     };
-    match items
-        .iter()
-        .find(|item| item.finding.found != first.finding.found)
-    {
-        Some(other) => Err(FixError::Item {
-            name: other.name.clone(),
-            why: Box::new(FixError::ListChanged {
-                target: target.to_owned(),
-            }),
-        }),
-        None => Ok(()),
-    }
+    plan.check_one_report()?;
+    Ok(plan)
 }
 
 /// Runs the confirmed Fix all `plan` as one agent run with full access, and records each item
@@ -808,9 +802,10 @@ fn one_report(target: &str, items: &[FixAllItem]) -> Result<(), FixError> {
 ///
 /// # Errors
 ///
-/// Fails before the agent runs when a sweep or fix is running, when the list changed since
-/// `plan` was made ([`FixError::Item`]), or when the fix folder cannot be written; and after it
-/// when the records cannot be appended.
+/// Fails before the agent runs when a sweep or fix is running, when the reports, the
+/// dismissals or `state/fixes.jsonl` cannot be read to list the items again
+/// ([`FixError::State`]), when the list changed since `plan` was made ([`FixError::Item`]), or
+/// when the fix folder cannot be written; and after it when the records cannot be appended.
 pub fn run_fix_all(
     data_dir: &DataDir,
     plan: &FixAllPlan,
@@ -1575,9 +1570,9 @@ mod tests {
         assert!(chain.contains("VIGIL_END is reserved"), "{chain}");
 
         let mut plan = fix_all_of(&keys, &report);
-        assert!(one_report("mac", &plan.items).is_ok());
+        assert!(plan.check_one_report().is_ok());
         plan.items[1].finding.found = "2026-11-06T00:00:00Z".parse().unwrap();
-        let err = one_report("mac", &plan.items).unwrap_err();
+        let err = plan.check_one_report().unwrap_err();
         assert!(
             matches!(&err, FixError::Item { name, why }
                 if name == "item 1" && matches!(**why, FixError::ListChanged { .. })),

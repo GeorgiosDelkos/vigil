@@ -1459,7 +1459,7 @@ fn component_name(component: &Component) -> String {
 }
 
 /// Renders an error and its sources as `outer: inner`.
-pub fn error_chain(error: &impl std::error::Error) -> String {
+pub fn error_chain(error: &(impl std::error::Error + ?Sized)) -> String {
     let mut text = error.to_string();
     let mut source = error.source();
     while let Some(e) = source {
