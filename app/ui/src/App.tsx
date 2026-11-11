@@ -5,9 +5,11 @@ import {
   Match,
   Show,
   Switch,
+  createEffect,
   createMemo,
   createResource,
   createSignal,
+  on,
   onCleanup,
   onMount,
 } from "solid-js";
@@ -160,6 +162,8 @@ export function App() {
           screen: screen(),
         });
   };
+  // A fix that starts clears an older error, so none sits over its steps or results.
+  createEffect(on(view, (shows, was) => shows === "fixing" && was !== shows && setError(null)));
   const list = (at: Tab) => {
     setTab(at);
     setScreen("list");

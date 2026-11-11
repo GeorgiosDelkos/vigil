@@ -1296,6 +1296,24 @@ describe("a finished fix", () => {
     expect(screen.getByRole("button", { name: "Back" })).toBeTruthy();
   });
 
+  it("clears an older error when a fix starts, so none sits over its results", async () => {
+    shown = two();
+    answer();
+    await openList();
+    await screen.findByText("2 findings need you");
+    handlers.get("fix-error")?.({ payload: "an older refusal" });
+    expect(await screen.findByText("an older refusal")).toBeTruthy();
+
+    shown = { ...two(), status: fixing() };
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByRole("list", { name: "Fix progress" });
+    expect(screen.queryByText("an older refusal")).toBeNull();
+    shown = { ...two(), status: fixRun() };
+    handlers.get("changed")?.({ payload: null });
+    await screen.findByRole("list", { name: "Fix results" });
+    expect(document.querySelector(".banner")).toBeNull();
+  });
+
   it("shows a fix refused before it ran as an error, not as results", async () => {
     shown = two();
     answer();

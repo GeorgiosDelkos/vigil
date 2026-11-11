@@ -1061,8 +1061,10 @@ ol.steps {
 .step.result.failed .st {
   color: var(--critical);
 }
+/* Solid, unlike a step still to come: the item is finished, with no result. */
 .step.result.unknown .icon.wait {
   stroke: var(--low);
+  stroke-dasharray: none;
 }
 .details {
   display: inline-flex;

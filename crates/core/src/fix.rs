@@ -919,7 +919,9 @@ pub(crate) fn succeeded(outcome: Outcome, exit_code: Option<i32>) -> bool {
 /// from one run folder: [`Self::single`] and [`Self::all`] are its only constructors.
 #[derive(Debug, Clone, Serialize)]
 pub struct FixRun {
+    /// One per item, in the order they ran.
     items: Vec<FixRunItem>,
+    /// The line under the rows: "5 of 9 fixed · 4 partial".
     summary: String,
     /// The run's folder, where [`Self::log_tail`] reads `agent.log`. Not sent to the UI: the
     /// app reads the log for it.
@@ -929,18 +931,18 @@ pub struct FixRun {
 
 /// One item of a [`FixRun`].
 #[derive(Debug, Clone, Serialize)]
-pub struct FixRunItem {
+pub(crate) struct FixRunItem {
     /// What it fixed: a Fix all item's name ("curl 8.1.2"), or a single fix's finding title.
-    pub name: String,
+    name: String,
     /// How it ended, as the row shows it: [`Outcome::Unknown`] also when the agent reported
     /// `fixed` but did not exit 0, as such a run does not count as a fix.
-    pub state: Outcome,
+    state: Outcome,
     /// The state in a word for the row: "fixed", "partial", "failed" or "no result".
-    pub state_label: &'static str,
+    state_label: &'static str,
     /// The agent's summary, or why there is none. Untrusted agent text, only ever shown.
-    pub summary: String,
+    summary: String,
     /// The pull request the agent opened, for a repository.
-    pub pull_request: Option<String>,
+    pull_request: Option<String>,
 }
 
 impl FixRun {
@@ -995,16 +997,6 @@ impl FixRun {
             summary,
             dir,
         }
-    }
-
-    /// Its items, in the order they ran.
-    pub fn items(&self) -> &[FixRunItem] {
-        &self.items
-    }
-
-    /// The line under the rows: "5 of 9 fixed · 4 partial".
-    pub fn summary(&self) -> &str {
-        &self.summary
     }
 
     /// The end of the run's `agent.log`, at most its last 64 KiB. Reads the file each call.
@@ -1074,25 +1066,38 @@ pub struct LogTail {
 /// The last [`LOG_TAIL`] bytes of the log at `path`. When the log is longer, the line cut by
 /// the start of those bytes is dropped, and the note says how much is shown. Bytes that are
 /// not UTF-8 (a multi-byte character cut by the start, or binary output) become U+FFFD.
+///
+/// Only a regular file is read. The agent ran with full access in the folder and could have
+/// put a link or a FIFO in the log's place: a link shows nothing it could not have written,
+/// but opening a FIFO would block the command for good.
 fn log_tail(path: &Path) -> Result<LogTail, FixError> {
     let read_err = |source| FixError::Read {
         path: path.to_owned(),
         source,
     };
+    if !fs::symlink_metadata(path).map_err(read_err)?.is_file() {
+        return Err(read_err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        )));
+    }
     let mut file = fs::File::open(path).map_err(read_err)?;
     let len = file.metadata().map_err(read_err)?.len();
     let start = len.saturating_sub(LOG_TAIL);
-    file.seek(SeekFrom::Start(start)).map_err(read_err)?;
+    // When the tail is cut, the byte before it is read too: a line break there means the tail
+    // starts on a whole line.
+    let from = start.saturating_sub(1);
+    file.seek(SeekFrom::Start(from)).map_err(read_err)?;
     let mut tail = Vec::new();
     // Bounded again: the agent has exited, but the bound holds even if the file grew since
     // its length was read.
-    file.take(LOG_TAIL)
+    file.take(LOG_TAIL + (start - from))
         .read_to_end(&mut tail)
         .map_err(read_err)?;
 
     let cut = start > 0;
-    let whole_lines = match tail.iter().position(|&b| b == b'\n') {
-        Some(at) if cut => &tail[at + 1..],
+    let whole_lines = match tail.split_first() {
+        Some((&before, rest)) if cut => from_whole_line(before, rest),
         _ => &tail[..],
     };
     let text = String::from_utf8_lossy(whole_lines)
@@ -1112,6 +1117,18 @@ fn log_tail(path: &Path) -> Result<LogTail, FixError> {
         None
     };
     Ok(LogTail { text, note })
+}
+
+/// `tail` from its first whole line, given the byte `before` it. A last line longer than the
+/// whole tail keeps its end, rather than leave nothing to show.
+fn from_whole_line(before: u8, tail: &[u8]) -> &[u8] {
+    if before == b'\n' {
+        return tail;
+    }
+    match tail.iter().position(|&b| b == b'\n') {
+        Some(at) if at + 1 < tail.len() => &tail[at + 1..],
+        _ => tail,
+    }
 }
 
 /// The valid lines of a Fix all's `results.jsonl`, by key. A line that does not parse, or
@@ -2037,7 +2054,7 @@ mod tests {
 
     /// A run's rows as name, state, label and summary.
     fn rows(run: &FixRun) -> Vec<(&str, Outcome, &str, &str)> {
-        run.items()
+        run.items
             .iter()
             .map(|i| (i.name.as_str(), i.state, i.state_label, i.summary.as_str()))
             .collect()
@@ -2069,13 +2086,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            run.summary(),
+            run.summary,
             "1 of 5 fixed · 1 partial · 1 failed · 2 with no result"
         );
         let json = serde_json::to_value(&run).unwrap();
         assert_eq!(json["items"][1]["state"], "partial");
         assert_eq!(json["items"][3]["state_label"], "no result");
-        assert_eq!(json["summary"], run.summary());
+        assert_eq!(json["summary"], run.summary);
         assert!(json.get("dir").is_none(), "the folder stays in Rust");
     }
 
@@ -2098,12 +2115,12 @@ mod tests {
             )]
         );
         assert_eq!(
-            run.items()[0].pull_request.as_deref(),
+            run.items[0].pull_request.as_deref(),
             Some("https://github.com/me/app/pull/7")
         );
-        assert_eq!(run.summary(), "1 of 1 fixed");
+        assert_eq!(run.summary, "1 of 1 fixed");
         let partial = FixRun::single(ended(2, Outcome::Partial, Some(0)));
-        assert_eq!(partial.summary(), "0 of 1 fixed · 1 partial");
+        assert_eq!(partial.summary, "0 of 1 fixed · 1 partial");
     }
 
     #[test]
@@ -2178,6 +2195,36 @@ mod tests {
         assert!(tail.text.starts_with("\u{fffd}é"), "{}", &tail.text[..8]);
         assert_eq!(tail.text.len(), bound - 1 + '\u{fffd}'.len_utf8());
         assert!(tail.text.ends_with("éa"));
+
+        // A tail that starts right after a line break drops nothing.
+        let lines = format!("first\n{}\n", "x".repeat(bound - 7));
+        fs::write(&log, format!("p\n{lines}")).unwrap();
+        let tail = log_tail(&log).unwrap();
+        assert!(tail.text.starts_with("first\nxx"), "{}", &tail.text[..8]);
+        assert!(tail.note.is_some(), "still only the end");
+
+        // A last line longer than the tail keeps its end instead of showing nothing.
+        fs::write(&log, "z".repeat(bound + 10) + "\n").unwrap();
+        assert_eq!(log_tail(&log).unwrap().text, "z".repeat(bound - 1));
+    }
+
+    #[test]
+    fn the_log_tail_reads_only_a_regular_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join(AGENT_LOG);
+        let secret = tmp.path().join("elsewhere");
+        fs::write(&secret, "not the log\n").unwrap();
+        std::os::unix::fs::symlink(&secret, &log).unwrap();
+        let err = log_tail(&log).unwrap_err();
+        assert!(
+            sweep::error_chain(&err).contains("not a regular file"),
+            "{}",
+            sweep::error_chain(&err)
+        );
+
+        fs::remove_file(&log).unwrap();
+        fs::create_dir(&log).unwrap();
+        assert!(matches!(log_tail(&log), Err(FixError::Read { .. })));
     }
 
     #[test]
