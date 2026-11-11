@@ -92,6 +92,7 @@ export function component(
   return {
     id,
     target: "This Mac",
+    target_key: "mac",
     name: lead.name,
     lead,
     others,
@@ -112,10 +113,10 @@ export function component(
 /** An item of one finding, `key`, with the finding's and the item's own changes. */
 export function finding(
   key: string,
-  changes: Partial<Finding> & Partial<Pick<Listed, "target" | "needs_you">> = {},
+  changes: Partial<Finding> & Partial<Pick<Listed, "target" | "target_key" | "needs_you">> = {},
 ): Listed {
-  const { target = "This Mac", needs_you = true, ...rest } = changes;
-  return component(key, [advisory(key, rest)], { target, needs_you });
+  const { target = "This Mac", target_key = "mac", needs_you = true, ...rest } = changes;
+  return component(key, [advisory(key, rest)], { target, target_key, needs_you });
 }
 
 export function overview(changes: Partial<Overview> = {}): Overview {
@@ -137,6 +138,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     target_count: "1 target",
     targets: [
       {
+        key: "mac",
         label: "This Mac",
         kind: "mac",
         swept: null,

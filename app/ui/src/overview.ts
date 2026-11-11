@@ -75,6 +75,8 @@ export type Listed = {
   /** Its id in the list; it stays while findings in it are dismissed. */
   readonly id: string;
   readonly target: string;
+  /** Its target line's `key`. */
+  readonly target_key: string;
   /** The component's name (a Homebrew formula's own, which can hold several products), or the
    * issue's subject. */
   readonly name: string;
@@ -101,6 +103,9 @@ export type Listed = {
 export type PendingFix = "not_held" | "pull_request";
 
 export type TargetLine = {
+  /** The target as configured (`mac`, `github:owner/name`); its items carry it as
+   * `target_key`. Labels can repeat across targets, keys cannot. */
+  readonly key: string;
   readonly label: string;
   readonly kind: "mac" | "repo" | "server";
   readonly swept: string | null;

@@ -1,7 +1,7 @@
 /* Orbit, in neon: the main view. Coloured light sits behind the panel, frosted glass cards blur
    it, and a vortex of light is drawn on a canvas (Orbit.tsx). The owner chose this design on
    2026-11-09, asked for a softer, less blurred light (blur 80px at 0.42 opacity behind, 8px in
-   the glass), and for nothing to move: the light, the vortex and the urgent dot are still. */
+   the glass), and for nothing to move: the light, the vortex and the cards' dots are still. */
 
 :root {
   --n-cyan: #3ef0ff;
@@ -118,10 +118,11 @@
   z-index: 2;
 }
 
+/* The vortex takes the height the target rows leave, but never less than the centre's own
+   (its flex minimum, min-height auto): past that the rows scroll instead. */
 .orbit .stage {
   position: relative;
   flex: 1;
-  min-height: 0;
   display: grid;
   place-items: center;
 }
@@ -145,9 +146,10 @@
   text-align: center;
   cursor: pointer;
 }
-/* One size for the count, the percentage and the word: the largest that leaves 8 between the
-   centre and the cards in the shortest stage, a failed sweep's banner above three target rows
-   (the owner asked on 2026-11-10; 92 overlapped the urgent card there). */
+/* One size for the count, the percentage and the word, chosen on 2026-11-10 as the largest that
+   left 8 between the centre and the cards below a failed sweep's banner (92 overlapped them).
+   The stage no longer shrinks below the centre, so a larger size would now take height from the
+   target rows instead. */
 .orbit .centre .n {
   font: 400 48px/0.85 var(--ui);
   text-shadow:
@@ -189,10 +191,10 @@
     0 0 18px rgba(255, 46, 136, 0.6);
 }
 
-/* The urgent card and the target rows use the lists' row template (style.css): 12 padding, a
+/* The clear card and the target rows use the lists' row template (style.css): 12 padding, a
    24 marker column and a 12 gap, so names start at 60 inside the border as a list row's do,
    and the chevrons end where a list row's age does. */
-.orbit .urgent {
+.orbit .recent {
   margin: 0 var(--space-12);
   padding: var(--space-12);
   display: grid;
@@ -203,7 +205,7 @@
   font: inherit;
   cursor: pointer;
 }
-.orbit .urgent .glow {
+.orbit .recent .glow {
   justify-self: center;
   width: var(--space-12);
   height: var(--space-12);
@@ -213,7 +215,7 @@
     0 0 6px var(--c),
     0 0 16px var(--c);
 }
-.orbit .urgent b {
+.orbit .recent b {
   display: block;
   font-weight: 600;
   font-size: var(--text-13);
@@ -222,7 +224,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.orbit .urgent small {
+.orbit .recent small {
   display: block;
   color: var(--n-ink2);
   font-size: var(--text-12);
@@ -230,9 +232,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.orbit .urgent small::first-letter {
-  text-transform: uppercase;
 }
 .orbit .go {
   color: rgba(242, 244, 255, 0.5);
@@ -270,26 +269,20 @@
 .orbit .trows {
   margin: var(--space-12) var(--space-12) 0;
   display: grid;
-  /* Three rows of 100 (see .trow); more scroll inside the card. overflow also clips a hovered
-     row to the card's rounded corners. */
-  max-height: 300px;
+  /* As tall as its rows of 100 (see .trow) while the stage keeps its minimum; past that the
+     rows scroll inside the card, which shrinks because a scroll container's flex minimum is 0.
+     overflow also clips a hovered row to the card's rounded corners. */
   overflow-y: auto;
 }
 .orbit .trows:hover {
   background: rgba(255, 255, 255, 0.05);
 }
-/* The target rows (style.css), as buttons in neon: the chevron takes the last column, centred
+/* The target rows (style.css), in neon: the chevron takes the last column, centred
    on the whole row, so the lines below the name stop short of it. Each line keeps its line
    height and cuts long text short, so every row is 100 high: padding 8 + 20 + 16 + counts 8 +
    32 + bar 4 + 4 + padding 8. */
 .orbit .trow {
   grid-template-rows: var(--leading-13) var(--leading-11) auto auto;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
 }
 /* Inside the row: the card scrolls, which clips anything drawn outside it. */
 .orbit .trow:focus-visible {

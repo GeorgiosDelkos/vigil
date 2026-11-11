@@ -1,6 +1,6 @@
 // The main view: Vigil's spiral as a still vortex of light, the count of what needs you in its
-// centre, the most urgent finding, the targets and two actions. The details are a screen behind it:
-// the list, or a running sweep's steps.
+// centre, the targets and two actions. A target's row opens that target's findings; the centre
+// opens the screen behind it: the list, or a running sweep's steps.
 
 import { Index, Match, Show, Switch, createEffect, createSignal, onCleanup } from "solid-js";
 
@@ -9,7 +9,6 @@ import { Menu } from "./Menu.tsx";
 import { NEON, neon, vortex, type Box, type Scene, type Streak, type Vortex } from "./orbit.ts";
 import {
   SEVERITIES,
-  type Listed,
   type Overview,
   type Severity,
   type Status,
@@ -22,9 +21,8 @@ type Sweeping = Extract<Status, { state: "sweeping" }>;
 export type OrbitActions = {
   /** Opens the screen behind the main view: the list, or a running sweep's steps. */
   readonly onList: () => void;
-  /** Opens the list at its targets. */
-  readonly onTargets: () => void;
-  readonly onFinding: (id: string) => void;
+  /** Opens one target's findings, by its line's key. */
+  readonly onTarget: (key: string) => void;
   readonly onSweep: () => void;
   readonly onCancel: () => void;
   readonly onReport: () => void;
@@ -49,7 +47,6 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
   const sweeping = () =>
     props.overview.status.state === "sweeping" ? props.overview.status : null;
   const clear = () => sweeping() === null && props.overview.all_clear;
-  const first = () => (sweeping() === null ? props.overview.items[0] : undefined);
   const failed = () => (props.overview.status.state === "failed" ? props.overview.status : null);
 
   return (
@@ -83,13 +80,12 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
           <span class="sr-only">Show details</span>
         </button>
       </div>
+      {/* No card for the most urgent finding: the owner decided on 2026-11-11 that the main view
+          shows the targets only, and a target's row leads to its findings and their fixes. */}
       <Switch>
         <Match when={sweeping()}>{(s) => <Progress status={s()} now={props.now} />}</Match>
-        <Match when={first()}>
-          {(f) => <Urgent item={f()} onOpen={() => props.actions.onFinding(f().id)} />}
-        </Match>
         <Match when={clear()}>
-          <button type="button" class="urgent glass" onClick={() => props.actions.onList()}>
+          <button type="button" class="recent glass" onClick={() => props.actions.onList()}>
             <span class="glow" style={{ "--c": "var(--n-green)" }} />
             <span>
               <b>{props.overview.fixed.length} fixed in the last 30 days</b>
@@ -109,7 +105,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
       <TargetRows
         targets={props.overview.targets}
         sweeping={sweeping() !== null}
-        onOpen={props.actions.onTargets}
+        onOpen={props.actions.onTarget}
       />
       <Actions sweeping={sweeping()} actions={props.actions} />
     </section>
@@ -164,29 +160,6 @@ function Centre(props: { overview: Overview; sweeping: Sweeping | null }) {
         </Show>
       </Match>
     </Switch>
-  );
-}
-
-/** The item Rust ranked first, with where it is; tapping it opens its detail. */
-function Urgent(props: { item: Listed; onOpen: () => void }) {
-  const f = () => props.item;
-  return (
-    <button type="button" class="urgent glass" onClick={() => props.onOpen()}>
-      <span class="glow" style={{ "--c": neon(f()) }} />
-      <span>
-        <b>
-          {f().name}
-          <Show when={f().lead.version}>{(v) => ` ${v()}`}</Show>
-        </b>
-        <small>
-          {f().known_exploited ? "exploited in the wild" : f().severity}
-          <Show when={f().advisory_count}>{(n) => ` · ${n()}`}</Show> · {f().target}
-        </small>
-      </span>
-      <span class="go" aria-hidden="true">
-        ›
-      </span>
-    </button>
   );
 }
 
@@ -247,12 +220,12 @@ function rowStatus(target: TargetLine): string {
  * 360px width (a zero is dimmed, so a severity sits in the same place in every row), and a bar split by severity. The owner asked for standard sizes and positions over tags
  * that wrapped and moved with the counts (2026-11-10). Every bar is the full width, so it shows
  * the mix within its target, not its size beside the others. During a sweep the rows dim: their
- * counts are from the last sweep. Past three rows the card scrolls, so the vortex keeps its
- * room. */
+ * counts are from the last sweep. The card grows with its rows until the vortex has only the
+ * room its centre needs, then scrolls (orbit.css). */
 function TargetRows(props: {
   targets: readonly TargetLine[];
   sweeping: boolean;
-  onOpen: () => void;
+  onOpen: (key: string) => void;
 }) {
   return (
     <div class="trows glass" classList={{ stale: props.sweeping }}>
@@ -263,7 +236,7 @@ function TargetRows(props: {
             type="button"
             class="trow"
             aria-label={`${t().label}, ${rowStatus(t())}`}
-            onClick={() => props.onOpen()}
+            onClick={() => props.onOpen(t().key)}
           >
             <Icon name={t().kind} />
             <b class="tname">{t().label}</b>

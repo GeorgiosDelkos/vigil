@@ -54,7 +54,7 @@ const EDGES = /^(border(-(top|right|bottom|left))?(-width)?|outline(-offset)?)$/
 
 const AURORA = "the light behind the main view, placed by eye and blurred by 80px";
 const NUMERAL =
-  "the main view's number: the largest that leaves 8 between the centre and the cards when a failed sweep's banner shortens the stage";
+  "the main view's number: the largest that left 8 between the centre and the cards below a failed sweep's banner (2026-11-10)";
 const DIVIDER = "a hairline divider starting where the row text does";
 const DOT_HALO = "a 3 pixel halo around an 8 pixel status dot";
 const STRIPES = "one period of the sweep bar's 12 pixel stripes at 45 degrees, 12 * sqrt(2)";
@@ -95,7 +95,6 @@ const LISTED: readonly (readonly [string, string, string, string])[] = [
   [".tool i", "box-shadow", "0 0 0 3px rgba(79, 209, 139, 0.14)", DOT_HALO],
   [".sweep-bar-work", "background-size", "17px 100%", STRIPES],
   ["to", "background-position", "17px 0", STRIPES],
-  [".orbit .trows", "max-height", "300px", "three target rows of 100; more scroll"],
   [".orbit .centre", "max-width", "190px", "keeps the centre's words inside the vortex's middle"],
   [".orbit .centre .n", "font", "400 48px/0.85 var(--ui)", NUMERAL],
   [".orbit .centre .n.percent small", "font-size", "24px", NUMERAL],
