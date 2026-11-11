@@ -563,6 +563,8 @@ fn run_agent(setup: &Setup, dir: &Path, cancel: &Cancel) -> Ran {
 #[derive(Debug)]
 pub struct FixAllPlan {
     target: String,
+    /// The target's sweep folders' name, to list its items again under the lock.
+    dir_name: String,
     /// Where and with which agent it runs: one setup for the whole batch.
     setup: Setup,
     /// Never empty, all from one report: [`plan_fix_all`] refuses anything else.
@@ -621,10 +623,57 @@ impl FixAllPlan {
             .collect()
     }
 
-    /// The batch error for `item`, which a sweep or a dismissal changed since it was planned.
-    fn changed(&self, item: &FixAllItem) -> FixError {
+    /// Fails unless the items Fix all would take now are the confirmed ones, in order, from the
+    /// same report, none dismissed: the run's check under the lock. The first difference is
+    /// named; anything that changed is reported as the batch's change, so the next step said is
+    /// to look at the whole list again.
+    fn check_unchanged(&self, data_dir: &DataDir) -> Result<(), FixError> {
+        let now = fixable(data_dir, &self.target, &self.dir_name)?;
+        let differs = self
+            .items
+            .iter()
+            .map(|item| item.finding.key)
+            .ne(now.iter().map(|(key, _)| *key));
+        if differs {
+            let at = self
+                .items
+                .iter()
+                .zip(&now)
+                .position(|(item, (key, _))| item.finding.key != *key)
+                .unwrap_or_else(|| self.items.len().min(now.len()));
+            let name = self
+                .items
+                .get(at)
+                .map(|item| item.name.clone())
+                .or_else(|| now.get(at).map(|(_, name)| name.clone()))
+                .expect("lists that differ have an item at their first difference");
+            return Err(self.changed(name));
+        }
+        for item in &self.items {
+            match still_current(data_dir, &item.finding) {
+                Ok(true) => {}
+                Ok(false)
+                | Err(
+                    FixError::Stale { .. } | FixError::Dismissed { .. } | FixError::Changed { .. },
+                ) => {
+                    return Err(self.changed(item.name.clone()));
+                }
+                Err(why) => {
+                    return Err(FixError::Item {
+                        name: item.name.clone(),
+                        why: Box::new(why),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The batch error for the item `name`, which a sweep, a fix or a dismissal changed since
+    /// the list was planned.
+    fn changed(&self, name: String) -> FixError {
         FixError::Item {
-            name: item.name.clone(),
+            name,
             why: Box::new(FixError::ListChanged {
                 target: self.target.clone(),
             }),
@@ -657,6 +706,27 @@ impl FixAllItem {
     }
 }
 
+/// The items Fix all takes on `target` now, in order: each lead's key and the item's name
+/// ("curl 8.1.2", or an issue's subject). [`plan_fix_all`] and the check under the lock both
+/// list them here, so they cannot disagree.
+fn fixable(
+    data_dir: &DataDir,
+    target: &str,
+    dir_name: &str,
+) -> Result<Vec<(FindingKey, String)>, FixError> {
+    let latest = lifecycle::latest_of(data_dir, target, dir_name)?;
+    let open = popover::items(target, latest.open).open;
+    Ok(popover::fix_all_items(target, &open)
+        .map(|item| {
+            let name = match &item.lead.version {
+                Some(version) => format!("{} {version}", item.name),
+                None => item.name.clone(),
+            };
+            (item.lead.key, sweep::plain(&name))
+        })
+        .collect())
+}
+
 /// Plans a Fix all of `target`: the fix of every open item [`popover::fix_all_items`] takes,
 /// each checked as [`plan_fix`] checks one, and the agent found once for all of them.
 ///
@@ -676,59 +746,69 @@ pub fn plan_fix_all(
             target: target.to_owned(),
         });
     }
-    let latest = lifecycle::latest(data_dir, config)?
+    let (_, dir_name) = sweep::configured_targets(config)
         .into_iter()
-        .find(|t| t.target == target)
+        .find(|(t, _)| t == target)
         .ok_or_else(|| FixError::NotATarget {
             target: target.to_owned(),
         })?;
-    let open = popover::items(target, latest.open).open;
-    let items = popover::fix_all_items(target, &open)
-        .map(|item| {
-            let name = match &item.lead.version {
-                Some(version) => format!("{} {version}", item.name),
-                None => item.name.clone(),
-            };
-            let name = sweep::plain(&name);
-            match plan_finding(data_dir, item.lead.key) {
-                Ok(finding) => Ok(FixAllItem { name, finding }),
-                Err(why) => Err(FixError::Item {
-                    name,
-                    why: Box::new(why),
-                }),
-            }
+    let items = fixable(data_dir, target, &dir_name)?
+        .into_iter()
+        .map(|(key, name)| match plan_finding(data_dir, key) {
+            Ok(finding) => Ok(FixAllItem { name, finding }),
+            Err(why) => Err(FixError::Item {
+                name,
+                why: Box::new(why),
+            }),
         })
         .collect::<Result<Vec<_>, _>>()?;
     let first = items.first().ok_or_else(|| FixError::NothingToFixAll {
         target: target.to_owned(),
     })?;
+    one_report(target, &items)?;
     let setup = setup(config, target, first.finding.key)?;
-    let plan = FixAllPlan {
+    Ok(FixAllPlan {
         target: target.to_owned(),
+        dir_name,
         setup,
         items,
+    })
+}
+
+/// Fails, naming the first item that differs, unless every item of `target` was found by the
+/// same sweep. Each item reads the newest report that has its key, so a sweep that landed
+/// between the reads would mix two reports.
+fn one_report(target: &str, items: &[FixAllItem]) -> Result<(), FixError> {
+    let Some(first) = items.first() else {
+        return Ok(());
     };
-    // Each item reads the newest report that has its key; a sweep that landed between them
-    // would mix two reports.
-    let found = plan.found();
-    if let Some(other) = plan.items.iter().find(|item| item.finding.found != found) {
-        return Err(plan.changed(other));
+    match items
+        .iter()
+        .find(|item| item.finding.found != first.finding.found)
+    {
+        Some(other) => Err(FixError::Item {
+            name: other.name.clone(),
+            why: Box::new(FixError::ListChanged {
+                target: target.to_owned(),
+            }),
+        }),
+        None => Ok(()),
     }
-    Ok(plan)
 }
 
 /// Runs the confirmed Fix all `plan` as one agent run with full access, and records each item
 /// in `state/fixes.jsonl` as [`run_fix`] records one. Call it only after the user confirmed
 /// what the plan shows. Calls `progress` at each step, with the sweeps lock held.
 ///
-/// Every item is checked again under the lock first, and one that a sweep or a dismissal
-/// changed refuses the whole run, naming it: the user confirmed the list as shown, and running
-/// part of it would be a list nobody confirmed. An item the agent reported nothing for is
-/// recorded as `unknown`, with why when the agent was stopped or did not start.
+/// Under the lock, the items Fix all would take are listed again and must be the confirmed
+/// ones, in order, from the same report: a sweep, a fix or a dismissal in between refuses the
+/// whole run, naming the first item that differs. The user confirmed the list as shown, and
+/// running part of it would be a list nobody confirmed. An item the agent reported nothing for
+/// is recorded as `unknown`, with why when the agent was stopped or did not start.
 ///
 /// # Errors
 ///
-/// Fails before the agent runs when a sweep or fix is running, when any item changed since
+/// Fails before the agent runs when a sweep or fix is running, when the list changed since
 /// `plan` was made ([`FixError::Item`]), or when the fix folder cannot be written; and after it
 /// when the records cannot be appended.
 pub fn run_fix_all(
@@ -741,15 +821,7 @@ pub fn run_fix_all(
     // One agent at a time (the owner's rule, 2026-11-11): the whole batch is one agent run
     // under the sweeps lock, so no sweep, fix or other Fix all runs beside it.
     let _lock = Lock::acquire(&data_dir.sweeps_dir())?;
-    for item in &plan.items {
-        let current = still_current(data_dir, &item.finding).map_err(|why| FixError::Item {
-            name: item.name.clone(),
-            why: Box::new(why),
-        })?;
-        if !current {
-            return Err(plan.changed(item));
-        }
-    }
+    plan.check_unchanged(data_dir)?;
     progress(FixProgress::Preparing);
     let started = Timestamp::now();
     let prompt = prompts::render(data_dir, Prompt::FixAll, &plan.target)?
@@ -810,16 +882,20 @@ pub fn run_fix_all(
     append(data_dir, &records)?;
     Ok(records)
 }
-/// How a Fix all went, for the user: `fixed` when every item was (reported `fixed` with exit
-/// code 0, as `vigil fix` counts success), `failed` when none was, `partial` otherwise; and one
-/// line, "2 of 3 fixed", naming each item that was not with its outcome and summary.
+
+/// How a Fix all went, for the user: `fixed` when every item succeeded (reported `fixed` with
+/// exit code 0), `failed` when every item was reported `failed` (nothing changed), `partial`
+/// otherwise; and one line, "2 of 3 fixed", naming each item that did not succeed with its
+/// outcome and summary.
 pub fn fix_all_outcome(records: &[FixRecord]) -> (Outcome, String) {
-    let fixed = |r: &&FixRecord| r.outcome == Outcome::Fixed && r.exit_code == Some(0);
+    let fixed = |r: &&FixRecord| succeeded(r.outcome, r.exit_code);
     let done = records.iter().filter(fixed).count();
-    let outcome = match done {
-        0 => Outcome::Failed,
-        n if n == records.len() => Outcome::Fixed,
-        _ => Outcome::Partial,
+    let outcome = if done == records.len() {
+        Outcome::Fixed
+    } else if records.iter().all(|r| r.outcome == Outcome::Failed) {
+        Outcome::Failed
+    } else {
+        Outcome::Partial
     };
     let mut line = format!("{done} of {} fixed", records.len());
     for record in records.iter().filter(|r| !fixed(r)) {
@@ -831,10 +907,16 @@ pub fn fix_all_outcome(records: &[FixRecord]) -> (Outcome, String) {
     (outcome, line)
 }
 
-/// The valid lines of a Fix all's `results.jsonl`, by key; the last line of a key wins, as the
-/// agent may report a fix again after checking it. A line that does not parse, or fails the
-/// checks a single result gets, is left out, so its fix is recorded as `unknown`. Empty when
-/// the file is missing or cannot be read.
+/// Whether a run with `outcome` and the agent's `exit_code` counts as a fix: the agent
+/// reported `fixed` and exited 0, as `vigil fix` requires to call it a success.
+pub(crate) fn succeeded(outcome: Outcome, exit_code: Option<i32>) -> bool {
+    outcome == Outcome::Fixed && exit_code == Some(0)
+}
+
+/// The valid lines of a Fix all's `results.jsonl`, by key. A line that does not parse, or
+/// fails the checks a single result gets, is skipped; the last valid line of each key wins,
+/// as the agent may report a fix again after checking it. A key with no valid line is missing,
+/// and its fix is recorded as `unknown`. Empty when the file is missing or cannot be read.
 fn read_results(path: &Path) -> BTreeMap<FindingKey, AgentResult> {
     let Ok(text) = fs::read_to_string(path) else {
         return BTreeMap::new();
@@ -960,7 +1042,7 @@ impl Run {
     /// Whether the run counts as a fix: the agent reported `fixed` and exited 0, as `vigil
     /// fix` requires to call it a success.
     pub(crate) fn succeeded(&self) -> bool {
-        self.outcome == Outcome::Fixed && self.exit_code == Some(0)
+        succeeded(self.outcome, self.exit_code)
     }
 }
 
@@ -1051,18 +1133,19 @@ pub enum FixError {
         problems: Vec<String>,
     },
     /// One item of a Fix all cannot be fixed now, so nothing was run.
-    #[error("nothing was run: {name}: {why}")]
+    #[error("nothing was run: {name}")]
     Item {
         /// The item, as the confirmation names it.
         name: String,
-        /// Why, shown in this error's message rather than as its source, so the item it
-        /// names is never left out of what the user reads.
+        /// Why. Callers that show one line print the whole chain, so it is not lost.
+        #[source]
         why: Box<Self>,
     },
-    /// A sweep or a dismissal changed a Fix all's items while the list was being confirmed.
+    /// A sweep, a fix or a dismissal changed a Fix all's items while the list was being
+    /// confirmed.
     #[error(
-        "a sweep or dismissal changed it while the list was being confirmed; run `fix all \
-         {target}` again to see the current fixes"
+        "a sweep, fix or dismissal changed the list while it was being confirmed; run `fix \
+         all {target}` again to see the current fixes"
     )]
     ListChanged {
         /// The target.
@@ -1277,7 +1360,8 @@ mod tests {
         let findings: Vec<Value> = keys
             .iter()
             .map(|key| {
-                json!({"key": key, "severity": "high", "modified": "2026-11-01T00:00:00Z",
+                json!({"key": key, "name": format!("pkg-{key}"), "severity": "high",
+                    "modified": "2026-11-01T00:00:00Z",
                     "fix": {"summary": "s", "steps": [], "commands": ["true"]}})
             })
             .collect();
@@ -1324,6 +1408,7 @@ mod tests {
     fn fix_all_of(keys: &[FindingKey], report: &Path) -> FixAllPlan {
         FixAllPlan {
             target: "mac".to_owned(),
+            dir_name: "mac".to_owned(),
             setup: nowhere(),
             items: keys
                 .iter()
@@ -1397,53 +1482,107 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_all_with_one_item_changed_runs_nothing_and_names_it() {
+    fn a_fix_all_whose_list_changed_runs_nothing_and_names_the_first_difference() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path());
         let keys = [FindingKey::new(&["a"]), FindingKey::new(&["b"])];
         let report = save_report_of(&data_dir, "20261105T000000Z", "2026-11-05T00:00:00Z", &keys);
         let plan = fix_all_of(&keys, &report);
-        let run = || {
-            run_fix_all(
+        let refused = |plan: &FixAllPlan| {
+            let err = run_fix_all(
                 &data_dir,
-                &plan,
+                plan,
                 Confirmed::Asked,
                 &mut |_| {},
                 &Cancel::new(),
             )
-            .unwrap_err()
+            .unwrap_err();
+            let FixError::Item { name, why } = &err else {
+                panic!("{err:?}");
+            };
+            assert!(matches!(**why, FixError::ListChanged { .. }), "{err:?}");
+            assert_eq!(err.to_string(), format!("nothing was run: {name}"));
+            let chain = sweep::error_chain(&err);
+            assert!(
+                chain.ends_with(
+                    "changed the list while it was being confirmed; run `fix all mac` again to \
+                     see the current fixes"
+                ),
+                "the cause is kept, with the batch's next step: {chain}"
+            );
+            name.clone()
         };
 
         lifecycle::dismiss(&data_dir, keys[1], "accepted").unwrap();
-        let err = run();
-        assert!(
-            matches!(&err, FixError::Item { name, why }
-                if name == "item 1" && matches!(**why, FixError::Dismissed { .. })),
-            "{err:?}"
-        );
-        assert!(
-            err.to_string().starts_with(&format!(
-                "nothing was run: item 1: {} is dismissed",
-                keys[1]
-            )),
-            "{err}"
-        );
+        assert_eq!(refused(&plan), "item 1", "dismissed since");
         lifecycle::undismiss(&data_dir, keys[1]).unwrap();
 
-        save_report_of(&data_dir, "20261106T000000Z", "2026-11-06T00:00:00Z", &keys);
-        let err = run();
+        // An item the plan does not have (one undismissed since, say) is a difference too.
+        assert_eq!(
+            refused(&fix_all_of(&keys[..1], &report)),
+            format!("pkg-{}", keys[1]),
+            "named as the list names it now"
+        );
+
+        // A fix of the first reported in between: it is no longer open.
+        let mut fixed = record(1);
+        fixed.key = keys[0];
+        fixed.found = "2026-11-05T00:00:00Z".parse().unwrap();
+        append(&data_dir, &[fixed]).unwrap();
+        assert_eq!(refused(&plan), "item 0", "fixed since");
+        fs::remove_file(data_dir.state_dir().join(FIXES_FILE)).unwrap();
+
+        // A newer sweep without the second: it is stale.
+        save_report_of(
+            &data_dir,
+            "20261106T000000Z",
+            "2026-11-06T00:00:00Z",
+            &keys[..1],
+        );
+        assert_eq!(refused(&plan), "item 1", "gone from the newest report");
+
+        // A newer sweep with both: the same list, from another report.
+        save_report_of(&data_dir, "20261107T000000Z", "2026-11-07T00:00:00Z", &keys);
+        assert_eq!(refused(&plan), "item 0", "found by another sweep");
+
+        assert!(!data_dir.state_dir().join(FIXES_FILE).exists());
+        assert!(!data_dir.fixes_dir().exists(), "nothing ran");
+    }
+
+    #[test]
+    fn planning_names_the_item_whose_fix_cannot_run_and_refuses_mixed_reports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let keys = [FindingKey::new(&["a"]), FindingKey::new(&["b"])];
+        let report = save_report_of(&data_dir, "20261105T000000Z", "2026-11-05T00:00:00Z", &keys);
+        // The second finding's fix carries the heredoc's end word, which a plan refuses.
+        let text = fs::read_to_string(&report).unwrap();
+        let at = text.rfind(r#""commands":["true"]"#).unwrap();
+        let edited = format!(
+            "{}{}",
+            &text[..at],
+            text[at..].replacen(r#"["true"]"#, r#"["VIGIL_END"]"#, 1)
+        );
+        fs::write(&report, edited).unwrap();
+        let err = plan_fix_all(&data_dir, &config(""), "mac").unwrap_err();
         assert!(
             matches!(&err, FixError::Item { name, why }
-                if name == "item 0" && matches!(**why, FixError::ListChanged { .. })),
+                if *name == format!("pkg-{}", keys[1])
+                    && matches!(**why, FixError::Malformed { .. })),
             "{err:?}"
         );
+        let chain = sweep::error_chain(&err);
+        assert!(chain.contains("VIGIL_END is reserved"), "{chain}");
+
+        let mut plan = fix_all_of(&keys, &report);
+        assert!(one_report("mac", &plan.items).is_ok());
+        plan.items[1].finding.found = "2026-11-06T00:00:00Z".parse().unwrap();
+        let err = one_report("mac", &plan.items).unwrap_err();
         assert!(
-            err.to_string()
-                .ends_with("run `fix all mac` again to see the current fixes"),
-            "the next step is the batch's: {err}"
+            matches!(&err, FixError::Item { name, why }
+                if name == "item 1" && matches!(**why, FixError::ListChanged { .. })),
+            "{err:?}"
         );
-        assert!(!data_dir.state_dir().join("fixes.jsonl").exists());
-        assert!(!data_dir.fixes_dir().exists(), "no fix folder either");
     }
 
     #[test]
@@ -1451,7 +1590,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("results.jsonl");
         assert!(read_results(&path).is_empty(), "no file yet");
-        let [a, b, c] = [&["a"], &["b"], &["c"]].map(|p| FindingKey::new(p));
+        let [a, b, c, d] = [&["a"], &["b"], &["c"], &["d"]].map(|p| FindingKey::new(p));
         let lines = [
             format!(r#"{{"key": "{a}", "outcome": "failed", "summary": "first try"}}"#),
             "not json".to_owned(),
@@ -1459,12 +1598,23 @@ mod tests {
             format!(r#"{{"key": "{b}", "outcome": "unknown", "summary": "x"}}"#),
             format!(r#"{{"key": "{c}", "outcome": "fixed", "summary": "x", "pr": 1}}"#),
             format!(r#"{{"key": "{c}", "outcome": "fixed", "summary": ""}}"#),
+            format!(r#"{{"key": "{d}", "outcome": "partial", "summary": "valid"}}"#),
+            format!(r#"{{"key": "{d}", "outcome": "fixed", "summary": "a\nb"}}"#),
         ];
         fs::write(&path, lines.join("\n")).unwrap();
         let results = read_results(&path);
-        assert_eq!(results.len(), 1, "{results:?}");
-        assert_eq!(results[&a].outcome, Outcome::Fixed);
+        assert_eq!(results.len(), 2, "b and c have no valid line: {results:?}");
+        assert_eq!(
+            results[&a].outcome,
+            Outcome::Fixed,
+            "the last valid line wins"
+        );
         assert_eq!(results[&a].summary, "again");
+        assert_eq!(
+            results[&d].outcome,
+            Outcome::Partial,
+            "an invalid line after a valid one is skipped"
+        );
     }
 
     #[test]
@@ -1549,10 +1699,26 @@ mod tests {
         let (outcome, line) = fix_all_outcome(&[crashed]);
         assert_eq!(
             outcome,
-            Outcome::Failed,
-            "fixed with a failing exit is not fixed"
+            Outcome::Partial,
+            "fixed with a failing exit is not fixed, nor nothing changed"
         );
         assert_eq!(line, "0 of 1 fixed; t: fixed, run 3");
+        let mut unknown = record(5);
+        unknown.outcome = Outcome::Unknown;
+        let mut failed = record(6);
+        failed.outcome = Outcome::Failed;
+        assert_eq!(
+            fix_all_outcome(&[unknown, failed]).0,
+            Outcome::Partial,
+            "unknown may have changed something"
+        );
+        let mut failed = record(7);
+        failed.outcome = Outcome::Failed;
+        assert_eq!(
+            fix_all_outcome(&[failed]).0,
+            Outcome::Failed,
+            "only when every item failed"
+        );
     }
 
     #[test]

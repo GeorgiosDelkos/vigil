@@ -398,11 +398,13 @@ The owner asked for a Fix all button on a target's screen and chose "one run, on
   one question lists every item: its name and version, the fix's summary and exact commands,
   where it runs and with which agent, then "Fix all N" and Cancel.
 - Staleness: the app runs only the list it showed (the same keys in the same order, from the
-  same sweep); under the sweeps lock every item is checked again, and one that a sweep or a
-  dismissal changed refuses the whole run, naming the item ("nothing was run: curl 8.1.2:
-  ... is dismissed ..."). Dropping that item and running the rest was weighed: it would run a
-  list nobody confirmed, so refusing is the honest one, and Fix all asked again shows the
-  current list.
+  same sweep). Under the sweeps lock the list is made again as planning makes it, and must be
+  the same keys in the same order from the same report: a sweep, a fix reported in between, a
+  dismissal or undismissal, or a new lead refuses the whole run, naming the first item that
+  differs ("nothing was run: curl 8.1.2: a sweep, fix or dismissal changed the list while it
+  was being confirmed; run `fix all mac` again ..."). Dropping that item and running the rest
+  was weighed: it would run a list nobody confirmed, so refusing is the honest one, and Fix
+  all asked again shows the current list.
 - One agent run with full access, the `fix-all` prompt (`prompts/fix-all.md`, listed with its
   hashes like the others), and `fixes.json` holding each item's brief as `fix.json` holds one.
   The agent applies them in order and appends one line per item to `results.jsonl` (`key`,
@@ -422,7 +424,8 @@ The owner asked for a Fix all button on a target's screen and chose "one run, on
   are refused while it runs.
 - While it runs, the popover's fixing view lists preparing, one step per item, and recording;
   the running item is the first the agent has not reported in `results.jsonl` yet, with one
-  spinner on it. When it ends, the banner says "2 of 3 fixed" and names each item not fixed.
+  spinner on it. When it ends, the banner says "2 of 3 fixed" and names each item not fixed; it
+  reads "failed" only when every item reported `failed`, and "partial" otherwise.
 - CLI: `vigil fix all <target> [--yes]` shows every item, asks once, runs, prints a line per
   item and exits non-zero unless every item was fixed with exit code 0.
 

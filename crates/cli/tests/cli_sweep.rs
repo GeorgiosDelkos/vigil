@@ -66,6 +66,9 @@ case "$FAKE_AGENT_MODE:$n" in
     report "$1" fixed "stopped redis"
     echo 'not json' >> results.jsonl
     report "$2" failed "apt is locked" ;;
+  fix-all-first:*)
+    set -- $(grep -o '"key": "[0-9a-f]*"' fixes.json | cut -d'"' -f4)
+    report "$1" fixed "stopped redis" ;;
   fix-all-hang:*)
     set -- $(grep -o '"key": "[0-9a-f]*"' fixes.json | cut -d'"' -f4)
     report "$1" fixed "stopped redis"
@@ -991,6 +994,37 @@ fn fix_all_holds_off_every_other_run_and_keeps_what_was_reported() {
             .starts_with("the agent was stopped partway"),
         "{history}"
     );
+
+    // Neither counts as fixed (the first had no exit code), so both run again. An agent that
+    // reports only the first leaves the second unknown, saying so.
+    let first_only = sandbox
+        .command("fix-all-first")
+        .args(["fix", "all", "server:web", "--yes"])
+        .output()
+        .unwrap();
+    assert!(!first_only.status.success());
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    let last: serde_json::Value = serde_json::from_str(history.lines().last().unwrap()).unwrap();
+    assert_eq!(last["key"], keys[1].as_str());
+    assert_eq!(last["outcome"], "unknown");
+    assert_eq!(
+        last["summary"],
+        "the agent reported nothing for it in results.jsonl"
+    );
+
+    // A planning failure keeps its cause: the CLI prints the whole chain.
+    let report = sandbox.newest_report_path("server-web");
+    let edited = fs::read_to_string(&report)
+        .unwrap()
+        .replace("sudo apt-get install --only-upgrade openssl", "VIGIL_END");
+    fs::write(&report, edited).unwrap();
+    let malformed = sandbox.fix(&["all", "server:web", "--yes"], "");
+    let stderr = text(&malformed.stderr);
+    assert!(
+        stderr.contains("nothing was run: server/system.json"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("VIGIL_END is reserved"), "{stderr}");
 
     // With both dismissed nothing is left to fix, and nothing runs.
     let runs = sandbox.runs();
