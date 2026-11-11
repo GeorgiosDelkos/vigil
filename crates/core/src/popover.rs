@@ -24,11 +24,13 @@
 //! decides, not the lead's alone (decided 2026-11-11): `vigil fix` takes any finding's key, and
 //! a dismissal can change which finding leads. An item is a reported fix when at least one of
 //! its findings has a fix reported done without a pull request, and none has a fix a later
-//! sweep still found ([`PendingFix::NotHeld`]) or a pull request not merged yet
-//! ([`PendingFix::PullRequest`]). Otherwise it stays open and counted, whole. A component's
-//! findings are never split between open and fixed: a fix that upgraded or removed the
-//! component fixed all of them, and splitting would leave its other advisories red after the
-//! version is gone, which is what the owner reported. An issue is an item of one finding.
+//! sweep still found ([`PendingFix::NotHeld`]) or a fix that opened a pull request
+//! ([`PendingFix::PullRequest`]); otherwise it stays open and counted, whole. A pull request
+//! keeps the item open until a sweep no longer finds it: Vigil does not check whether it was
+//! merged. A component's findings are never split between open and fixed: a fix that upgraded
+//! or removed the component fixed all of them, and splitting would leave its other advisories
+//! red after the version is gone, which is what the owner reported. An issue is an item of
+//! one finding.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -50,6 +52,10 @@ pub struct PopoverView {
     /// The list tab the main view's centre opens: Fixed when nothing is open but fixes wait
     /// for the next sweep, so the user lands on them; Needs you otherwise.
     pub list_tab: ListTab,
+    /// What the main view's centre shows when nothing is open but fixes wait for the next
+    /// sweep: their number over "to confirm", as it shows what needs the user (the owner's
+    /// choice, 2026-11-11). `None` otherwise.
+    pub to_confirm: Option<Figure>,
     /// Items whose fix the agent reported done, newest fix first; the next sweep confirms
     /// them. Not open, so counted nowhere else.
     pub reported: Vec<ReportedFix>,
@@ -86,6 +92,15 @@ impl PopoverView {
     pub fn worst(&self) -> Option<Severity> {
         self.items.iter().map(|item| item.severity).min()
     }
+}
+
+/// A number with the words under it, as the main view's centre shows it.
+#[derive(Debug, Serialize)]
+pub struct Figure {
+    /// The number.
+    pub count: usize,
+    /// What it counts: "to confirm".
+    pub label: String,
 }
 
 /// A tab of the popover's list.
@@ -141,7 +156,8 @@ pub struct Listed {
 pub enum PendingFix {
     /// A fix ended `fixed`, but a later sweep still found its finding.
     NotHeld,
-    /// A fix opened a pull request: it lands once that is merged.
+    /// A fix opened a pull request. The item stays open until a sweep no longer finds it:
+    /// whether the pull request was merged is not checked.
     PullRequest,
 }
 
@@ -282,6 +298,10 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
         } else {
             ListTab::Needs
         },
+        to_confirm: (all.is_empty() && !reported.is_empty()).then(|| Figure {
+            count: reported.len(),
+            label: "to confirm".to_owned(),
+        }),
         needs_you,
         exploited: all.iter().filter(|item| item.known_exploited).count(),
         counts: Counts::of(&all),
@@ -820,6 +840,7 @@ mod tests {
         assert!(!view.all_clear);
         assert_eq!(line.to_confirm.as_deref(), Some("1 fix to confirm"));
         assert!(matches!(view.list_tab, ListTab::Needs), "something is open");
+        assert!(view.to_confirm.is_none(), "the centre counts what is open");
     }
 
     #[test]
@@ -842,6 +863,11 @@ mod tests {
             matches!(one.list_tab, ListTab::Fixed),
             "the centre opens the fixes"
         );
+        let figure = one
+            .to_confirm
+            .as_ref()
+            .expect("only reported fixes are left");
+        assert_eq!((figure.count, figure.label.as_str()), (1, "to confirm"));
 
         let two = popover_view(vec![target(
             "mac",
@@ -853,6 +879,11 @@ mod tests {
             0,
         )]);
         assert_eq!(two.headline, "2 fixes to confirm");
+        let figure = two
+            .to_confirm
+            .as_ref()
+            .expect("only reported fixes are left");
+        assert_eq!((figure.count, figure.label.as_str()), (2, "to confirm"));
         assert_eq!(
             two.targets[0].to_confirm.as_deref(),
             Some("2 fixes to confirm")
@@ -954,7 +985,10 @@ mod tests {
             ],
         );
         let (item, reported) = one(&listed);
-        assert!(!reported, "a pull request not merged yet has not landed");
+        assert!(
+            !reported,
+            "a pull request keeps it open until a sweep confirms it"
+        );
         assert!(
             matches!(item.pending_fix, Some(PendingFix::PullRequest)),
             "{item:?}"
@@ -1142,6 +1176,7 @@ mod tests {
         assert_eq!(open.targets[0].to_confirm, None, "no fix reported");
         assert!(matches!(open.list_tab, ListTab::Needs));
         assert!(matches!(popover_view(Vec::new()).list_tab, ListTab::Needs));
+        assert!(swept.to_confirm.is_none(), "all clear");
     }
 
     #[test]

@@ -1243,6 +1243,7 @@ describe("the main view", () => {
     shown = overview({
       reported: [reportedFix(node)],
       list_tab: "fixed",
+      to_confirm: { count: 1, label: "to confirm" },
       headline: "1 fix to confirm",
       last_swept: "2026-11-06T11:00:00Z",
       first_sweep_hint: null,
@@ -1256,7 +1257,9 @@ describe("the main view", () => {
     answer();
     render(() => <App />);
     const count = await screen.findByTitle("Show details");
-    expect(count.textContent).toBe("1 fix to confirmShow details");
+    expect(count.textContent).toBe("1to confirmShow details");
+    expect(within(count).getByText("1").classList.contains("n")).toBe(true);
+    expect(within(count).getByText("to confirm").classList.contains("l")).toBe(true);
     expect(document.querySelector(".urgent")).toBeNull();
     expect(screen.queryByText(/node\.js/)).toBeNull();
     expect(sceneOf(shown)).toEqual({ mood: "clear" });

@@ -136,6 +136,14 @@ function Centre(props: { overview: Overview; sweeping: Sweeping | null }) {
           </>
         )}
       </Match>
+      <Match when={o().to_confirm}>
+        {(figure) => (
+          <>
+            <span class="n">{figure().count}</span>
+            <span class="l">{figure().label}</span>
+          </>
+        )}
+      </Match>
       <Match when={o().all_clear}>
         <span class="n word">Clear</span>
         <span class="l">nothing open</span>

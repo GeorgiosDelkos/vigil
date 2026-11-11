@@ -124,6 +124,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     busy: false,
     items: [],
     list_tab: "needs",
+    to_confirm: null,
     reported: [],
     needs_you: 0,
     exploited: 0,

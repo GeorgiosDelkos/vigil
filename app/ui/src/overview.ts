@@ -150,6 +150,8 @@ export type Overview = {
   readonly items: readonly Listed[];
   /** The list tab the main view's centre opens. */
   readonly list_tab: "needs" | "fixed";
+  /** The centre's number and words when nothing is open but fixes wait for the next sweep. */
+  readonly to_confirm: { readonly count: number; readonly label: string } | null;
   /** Items whose fix was reported, newest fix first. */
   readonly reported: readonly ReportedFix[];
   /** Fixes a later sweep confirmed that finished in the last 30 days, newest first. */

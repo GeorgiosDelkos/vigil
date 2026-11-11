@@ -127,7 +127,7 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   reported". A fix is for the installed component, so every finding in an item decides, not
   the lead alone (`vigil fix` takes any finding's key, and a dismissal can change the lead):
   an item is a reported fix when at least one of its findings has a fix reported without a
-  pull request, and none is "Still found after a fix" or has a pull request still open.
+  pull request, and none is "Still found after a fix" or has a fix that opened one.
   Otherwise it stays open and counted, whole; a component's findings are never split between
   open and fixed. A reported fix keeps every finding in it, its row says how many advisories,
   and the newest fix's summary and time speak for it. It is counted nowhere (needs you,
@@ -137,10 +137,11 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   confirm" in green, not clear. The owner verified such fixes by hand and asked on 2026-11-11
   that a fixed issue not show as open; this replaces the 2026-11-08 rule that kept it
   counted. With only such items left the headline reads "1 fix to confirm" ("2 fixes to
-  confirm"), not "All clear", until a sweep confirms them, and the main view's centre opens
-  the Fixed tab. When a run opened a pull request, the item stays open and counted, marked
-  "Pull request open": the fix lands once merged. A later sweep
-  that still finds it marks it "Still found after a fix", and it is open again.
+  confirm"), not "All clear", until a sweep confirms them; the main view's centre shows their
+  number over "to confirm", as it shows what needs you, and opens the Fixed tab. When a run
+  opened a pull request, the item stays open and counted, marked "Pull request open", until
+  a sweep no longer finds it; whether the pull request was merged is not checked. A later
+  sweep that still finds it marks it "Still found after a fix", and it is open again.
   Once a later sweep no longer finds it, the fix is confirmed and listed under Fixed, with the
   finding's title, the agent's summary and the pull request, for 30 days.
   Which report a run fixes is decided by the sweep it was planned from (`found` in the
