@@ -104,6 +104,7 @@ export function component(
     fix_scope: grouped
       ? `This fix is for the component, ${changes.name ?? lead.name} ${lead.version ?? ""}, which all ${findings.length} advisories are in; the next sweep checks each of them again.`
       : null,
+    pending_fix: null,
     ...changes,
   };
 }
@@ -122,6 +123,9 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     status: { state: "idle" },
     busy: false,
     items: [],
+    list_tab: "needs",
+    to_confirm: null,
+    reported: [],
     needs_you: 0,
     exploited: 0,
     counts: { critical: 0, high: 0, medium: 0, low: 0 },
@@ -139,6 +143,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
         checked: null,
         counts: { critical: 0, high: 0, medium: 0, low: 0 },
         open: 0,
+        to_confirm: null,
         dismissed: 0,
       },
     ],

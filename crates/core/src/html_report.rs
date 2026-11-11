@@ -28,6 +28,7 @@ use crate::paths::DataDir;
 use crate::popover::FixedListed;
 use crate::popover::Listed;
 use crate::popover::PopoverView;
+use crate::popover::ReportedFix;
 use crate::popover::popover_view;
 
 /// Writes the HTML report of every configured target to `<data dir>/report.html`, replacing
@@ -80,6 +81,7 @@ fn render(latest: Vec<Latest>, now: Timestamp) -> String {
     out.push_str(&exploited_callout(&view));
     out.push_str(&findings(&view));
     out.push_str(&targets_table(&view));
+    out.push_str(&reported_table(&view.reported));
     out.push_str(&fixed_table(&view.fixed));
     out.push_str(&format!(
         "<footer class=\"rep-foot\"><span>Sources: OSV.dev (with the GitHub Advisory \
@@ -181,15 +183,23 @@ fn exploited_callout(view: &PopoverView) -> String {
 fn findings(view: &PopoverView) -> String {
     if view.items.is_empty() {
         let unswept = view.targets.iter().filter(|t| t.swept.is_none()).count();
-        let text = match (view.all_clear, unswept) {
-            (false, _) => {
+        let text = match (view.last_swept, view.reported.is_empty(), unswept) {
+            (None, _, _) => {
                 "No target has a sweep with a verdict yet, so nothing is known.".to_owned()
             }
-            (true, 0) => "Nothing is open. Every target's newest sweep found nothing affected \
-                          or risky."
+            (Some(_), true, 0) => "Nothing is open. Every target's newest sweep found nothing \
+                                   affected or risky."
                 .to_owned(),
-            (true, n) => format!(
+            (Some(_), false, 0) => {
+                "Nothing is open. The next sweep confirms the fixes listed below.".to_owned()
+            }
+            (Some(_), true, n) => format!(
                 "Nothing is open in the swept targets; {} not swept yet.",
+                plural(n, "target")
+            ),
+            (Some(_), false, n) => format!(
+                "Nothing is open in the swept targets; {} not swept yet. The next sweep \
+                 confirms the fixes listed below.",
                 plural(n, "target")
             ),
         };
@@ -470,6 +480,39 @@ fn targets_table(view: &PopoverView) -> String {
          <th>Checked</th><th>Open</th><th>Critical</th><th>High</th><th>Medium</th>\
          <th>Low</th><th>Dismissed</th><th>Swept</th></tr></thead><tbody>{rows}</tbody>\
          </table></div></section>\n"
+    )
+}
+
+/// The items whose fix the agent reported done, which the next sweep confirms; nothing when
+/// there are none.
+fn reported_table(reported: &[ReportedFix]) -> String {
+    let Some(first) = reported.first() else {
+        return String::new();
+    };
+    let rows: String = reported
+        .iter()
+        .map(|r| {
+            let count = r
+                .item
+                .advisory_count
+                .as_ref()
+                .map_or(String::new(), |n| format!(" · {}", esc(n)));
+            format!(
+                "<tr><td><b>{}</b>{count}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                installed(&r.item),
+                esc(&r.item.target),
+                esc(&r.summary),
+                when(r.fixed_at)
+            )
+        })
+        .collect::<Vec<_>>()
+        .concat();
+    // Every row's status is the same line, so it heads the table once.
+    format!(
+        "<section><h2>{}</h2><div class=\"scroll\"><table><thead><tr><th>Item</th>\
+         <th>Target</th><th>What the agent did</th><th>Fixed</th></tr></thead>\
+         <tbody>{rows}</tbody></table></div></section>\n",
+        esc(&first.status)
     )
 }
 
@@ -1254,6 +1297,60 @@ mod tests {
         assert!(html.contains("<h1>Not swept yet</h1>"));
         assert!(html.contains("No target has a sweep with a verdict yet"));
         assert!(html.contains("<td>not swept yet</td>"));
+    }
+
+    #[test]
+    fn a_reported_fix_is_listed_as_fixed_and_not_as_open() {
+        let mut fixed = open(1, Severity::Critical, true);
+        fixed.fix_state = Some(FixState::Reported {
+            at: at("2026-11-09T12:00:00Z"),
+            summary: "upgraded pkg1".to_owned(),
+            pull_request: None,
+        });
+        let html = page(vec![mac(vec![fixed])]);
+        assert!(html.contains("<h1>1 fix to confirm</h1>"), "{html}");
+        assert!(html.contains("Nothing is open. The next sweep confirms the fixes listed below."));
+        assert!(
+            !html.contains("class=\"rep-alert\""),
+            "no exploited item is open"
+        );
+        assert!(html.contains("<div><b>0</b><span>open in all</span>"));
+        assert!(html.contains("<h2>Fixed · the next sweep confirms it</h2>"));
+        assert!(html.contains(
+            "<tr><td><b>pkg1 1.0.0</b></td><td>This Mac</td><td>upgraded pkg1</td>\
+             <td>9 Nov 2026, 12:00 UTC</td></tr>"
+        ));
+
+        let mut repo = mac(Vec::new());
+        repo.target = "github:o/r".to_owned();
+        repo.swept = None;
+        let mut fixed = open(1, Severity::High, false);
+        fixed.fix_state = Some(FixState::Reported {
+            at: at("2026-11-09T12:00:00Z"),
+            summary: "upgraded pkg1".to_owned(),
+            pull_request: None,
+        });
+        // Another advisory in pkg1 1.0.0, with no fix run of its own.
+        let sibling = Open {
+            name: "pkg1".to_owned(),
+            component: open(1, Severity::Low, false).component,
+            ..open(3, Severity::Low, false)
+        };
+        let html = page(vec![mac(vec![fixed, sibling]), repo]);
+        assert!(html.contains(
+            "Nothing is open in the swept targets; 1 target not swept yet. The next sweep \
+             confirms the fixes listed below."
+        ));
+        assert!(
+            html.contains("<td><b>pkg1 1.0.0</b> · 2 advisories</td>"),
+            "every advisory in it is counted: {html}"
+        );
+
+        let html = page(vec![mac(vec![open(2, Severity::Low, false)])]);
+        assert!(
+            !html.contains("the next sweep confirms it"),
+            "nothing reported"
+        );
     }
 
     #[test]

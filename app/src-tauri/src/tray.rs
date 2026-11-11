@@ -28,6 +28,7 @@ use tauri_plugin_positioner::WindowExt as _;
 use vigil_core::Config;
 use vigil_core::Severity;
 use vigil_core::latest;
+use vigil_core::popover_view;
 
 use crate::runner;
 use crate::runner::Runner;
@@ -126,6 +127,16 @@ enum Look {
 }
 
 impl Look {
+    /// The look of an idle app whose worst open item is `worst`.
+    fn of(worst: Option<Severity>) -> Self {
+        match worst {
+            None => Self::Clean,
+            Some(Severity::Low) => Self::Low,
+            Some(Severity::Medium) => Self::Medium,
+            Some(Severity::High | Severity::Critical) => Self::High,
+        }
+    }
+
     fn png(self, bar: Bar) -> &'static [u8] {
         match (self, bar) {
             (Self::Clean, _) => include_bytes!("../icons/tray-clean.png"),
@@ -255,17 +266,8 @@ fn look(app: &AppHandle) -> Look {
     let Ok(targets) = latest(runner.data_dir(), &config) else {
         return Look::Failed;
     };
-    let worst = targets
-        .iter()
-        .flat_map(|t| &t.open)
-        .map(|o| o.severity)
-        .min();
-    match worst {
-        None => Look::Clean,
-        Some(Severity::Low) => Look::Low,
-        Some(Severity::Medium) => Look::Medium,
-        Some(Severity::High | Severity::Critical) => Look::High,
-    }
+    // The popover's open items, so a fix reported done colours neither the icon nor the list.
+    Look::of(popover_view(targets).worst())
 }
 
 fn toggle(app: &AppHandle) {
@@ -295,6 +297,21 @@ fn toggle(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_icon_takes_the_worst_open_item() {
+        assert!(matches!(Look::of(None), Look::Clean));
+        assert!(matches!(Look::of(Some(Severity::Low)), Look::Low));
+        assert!(matches!(Look::of(Some(Severity::Medium)), Look::Medium));
+        assert!(matches!(Look::of(Some(Severity::High)), Look::High));
+        assert!(matches!(Look::of(Some(Severity::Critical)), Look::High));
+        // With nothing swept there is nothing open; that a reported fix is not open is the
+        // core's `PopoverView::worst`, tested there.
+        assert!(matches!(
+            Look::of(popover_view(Vec::new()).worst()),
+            Look::Clean
+        ));
+    }
 
     #[test]
     fn a_light_bar_gets_its_own_coloured_icons_and_the_same_templates() {

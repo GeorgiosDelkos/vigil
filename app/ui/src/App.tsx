@@ -21,6 +21,8 @@ import {
   type FixPreview,
   type Listed,
   type Overview,
+  type PendingFix,
+  type ReportedFix,
   type Severity,
   type Status,
   type TargetLine,
@@ -193,7 +195,7 @@ export function App() {
                 overview={o()}
                 now={now()}
                 actions={{
-                  onList: () => list("needs"),
+                  onList: () => list(o().list_tab),
                   onTargets: () => list("targets"),
                   onFinding: setSelected,
                   onSweep: () => run(() => invoke("sweep_now")),
@@ -257,7 +259,7 @@ export function App() {
                   />
                 </Match>
                 <Match when={tab() === "fixed"}>
-                  <FixedRows items={o().fixed} now={now()} />
+                  <FixedRows reported={o().reported} fixed={o().fixed} now={now()} />
                 </Match>
               </Switch>
             </Match>
@@ -324,7 +326,7 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
     ["needs", "Needs you", props.overview.needs_you],
     ["targets", "Targets", props.overview.targets.length],
     ["all", "All open", props.overview.items.length],
-    ["fixed", "Fixed", props.overview.fixed.length],
+    ["fixed", "Fixed", props.overview.reported.length + props.overview.fixed.length],
   ];
   return (
     <div class="seg" role="tablist" aria-label="View">
@@ -344,15 +346,40 @@ function Tabs(props: { tab: Tab; onTab: (tab: Tab) => void; overview: Overview }
   );
 }
 
-/** Fixes a later sweep confirmed: what was fixed, where, when, and how. */
-function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
+/** Fixes the agent reported, which the next sweep confirms, then fixes a later sweep
+ * confirmed: what was fixed, where, when, and how. */
+function FixedRows(props: {
+  reported: readonly ReportedFix[];
+  fixed: readonly FixedItem[];
+  now: Date;
+}) {
   return (
     <Show
-      when={props.items.length > 0}
+      when={props.reported.length + props.fixed.length > 0}
       fallback={<p class="quiet">No confirmed fixes from the last 30 days.</p>}
     >
       <ul class="group list pane" aria-label="Fixed" tabindex="0">
-        <For each={props.items}>
+        <For each={props.reported}>
+          {(fix) => (
+            <li class="row fixed-row">
+              <Icon name="done" />
+              <span class="what">
+                <span class="t">
+                  {fix.item.name}
+                  <Show when={fix.item.lead.version}>{(v) => <span class="ver">{v()}</span>}</Show>
+                </span>
+                <Show when={fix.item.advisory_count}>
+                  {(count) => <span class="id">{count()}</span>}
+                </Show>
+                <span class="confirming">{fix.status}</span>
+                <span class="where">{fix.item.target}</span>
+                <span class="fix">{fix.summary}</span>
+              </span>
+              <span class="age">{ago(fix.fixed_at, props.now)}</span>
+            </li>
+          )}
+        </For>
+        <For each={props.fixed}>
           {(item) => (
             <li class="row fixed-row">
               <Icon name="done" />
@@ -373,7 +400,9 @@ function FixedRows(props: { items: readonly FixedItem[]; now: Date }) {
   );
 }
 
-/** The badge of an open finding a fix was reported for, as its fix state says. */
+/** The badge of an open finding a fix was reported for, as its fix state says. In an open
+ * item, "Fix reported" shows only on one advisory of several, in the detail: an item whose
+ * fixes are all reported is not open. */
 function fixLabel(state: FixState): string {
   if (state.state === "not_held") {
     return "Still found after a fix";
@@ -381,9 +410,15 @@ function fixLabel(state: FixState): string {
   return state.pull_request === null ? "Fix reported" : "Pull request open";
 }
 
-/** Whether a row shows any tag: exploited, new, or what its lead's fix came to. */
+/** The badge of an open item a fix is pending for, as Rust decides over all its findings. */
+const PENDING_LABELS: Readonly<Record<PendingFix, string>> = {
+  not_held: "Still found after a fix",
+  pull_request: "Pull request open",
+};
+
+/** Whether a row shows any tag: exploited, new, or what keeps its fix from counting. */
 function tagged(item: Listed): boolean {
-  return item.known_exploited || item.new || item.lead.fix_state !== null;
+  return item.known_exploited || item.new || item.pending_fix !== null;
 }
 
 /** What a row says it is about: how many advisories a component has, or its advisory ids. */
@@ -418,9 +453,9 @@ function Rows(props: {
                     <Show when={item.new && !item.known_exploited}>
                       <span class="tag new">New</span>
                     </Show>
-                    <Show when={item.lead.fix_state}>
-                      {(state) => (
-                        <span class={`tag fix-${state().state}`}>{fixLabel(state())}</span>
+                    <Show when={item.pending_fix}>
+                      {(pending) => (
+                        <span class={`tag fix-${pending()}`}>{PENDING_LABELS[pending()]}</span>
                       )}
                     </Show>
                   </span>
@@ -480,9 +515,16 @@ function Targets(props: { targets: readonly TargetLine[]; now: Date }) {
                 <Show
                   when={t.open > 0}
                   fallback={
-                    <>
-                      <Icon name="done" /> clear
-                    </>
+                    <Show
+                      when={t.to_confirm}
+                      fallback={
+                        <>
+                          <Icon name="done" /> clear
+                        </>
+                      }
+                    >
+                      {(text) => <span class="confirming">{text()}</span>}
+                    </Show>
                   }
                 >
                   <b>{t.open}</b> open
@@ -953,7 +995,11 @@ function AllClear(props: { overview: Overview; now: Date }) {
       <Targets targets={props.overview.targets} now={props.now} />
       <Show when={props.overview.fixed.length > 0}>
         <h2 class="label">Fixed in the last 30 days</h2>
-        <FixedRows items={props.overview.fixed} now={props.now} />
+        <FixedRows
+          reported={props.overview.reported}
+          fixed={props.overview.fixed}
+          now={props.now}
+        />
       </Show>
     </section>
   );

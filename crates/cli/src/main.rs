@@ -274,9 +274,9 @@ fn fix_line(state: &FixState) -> String {
     }
 }
 
-/// The open items and fixed findings per target, most severe first, as the popover groups
-/// them: a component with several findings is a line with its one fix, then a line per
-/// finding with its key.
+/// The open items, the items whose fix was reported, and the fixed findings per target, most
+/// severe first, as the popover groups and counts them: a component with several findings is a
+/// line with its one fix, then a line per finding with its key.
 fn findings_text(all: Vec<Latest>) -> String {
     let mut out = String::new();
     for mut target in all {
@@ -293,13 +293,22 @@ fn findings_text(all: Vec<Latest>) -> String {
             n => format!(", {n} fixed"),
         };
         let listed = items(&target.target, std::mem::take(&mut target.open));
+        let reported = match listed.reported.len() {
+            0 => String::new(),
+            1 => ", 1 fix reported".to_owned(),
+            n => format!(", {n} fixes reported"),
+        };
         out.push_str(&format!(
-            "{} (swept {swept}): {} open{fixed}{dismissed}\n",
+            "{} (swept {swept}): {} open{reported}{fixed}{dismissed}\n",
             target.target,
-            listed.len()
+            listed.open.len()
         ));
-        for item in &listed {
+        for item in &listed.open {
             out.push_str(&item_text(item));
+        }
+        // Each one's lead says "fix reported", so it reads apart from the open ones above.
+        for reported in &listed.reported {
+            out.push_str(&item_text(&reported.item));
         }
         for fixed in &target.fixed {
             out.push_str(&format!(
@@ -683,7 +692,11 @@ mod tests {
         };
         let text = findings_text(vec![latest]);
         assert!(
-            text.contains("mac (swept 2026-11-05T11:00:00Z): 1 open, 1 fixed"),
+            text.contains("mac (swept 2026-11-05T11:00:00Z): 0 open, 1 fix reported, 1 fixed"),
+            "a reported fix is not open: {text}"
+        );
+        assert!(
+            text.contains("high     0000000000000001  curl is old"),
             "{text}"
         );
         assert!(
@@ -734,6 +747,7 @@ mod tests {
             new: false,
             advisory_count: Some("2 advisories".to_owned()),
             fix_scope: None,
+            pending_fix: None,
         };
         assert_eq!(
             item_text(&item),

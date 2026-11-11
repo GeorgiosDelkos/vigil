@@ -122,15 +122,31 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   prompt. A GitHub fix works in a fresh clone, on a new branch, and opens a pull request; a
   server fix may run ssh to that one server, with the sweep's ssh options. Each fix is appended
   to `state/fixes.jsonl`.
-- Fixed (decided 2026-11-08 with the user): a fix the agent reports does not hide the
-  finding on its word. A finding whose last fix run ended `fixed` with exit code 0, planned
-  from the report the finding is in, stays open and counted, marked "Fix reported", or "Pull
-  request open" when the run opened one (it lands once merged). A later sweep that still
-  finds it marks it "Still found after a fix". Once a later sweep no longer finds it, the fix
-  is confirmed and listed under Fixed, with the finding's title, the agent's summary and the
-  pull request, for 30 days. Which report a run fixes is decided by the sweep it was planned
-  from (`found` in the record), never by comparing clocks; the last run of a key in
-  `state/fixes.jsonl` decides, in file order. `vigil findings` shows the same.
+- Fixed (decided 2026-11-08 with the user, changed 2026-11-11): a finding whose last fix run
+  ended `fixed` with exit code 0, planned from the report the finding is in, is "fix
+  reported". A fix is for the installed component, so every finding in an item decides, not
+  the lead alone (`vigil fix` takes any finding's key, and a dismissal can change the lead):
+  an item is a reported fix when at least one of its findings has a fix reported without a
+  pull request, and none is "Still found after a fix" or has a fix that opened one.
+  Otherwise it stays open and counted, whole; a component's findings are never split between
+  open and fixed. A reported fix keeps every finding in it, its row says how many advisories,
+  and the newest fix's summary and time speak for it. It is counted nowhere (needs you,
+  exploited, the severity counts, the headline, the tray icon) and is listed green as "Fixed ·
+  the next sweep confirms it", in the popover's Fixed tab above the confirmed fixes and in its
+  own table in the HTML report. A target with nothing open but such fixes reads "1 fix to
+  confirm" in green, not clear. The owner verified such fixes by hand and asked on 2026-11-11
+  that a fixed issue not show as open; this replaces the 2026-11-08 rule that kept it
+  counted. With only such items left the headline reads "1 fix to confirm" ("2 fixes to
+  confirm"), not "All clear", until a sweep confirms them; the main view's centre shows their
+  number over "to confirm", as it shows what needs you, and opens the Fixed tab. When a run
+  opened a pull request, the item stays open and counted, marked "Pull request open", until
+  a sweep no longer finds it; whether the pull request was merged is not checked. A later
+  sweep that still finds it marks it "Still found after a fix", and it is open again.
+  Once a later sweep no longer finds it, the fix is confirmed and listed under Fixed, with the
+  finding's title, the agent's summary and the pull request, for 30 days.
+  Which report a run fixes is decided by the sweep it was planned from (`found` in the
+  record), never by comparing clocks; the last run of a key in `state/fixes.jsonl` decides,
+  in file order. `vigil findings` shows the same.
 
 ### Grouping by component (decided 2026-11-10)
 
@@ -601,7 +617,8 @@ Built in step 9a (2026-11-06):
   Quit Vigil (asked for 2026-11-09), which quits as the popover's Quit does.
 - The popover (the app's one window, hidden on blur) shows the status, each target's open
   counts by severity, the six most severe open findings with their keys and fixes on hover, a
-  Fixed tab with the confirmed fixes that finished in the last 30 days,
+  Fixed tab with the fixes reported and waiting for the next sweep, then the confirmed fixes
+  that finished in the last 30 days,
   Sweep now, Edit settings, Launch at login (the autostart plugin's LaunchAgent) and Quit. It
   asks the app for an overview whenever it is shown and on every `changed` event.
 - One sweep at a time: the app checks and claims "sweeping" under one lock, and the core's

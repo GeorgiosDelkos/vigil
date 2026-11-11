@@ -93,7 +93,12 @@ export type Listed = {
   readonly advisory_count: string | null;
   /** What the Fix confirmation adds when it holds more than one finding. */
   readonly fix_scope: string | null;
+  /** What keeps a fix of it from counting as done, decided over all its findings. */
+  readonly pending_fix: PendingFix | null;
 };
+
+/** A fix that did not hold, or one whose pull request is not merged yet. */
+export type PendingFix = "not_held" | "pull_request";
 
 export type TargetLine = {
   readonly label: string;
@@ -103,6 +108,8 @@ export type TargetLine = {
   readonly checked: string | null;
   readonly counts: Counts;
   readonly open: number;
+  /** "1 fix to confirm" when fixes of its items wait for the next sweep. */
+  readonly to_confirm: string | null;
   readonly dismissed: number;
 };
 
@@ -126,11 +133,27 @@ export type FixedItem = {
   readonly pull_request: string | null;
 };
 
+/** An item whose fix the agent reported done, which the next sweep confirms (the core's
+ * `ReportedFix`). It is not open, so nothing counts it. */
+export type ReportedFix = {
+  readonly item: Listed;
+  /** What its row says: "Fixed · the next sweep confirms it". */
+  readonly status: string;
+  readonly summary: string;
+  readonly fixed_at: string;
+};
+
 export type Overview = {
   readonly status: Status;
   readonly busy: boolean;
   /** The open items, ranked by risk. */
   readonly items: readonly Listed[];
+  /** The list tab the main view's centre opens. */
+  readonly list_tab: "needs" | "fixed";
+  /** The centre's number and words when nothing is open but fixes wait for the next sweep. */
+  readonly to_confirm: { readonly count: number; readonly label: string } | null;
+  /** Items whose fix was reported, newest fix first. */
+  readonly reported: readonly ReportedFix[];
   /** Fixes a later sweep confirmed that finished in the last 30 days, newest first. */
   readonly fixed: readonly FixedItem[];
   readonly needs_you: number;

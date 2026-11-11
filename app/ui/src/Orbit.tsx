@@ -33,17 +33,16 @@ export type OrbitActions = {
 };
 
 /** What the spiral shows for this overview. */
-function sceneOf(overview: Overview): Scene {
+export function sceneOf(overview: Overview): Scene {
   if (overview.status.state === "sweeping") {
     return { mood: "progress", progress: overview.status.percent / 100 };
   }
-  if (overview.all_clear) {
-    return { mood: "clear" };
+  if (overview.items.length > 0) {
+    return { mood: "findings", lit: overview.items.map(neon) };
   }
-  // Rust says all clear once a sweep found nothing, so no findings here means no sweep yet.
-  return overview.items.length > 0
-    ? { mood: "findings", lit: overview.items.map(neon) }
-    : { mood: "unswept" };
+  // Nothing open after a sweep is green, also while a reported fix waits for the next sweep:
+  // the owner asked that a fixed item show green, not open (2026-11-11).
+  return overview.last_swept === null ? { mood: "unswept" } : { mood: "clear" };
 }
 
 export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActions }) {
@@ -137,6 +136,14 @@ function Centre(props: { overview: Overview; sweeping: Sweeping | null }) {
           </>
         )}
       </Match>
+      <Match when={o().to_confirm}>
+        {(figure) => (
+          <>
+            <span class="n">{figure().count}</span>
+            <span class="l">{figure().label}</span>
+          </>
+        )}
+      </Match>
       <Match when={o().all_clear}>
         <span class="n word">Clear</span>
         <span class="l">nothing open</span>
@@ -223,7 +230,7 @@ function figuresText(target: TargetLine): string {
     return "not swept yet";
   }
   if (target.open === 0) {
-    return "clear";
+    return target.to_confirm ?? "clear";
   }
   const parts = mix(target).map((m) => `${m.count} ${m.severity}`);
   return `${target.open} open: ${parts.join(", ")}`;
@@ -263,7 +270,18 @@ function TargetRows(props: {
             <span class="go" aria-hidden="true">
               ›
             </span>
-            <small class="tsub">{t().checked ?? "not swept yet"}</small>
+            <small class="tsub">
+              {t().checked ?? "not swept yet"}
+              {/* In place of the clear bar, which would say nothing is left to confirm. */}
+              <Show when={t().open === 0 && t().to_confirm}>
+                {(text) => (
+                  <>
+                    {" · "}
+                    <span class="confirming">{text()}</span>
+                  </>
+                )}
+              </Show>
+            </small>
             <TargetFigures target={t()} colours={NEON} />
           </button>
         )}
@@ -300,7 +318,7 @@ export function TargetFigures(props: {
       </span>
       <span
         class="tbar"
-        classList={{ ok: t().swept !== null && t().open === 0 }}
+        classList={{ ok: t().swept !== null && t().open === 0 && t().to_confirm === null }}
         aria-hidden="true"
       >
         <Index each={mix(t())}>
