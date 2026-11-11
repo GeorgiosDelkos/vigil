@@ -9,8 +9,8 @@
 //! All three come from one `diskutil info -plist /`. The alternatives weighed: `statfs` and
 //! `getattrlist(ATTR_VOL_NAME)` are C calls that std does not wrap, and the workspace forbids
 //! `unsafe`; `df` gives the sizes but not the name. diskutil takes about 0.3 seconds, so the
-//! app reads it beside the reports rather than after them, and it is given up on after
-//! [`DISKUTIL_TIMEOUT`].
+//! app reads it beside the reports rather than after them, and it is given up on when its
+//! output has not ended after [`DISKUTIL_TIMEOUT`].
 //!
 //! Sizes are in decimal units (1 GB = 10^9 bytes), as Finder, About This Mac and `df -H` show
 //! them, not the GiB of `df -h`.
@@ -119,7 +119,8 @@ fn stdout_within(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
         drop(child.wait());
         return None;
     };
-    // Its output has ended, so it has exited or is about to.
+    // EOF on stdout came first. A command that closes its stdout and keeps running would hold
+    // this wait past the deadline; diskutil writes until it exits, so the wait is short.
     let status = child.wait().ok()?;
     status.success().then_some(out)
 }
@@ -239,7 +240,8 @@ mod tests {
     #[test]
     fn gives_up_on_a_command_that_outlives_its_deadline() {
         let mut slow = Command::new("/bin/sh");
-        slow.args(["-c", "echo early; sleep 5"]);
+        // `exec`, so the kill ends the process holding the pipe and the reader thread with it.
+        slow.args(["-c", "echo early; exec sleep 5"]);
         assert_eq!(stdout_within(&mut slow, Duration::from_millis(100)), None);
     }
 
