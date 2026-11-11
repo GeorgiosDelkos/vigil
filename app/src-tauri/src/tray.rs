@@ -125,7 +125,7 @@ pub(crate) fn hide_on_blur(window: &Window) {
 ///
 /// The owner clarified the same day that a failure must not hide an open critical: with a
 /// critical or high finding open in the last reports, the icon stays red or orange after a
-/// failed sweep, and only the tooltip and the popover's banner tell of the failure. The
+/// failure, and only the tooltip and the popover's banner tell of it. The
 /// missing arm shows only when nothing critical or high is open, which is why `Clear` carries
 /// no [`Health`]: a failure with nothing to show in colour is `Failed`.
 #[derive(Debug, Clone, Copy)]
@@ -148,10 +148,10 @@ enum Health {
 
 impl Look {
     /// The look of an app running nothing, whose worst open item is `worst`.
-    fn of(worst: Option<Severity>, last: Health) -> Self {
-        match (worst, last) {
-            (Some(Severity::Critical), _) => Self::Critical(last),
-            (Some(Severity::High), _) => Self::High(last),
+    fn of(worst: Option<Severity>, health: Health) -> Self {
+        match (worst, health) {
+            (Some(Severity::Critical), _) => Self::Critical(health),
+            (Some(Severity::High), _) => Self::High(health),
             (Some(Severity::Medium | Severity::Low) | None, Health::Ok) => Self::Clear,
             (Some(Severity::Medium | Severity::Low) | None, Health::Failed) => Self::Failed,
         }
@@ -280,7 +280,7 @@ pub(crate) fn refresh(app: &AppHandle) {
 /// config and reports, which keeps the refresh on every progress step cheap.
 fn look(app: &AppHandle) -> Look {
     let runner = app.state::<Runner>();
-    let last = match runner.status() {
+    let health = match runner.status() {
         Status::Sweeping { .. } => return Look::Sweeping,
         Status::Fixing { .. } => return Look::Fixing,
         Status::Failed { .. } => Health::Failed,
@@ -294,7 +294,7 @@ fn look(app: &AppHandle) -> Look {
         return Look::Failed;
     };
     // The popover's open items, so a fix reported done colours neither the icon nor the list.
-    Look::of(popover_view(targets).worst(), last)
+    Look::of(popover_view(targets).worst(), health)
 }
 
 fn toggle(app: &AppHandle) {
@@ -384,12 +384,12 @@ mod tests {
             high.tooltip(),
             "Vigil: high findings open; something failed, open Vigil to see it"
         );
-        // The same coloured icon as after a sweep that succeeded; only the tooltip differs.
+        // The same coloured icon as when nothing failed; only the tooltip differs.
         for bar in [Bar::Dark, Bar::Light] {
-            let succeeded = Look::of(Some(Severity::Critical), Health::Ok);
-            assert_eq!(critical.png(bar), succeeded.png(bar));
-            let succeeded = Look::of(Some(Severity::High), Health::Ok);
-            assert_eq!(high.png(bar), succeeded.png(bar));
+            let ok = Look::of(Some(Severity::Critical), Health::Ok);
+            assert_eq!(critical.png(bar), ok.png(bar));
+            let ok = Look::of(Some(Severity::High), Health::Ok);
+            assert_eq!(high.png(bar), ok.png(bar));
         }
         // With nothing critical or high open the failure shows as the missing arm.
         assert!(matches!(of(Some(Severity::Medium)), Look::Failed));
