@@ -216,9 +216,11 @@ describe("the size scale", () => {
   });
 });
 
-/** Rules that keep text on one line, as selector, property, value and reason. Everything else
- * wraps: `.pop` sets `overflow-wrap: anywhere` for every view, so no name, path or command is
- * ever wider than the popover or cut off (the owner's rule, 2026-11-11). */
+/** Rules that keep text on one line, as selector, property, value and reason. Text anywhere
+ * else wraps: `.pop` sets `overflow-wrap: anywhere` for every view, so no name, path or command
+ * is wider than the popover (the owner's rule, 2026-11-11). Two of these cut text short with
+ * an ellipsis: the main view's fixed rows by design, and a closed native menu, which cannot
+ * wrap and shows its whole label when opened. */
 const ONE_LINE: readonly (readonly [string, string, string, string])[] = [
   [".pill", "white-space", "nowrap", "a control of fixed height with a short label"],
   [".seg button", "white-space", "nowrap", "a control of fixed height with a short label"],
@@ -259,5 +261,14 @@ describe("long text", () => {
       .map((d) => key(d.selector, d.property, d.value));
     expect(oneLine.filter((found) => !listed.has(found))).toEqual([]);
     expect([...listed].filter((entry) => !oneLine.includes(entry))).toEqual([]);
+  });
+
+  // A <pre> is `white-space: pre` by default, where overflow-wrap does nothing: each block
+  // must turn wrapping back on, keeping its line breaks.
+  it("wraps the command, log and agent-summary blocks", () => {
+    const preWrap = all
+      .filter((d) => d.property === "white-space" && d.value === "pre-wrap")
+      .map((d) => d.selector);
+    expect(preWrap.toSorted()).toEqual([".cmd", ".log", ".result-detail"]);
   });
 });
