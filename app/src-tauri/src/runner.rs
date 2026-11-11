@@ -817,7 +817,7 @@ mod tests {
         let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
         let fix_all = || {
             super::fixing(
-                "grok applies 2 fixes in one run".to_owned(),
+                "2 fixes in one grok run".to_owned(),
                 "This Mac",
                 ["preparing the fixes", "curl", "ffmpeg", "recording"]
                     .map(str::to_owned)

@@ -745,7 +745,7 @@ mod tests {
         )
         .unwrap();
         let status = Status::Fixing {
-            title: "grok applies 2 fixes in one run".to_owned(),
+            title: "2 fixes in one grok run".to_owned(),
             place: "This Mac".to_owned(),
             labels: [
                 "preparing the fixes",

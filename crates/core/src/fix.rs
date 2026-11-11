@@ -601,13 +601,10 @@ impl FixAllPlan {
         &self.items
     }
 
-    /// One line saying what the run does: "grok applies 3 fixes in one run".
+    /// One line naming the run: "3 fixes in one grok run". No verb, so it reads right both while
+    /// the run goes and on the results it leaves, which keep the same title.
     pub fn title(&self) -> String {
-        format!(
-            "{} applies {} fixes in one run",
-            self.agent(),
-            self.items.len()
-        )
+        format!("{} fixes in one {} run", self.items.len(), self.agent())
     }
 
     /// The labels of its steps, in order: preparing, one per item ("fixing curl 8.1.2"),
@@ -1924,7 +1921,7 @@ mod tests {
                 "recording the results"
             ]
         );
-        assert_eq!(plan.title(), "claude applies 2 fixes in one run");
+        assert_eq!(plan.title(), "2 fixes in one claude run");
         assert_eq!(plan.target(), "mac", "the target the app names in progress");
         assert_eq!(plan.destination(), "this Mac");
         assert_eq!(plan.agent(), AgentKind::Claude);
