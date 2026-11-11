@@ -33,6 +33,7 @@ use vigil_core::Disk;
 use vigil_core::FindingKey;
 use vigil_core::ParseFindingKeyError;
 use vigil_core::PopoverView;
+use vigil_core::error_chain;
 use vigil_core::latest;
 use vigil_core::plan_fix;
 use vigil_core::plan_fix_all;
@@ -491,7 +492,7 @@ struct FixAllPreviewItem {
 fn fix_all_preview(runner: State<'_, Runner>, target: String) -> Result<FixAllPreview, String> {
     let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
         .map_err(|e| e.to_string())?;
-    let plan = plan_fix_all(runner.data_dir(), &config, &target).map_err(|e| e.to_string())?;
+    let plan = plan_fix_all(runner.data_dir(), &config, &target).map_err(|e| error_chain(&e))?;
     Ok(FixAllPreview {
         destination: plan.destination().to_owned(),
         found: plan.found(),

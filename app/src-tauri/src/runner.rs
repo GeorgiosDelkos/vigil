@@ -43,6 +43,7 @@ use vigil_core::SweepError;
 use vigil_core::Targets;
 use vigil_core::alerts;
 use vigil_core::clean_up_interrupted;
+use vigil_core::error_chain;
 use vigil_core::fix_all_outcome;
 use vigil_core::last_sweep_started;
 use vigil_core::plan_fix;
@@ -449,7 +450,7 @@ pub(crate) fn start_fix_all(
     let runner = app.state::<Runner>();
     let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
         .map_err(|e| e.to_string())?;
-    let plan = plan_fix_all(runner.data_dir(), &config, target).map_err(|e| e.to_string())?;
+    let plan = plan_fix_all(runner.data_dir(), &config, target).map_err(|e| error_chain(&e))?;
     let planned: Vec<FindingKey> = plan.items().iter().map(FixAllItem::key).collect();
     if plan.found() != found || planned != keys {
         return Err(
@@ -468,7 +469,7 @@ pub(crate) fn start_fix_all(
     changed(app);
     fix_thread(app, target.to_owned(), move |data_dir, progress| {
         let records = run_fix_all(data_dir, &plan, Confirmed::Asked, progress, &cancel)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| error_chain(&e))?;
         let (outcome, summary) = fix_all_outcome(&records);
         Ok(FixDone {
             key: plan.target().to_owned(),
