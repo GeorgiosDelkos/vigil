@@ -645,6 +645,7 @@ mod tests {
 
     use vigil_core::Fixed;
     use vigil_core::Open;
+    use vigil_core::PendingFix;
     use vigil_core::Severity;
 
     #[test]
@@ -747,6 +748,7 @@ mod tests {
             new: false,
             advisory_count: Some("2 advisories".to_owned()),
             fix_scope: None,
+            pending_fix: Some(PendingFix::NotHeld),
         };
         assert_eq!(
             item_text(&item),

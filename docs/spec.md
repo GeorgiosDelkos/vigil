@@ -124,15 +124,22 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   to `state/fixes.jsonl`.
 - Fixed (decided 2026-11-08 with the user, changed 2026-11-11): a finding whose last fix run
   ended `fixed` with exit code 0, planned from the report the finding is in, is "fix
-  reported". When the run opened no pull request, its item (the item's lead decides, since Fix
-  runs the lead's key) is no longer open: it is counted nowhere (needs you, exploited, the
-  severity counts, the headline, the target lines) and is listed green as "Fixed · the next
-  sweep confirms it", in the popover's Fixed tab above the confirmed fixes and in its own table
-  in the HTML report. The owner verified such fixes by hand and asked on 2026-11-11 that a
-  fixed issue not show as open; this replaces the 2026-11-08 rule that kept it counted. With
-  only such items left the headline reads "1 fix to confirm" ("2 fixes to confirm"), not "All
-  clear", until a sweep confirms them. When the run opened a pull request, the item stays
-  open and counted, marked "Pull request open": the fix lands once merged. A later sweep
+  reported". A fix is for the installed component, so every finding in an item decides, not
+  the lead alone (`vigil fix` takes any finding's key, and a dismissal can change the lead):
+  an item is a reported fix when at least one of its findings has a fix reported without a
+  pull request, and none is "Still found after a fix" or has a pull request still open.
+  Otherwise it stays open and counted, whole; a component's findings are never split between
+  open and fixed. A reported fix keeps every finding in it, its row says how many advisories,
+  and the newest fix's summary and time speak for it. It is counted nowhere (needs you,
+  exploited, the severity counts, the headline, the tray icon) and is listed green as "Fixed ·
+  the next sweep confirms it", in the popover's Fixed tab above the confirmed fixes and in its
+  own table in the HTML report. A target with nothing open but such fixes reads "1 fix to
+  confirm" in green, not clear. The owner verified such fixes by hand and asked on 2026-11-11
+  that a fixed issue not show as open; this replaces the 2026-11-08 rule that kept it
+  counted. With only such items left the headline reads "1 fix to confirm" ("2 fixes to
+  confirm"), not "All clear", until a sweep confirms them, and the main view's centre opens
+  the Fixed tab. When a run opened a pull request, the item stays open and counted, marked
+  "Pull request open": the fix lands once merged. A later sweep
   that still finds it marks it "Still found after a fix", and it is open again.
   Once a later sweep no longer finds it, the fix is confirmed and listed under Fixed, with the
   finding's title, the agent's summary and the pull request, for 30 days.

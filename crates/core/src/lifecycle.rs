@@ -373,9 +373,11 @@ pub struct Fixed {
 #[derive(Debug, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum FixState {
-    /// A fix of this very report ended `fixed`; the next sweep confirms it. Without a pull
-    /// request the popover shows its item as fixed, not open
-    /// ([`ReportedFix`](crate::popover::ReportedFix)).
+    /// A fix of this very report ended `fixed`; the next sweep confirms it. The finding stays
+    /// in [`Latest::open`] so that sweep can. A fix is for the installed component, so the
+    /// popover decides over every finding in it: its item shows as fixed, not open
+    /// ([`ReportedFix`](crate::popover::ReportedFix)), when one finding has this state without
+    /// a pull request and none is [`FixState::NotHeld`] or has a pull request still open.
     Reported {
         /// When it finished.
         at: Timestamp,
@@ -1317,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_fix_is_marked_and_counted_until_a_later_sweep_confirms_it() {
+    fn a_reported_fix_is_marked_and_stays_in_open_until_a_later_sweep_confirms_it() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path().join("data"));
         let config_path = tmp.path().join("config.toml");

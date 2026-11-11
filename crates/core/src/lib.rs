@@ -108,6 +108,7 @@ pub use crate::package::ParsePackageError;
 pub use crate::paths::DataDir;
 pub use crate::paths::InitError;
 pub use crate::popover::Listed;
+pub use crate::popover::PendingFix;
 pub use crate::popover::PopoverView;
 pub use crate::popover::items;
 pub use crate::popover::popover_view;

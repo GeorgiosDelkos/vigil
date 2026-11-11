@@ -187,14 +187,19 @@ fn findings(view: &PopoverView) -> String {
             (None, _, _) => {
                 "No target has a sweep with a verdict yet, so nothing is known.".to_owned()
             }
-            (Some(_), false, _) => {
-                "Nothing is open. The next sweep confirms the fixes listed below.".to_owned()
-            }
             (Some(_), true, 0) => "Nothing is open. Every target's newest sweep found nothing \
                                    affected or risky."
                 .to_owned(),
+            (Some(_), false, 0) => {
+                "Nothing is open. The next sweep confirms the fixes listed below.".to_owned()
+            }
             (Some(_), true, n) => format!(
                 "Nothing is open in the swept targets; {} not swept yet.",
+                plural(n, "target")
+            ),
+            (Some(_), false, n) => format!(
+                "Nothing is open in the swept targets; {} not swept yet. The next sweep \
+                 confirms the fixes listed below.",
                 plural(n, "target")
             ),
         };
@@ -487,8 +492,13 @@ fn reported_table(reported: &[ReportedFix]) -> String {
     let rows: String = reported
         .iter()
         .map(|r| {
+            let count = r
+                .item
+                .advisory_count
+                .as_ref()
+                .map_or(String::new(), |n| format!(" · {}", esc(n)));
             format!(
-                "<tr><td><b>{}</b></td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                "<tr><td><b>{}</b>{count}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                 installed(&r.item),
                 esc(&r.item.target),
                 esc(&r.summary),
@@ -1310,6 +1320,31 @@ mod tests {
             "<tr><td><b>pkg1 1.0.0</b></td><td>This Mac</td><td>upgraded pkg1</td>\
              <td>9 Nov 2026, 12:00 UTC</td></tr>"
         ));
+
+        let mut repo = mac(Vec::new());
+        repo.target = "github:o/r".to_owned();
+        repo.swept = None;
+        let mut fixed = open(1, Severity::High, false);
+        fixed.fix_state = Some(FixState::Reported {
+            at: at("2026-11-09T12:00:00Z"),
+            summary: "upgraded pkg1".to_owned(),
+            pull_request: None,
+        });
+        // Another advisory in pkg1 1.0.0, with no fix run of its own.
+        let sibling = Open {
+            name: "pkg1".to_owned(),
+            component: open(1, Severity::Low, false).component,
+            ..open(3, Severity::Low, false)
+        };
+        let html = page(vec![mac(vec![fixed, sibling]), repo]);
+        assert!(html.contains(
+            "Nothing is open in the swept targets; 1 target not swept yet. The next sweep \
+             confirms the fixes listed below."
+        ));
+        assert!(
+            html.contains("<td><b>pkg1 1.0.0</b> · 2 advisories</td>"),
+            "every advisory in it is counted: {html}"
+        );
 
         let html = page(vec![mac(vec![open(2, Severity::Low, false)])]);
         assert!(
