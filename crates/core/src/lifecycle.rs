@@ -377,7 +377,9 @@ pub enum FixState {
     /// in [`Latest::open`] so that sweep can. A fix is for the installed component, so the
     /// popover decides over every finding in it: its item shows as fixed, not open
     /// ([`ReportedFix`](crate::popover::ReportedFix)), when one finding has this state without
-    /// a pull request and none is [`FixState::NotHeld`] or has a pull request still open.
+    /// a pull request and none is [`FixState::NotHeld`] or opened one. A fix that opened a
+    /// pull request keeps its item open until a sweep no longer finds it: whether the pull
+    /// request was merged is not checked.
     Reported {
         /// When it finished.
         at: Timestamp,
