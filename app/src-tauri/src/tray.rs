@@ -139,7 +139,7 @@ enum Look {
 }
 
 /// Whether the runner's status is `Failed`: the last sweep stopped, a target in it got no
-/// verdict, or the schedule could not be checked.
+/// verdict, the schedule could not be checked, or a fix ended without results.
 #[derive(Debug, Clone, Copy)]
 enum Health {
     Ok,

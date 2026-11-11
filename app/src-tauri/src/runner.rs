@@ -542,31 +542,30 @@ where
         }))
         .unwrap_or_else(|_| Err("the fix stopped unexpectedly".to_owned()));
         let runner = app.state::<Runner>();
-        match done {
-            Ok(run) => {
-                let mut shared = runner.lock();
-                shared.status = finished(&shared.status, run);
-            }
-            Err(error) => runner.set(Status::Failed {
-                error: format!("Last fix: {error}"),
-            }),
+        {
+            let mut shared = runner.lock();
+            shared.status = finished(&shared.status, done);
         }
         changed(&app);
     });
 }
 
-/// The status a fix leaves when it ends with `run`: its results, under the title and place
-/// `status`, the running fix's, showed. Only the fix's own thread changes a
-/// [`Status::Fixing`], so `status` is one; anything else is left as it is.
-fn finished(status: &Status, run: FixRun) -> Status {
-    match status {
-        Status::Fixing { title, place, .. } => Status::Fixed {
+/// The status a fix leaves when it ends with `done`: its results, under the title and place
+/// `status`, the running fix's, showed; or, when it ended without results, the reason, kept
+/// until the popover shows it. Only the fix's own thread changes a [`Status::Fixing`], so
+/// `status` is one; anything else is left as it is.
+fn finished(status: &Status, done: Result<FixRun, String>) -> Status {
+    match (status, done) {
+        (Status::Fixing { title, place, .. }, Ok(run)) => Status::Fixed {
             title: title.clone(),
             place: place.clone(),
             run,
             finished: Timestamp::now(),
         },
-        other => other.clone(),
+        (Status::Fixing { .. }, Err(error)) => Status::Failed {
+            error: format!("Last fix: {error}"),
+        },
+        (other, _) => other.clone(),
     }
 }
 
@@ -879,7 +878,7 @@ mod tests {
     fn a_finished_fix_keeps_its_results_until_a_new_run_replaces_them() {
         let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
         runner.claim(fixing()).unwrap();
-        let done = finished(&runner.status(), partial_run());
+        let done = finished(&runner.status(), Ok(partial_run()));
         let Status::Fixed {
             title, place, run, ..
         } = &done
@@ -893,8 +892,17 @@ mod tests {
         );
         assert!(!done.is_busy(), "results do not hold the runner");
         assert!(
-            matches!(finished(&Status::Idle, partial_run()), Status::Idle),
+            matches!(finished(&Status::Idle, Ok(partial_run())), Status::Idle),
             "only a running fix ends"
+        );
+        let failed = finished(&fixing(), Err("cannot save the history".to_owned()));
+        assert!(
+            matches!(&failed, Status::Failed { error } if error == "Last fix: cannot save the history"),
+            "a fix without results keeps its reason: {failed:?}"
+        );
+        assert!(
+            matches!(finished(&Status::Idle, Err("x".to_owned())), Status::Idle),
+            "only a running fix fails"
         );
 
         runner.set(done.clone());
@@ -919,10 +927,22 @@ mod tests {
         let failed = || Status::Failed {
             error: "Last sweep: older".to_owned(),
         };
-        let fixed = || finished(&fixing(), partial_run());
+        let fixed = || finished(&fixing(), Ok(partial_run()));
+        let sweeping = || Status::Sweeping {
+            step: "starting".to_owned(),
+            current: None,
+            done: Vec::new(),
+            pending: vec!["mac".to_owned()],
+            thousandths: 0,
+            open_ended: false,
+            stopping: false,
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        };
         for (mut status, shown) in [
             (Status::Idle, true),
             (failed(), true),
+            (sweeping(), false),
             (fixing(), false),
             (fixed(), false),
         ] {
@@ -949,7 +969,7 @@ mod tests {
             runner.fix_log().unwrap_err(),
             "no fix's results are showing"
         );
-        runner.set(finished(&fixing(), partial_run()));
+        runner.set(finished(&fixing(), Ok(partial_run())));
         let err = runner.fix_log().unwrap_err();
         assert!(
             err.contains("/fixes/x/agent.log"),
