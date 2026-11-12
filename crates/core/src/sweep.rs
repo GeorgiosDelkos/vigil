@@ -439,7 +439,7 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             .map(|group| {
                 let installed = &group[0].installed;
                 if group.len() == 1 {
-                    return group[0].title.clone();
+                    return plain(&group[0].title);
                 }
                 plain(&format!(
                     "{} {}, {}: {} advisories",
@@ -2134,6 +2134,21 @@ mod tests {
             alerts(&[first]),
             ["mac: curl 1.0, Homebrew formula curl: 2 advisories"]
         );
+    }
+
+    /// The title of a lone finding is read back from `report.json`, so the alert cleans it
+    /// again rather than trust the file.
+    #[test]
+    fn alert_of_a_lone_finding_is_plain() {
+        let mut first = Report {
+            first_verdict: true,
+            ..report(
+                vec![report_finding("GHSA-1", "critical", false, "npm:a")],
+                &[],
+            )
+        };
+        first.findings[0].title = "GHSA-1 in \u{202e}exe.txt\n".to_owned();
+        assert_eq!(alerts(&[first]), ["mac: GHSA-1 in \u{fffd}exe.txt "]);
     }
 
     #[test]

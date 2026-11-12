@@ -5,6 +5,8 @@ use std::str::FromStr;
 
 use serde::Serialize;
 
+use crate::findings::is_forging;
+
 /// A package ecosystem, as OSV names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Ecosystem {
@@ -132,7 +134,7 @@ impl FromStr for Package {
     /// Parses `ecosystem:name`, such as `npm:lodash` or `crates.io:serde`.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (ecosystem, name) = s.split_once(':').ok_or(ParsePackageError::NoColon)?;
-        if name.is_empty() || name.chars().any(char::is_control) {
+        if name.is_empty() || name.chars().any(is_forging) {
             return Err(ParsePackageError::Name);
         }
         Ok(Self {
@@ -151,8 +153,9 @@ pub enum ParsePackageError {
     /// The ecosystem is not one Vigil knows.
     #[error("unknown ecosystem; use crates.io, npm, PyPI, Go, RubyGems or GitHub Actions")]
     Ecosystem,
-    /// The name is empty or has control characters.
-    #[error("package name must be non-empty without control characters")]
+    /// The name is empty or has a control or invisible character, such as a right-to-left
+    /// override.
+    #[error("package name must be non-empty without control or invisible characters")]
     Name,
 }
 
@@ -242,6 +245,10 @@ mod tests {
         ));
         assert!(matches!(
             "npm:a\nb".parse::<Package>(),
+            Err(ParsePackageError::Name)
+        ));
+        assert!(matches!(
+            "npm:\u{202e}sj.bil".parse::<Package>(),
             Err(ParsePackageError::Name)
         ));
     }
