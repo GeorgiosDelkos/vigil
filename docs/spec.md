@@ -297,8 +297,11 @@ fails the target), `StrictHostKeyChecking=yes` (the host key must already be in
 `known_hosts`, which a sweep never updates), agent, X11, port, tunnel and Kerberos credential
 forwarding off, a server that stops answering dropped after 30 s, and no connection sharing.
 These are command-line options, so `ProxyJump` hops do not get them; the README asks for
-`BatchMode` and `StrictHostKeyChecking` on each hop in `~/.ssh/config`. The marker and the folders travel on stdin, not on the server's process
-list. The Mac reads at most 256 MiB of the answer and decodes each part on its own.
+`BatchMode` and `StrictHostKeyChecking` on each hop in `~/.ssh/config`. The marker and the
+folders travel on stdin, not on the server's process list. The Mac reads at most 256 MiB of
+the answer and decodes each part on its own. It keeps at most 32 MiB of a package database and
+1 MiB of any other part but a lockfile, cut on a package or line boundary and noted in the
+report, so a server cannot fill the agent's bundle.
 
 | Part | Read with | In the bundle as |
 |---|---|---|
