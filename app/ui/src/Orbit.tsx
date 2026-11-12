@@ -40,8 +40,10 @@ export function sceneOf(overview: Overview): Scene {
     return { mood: "findings", lit: overview.items.map(neon) };
   }
   // Nothing open after a sweep is green, also while a reported fix waits for the next sweep:
-  // the owner asked that a fixed item show green, not open (2026-11-11).
-  return overview.last_swept === null ? { mood: "unswept" } : { mood: "clear" };
+  // the owner asked that a fixed item show green, not open (2026-11-11). A target not fully
+  // checked is not green: what its failed sources would have found is unknown.
+  const clear = overview.last_swept !== null && overview.warning === null;
+  return clear ? { mood: "clear" } : { mood: "unswept" };
 }
 
 export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActions }) {
@@ -69,6 +71,7 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
         <Menu onSettings={props.actions.onSettings} onError={props.actions.onError} />
       </div>
       <Show when={failed()}>{(f) => <p class="banner bad">{f().error}</p>}</Show>
+      <Show when={props.overview.warning}>{(w) => <p class="banner warn">{w()}</p>}</Show>
       <div class="stage">
         <Spiral scene={sceneOf(props.overview)} />
         <button
@@ -205,7 +208,7 @@ function figuresText(target: TargetLine): string {
     return "not swept yet";
   }
   if (target.open === 0) {
-    return target.to_confirm ?? "clear";
+    return target.to_confirm ?? (target.warning === null ? "clear" : "not fully checked");
   }
   const parts = mix(target).map((m) => `${m.count} ${m.severity}`);
   return `${target.open} open: ${parts.join(", ")}`;
@@ -214,7 +217,9 @@ function figuresText(target: TargetLine): string {
 /** A main-view target row's name for screen readers: its counts, then what was checked. */
 function rowStatus(target: TargetLine): string {
   const figures = figuresText(target);
-  return target.checked === null ? figures : `${figures}, ${target.checked}`;
+  const checked = target.checked === null ? figures : `${figures}, ${target.checked}`;
+  const said = target.warning === null || checked.includes("not fully checked");
+  return said ? checked : `${checked}, not fully checked`;
 }
 
 /** One row per target, every row the same shape: the name, what was checked, a count for each
@@ -247,6 +252,10 @@ function TargetRows(props: {
             </span>
             <small class="tsub">
               {t().checked ?? "not swept yet"}
+              <Show when={t().warning !== null}>
+                {" · "}
+                <span class="unchecked">not fully checked</span>
+              </Show>
               {/* In place of the clear bar, which would say nothing is left to confirm. */}
               <Show when={t().open === 0 && t().to_confirm}>
                 {(text) => (
@@ -293,7 +302,10 @@ export function TargetFigures(props: {
       </span>
       <span
         class="tbar"
-        classList={{ ok: t().swept !== null && t().open === 0 && t().to_confirm === null }}
+        classList={{
+          ok:
+            t().swept !== null && t().open === 0 && t().to_confirm === null && t().warning === null,
+        }}
         aria-hidden="true"
       >
         <Index each={mix(t())}>

@@ -116,9 +116,31 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   shown again), resolved is what was shown then and is gone now; a key dismissed since is
   neither. Only `<sweep>/<target>/report.json` is read, newest sweep first, stopping at the
   first with a verdict. A report without a verdict has none, and a report that cannot be read
-  is a note. Accepted
-  downside: a source that fails (OSV offline) makes its findings show as resolved; the report
-  lists the failed source under "Not checked".
+  is a note.
+- Degraded sweeps (decided 2026-11-12; until then a source that failed, OSV offline say, made
+  its findings show as resolved, confirmed pending fixes, and left a green icon and "All
+  clear"): each report has `unchecked`, a typed record of the sources that failed for its
+  target: the KEV catalog, OSV (the id query, or records that could not be fetched and had no
+  cached copy), and the NVD products with nothing fetched and nothing cached in the last week. A finding of the
+  target's last report with a verdict that this sweep did not find, and that a failed source
+  could have produced (an OSV finding when OSV failed or a record its package's query returned
+  did, an NVD finding when its product failed, an OS package's finding when the KEV catalog
+  failed, since without it a crowded query is not thinned and the agent judges another set),
+  goes into the new report's `carried` as that report saved it, with `carried_from`, the start
+  of the last sweep that checked it. It stays open, is neither
+  resolved nor new, and its fix is not confirmed until a sweep that checks it; a fix planned
+  from any report since `carried_from` is still "fix reported". A target whose newest report
+  has anything `unchecked` is never clear (see "UI"). A report saved before these fields reads
+  as fully checked with nothing carried. A source served from its cache, because it could not
+  be asked again, is a note in the report, not a failure. Accepted downside: a build from
+  before these fields ignores `carried`, so after a downgrade a carried finding reads as
+  resolved and its fix as confirmed.
+- Reading: one report or state file that cannot be read is a problem of the targets it
+  touches, never of all of them (decided 2026-11-12, after one broken `report.json` blanked
+  the popover and greyed a red icon). A target whose newest report cannot be read shows the
+  newest one that can, with the problem; dismissals that cannot be read dismiss nothing, and a
+  fix history that cannot be read reports no fix, each a problem on every target. Fix all and
+  `vigil fix` still refuse to act on what they cannot read.
 - Fixes: the fix in the sweep's finding is the plan the user confirms; there is no
   separate planning run. A confirmed fix is one agent run with full access and the `fix`
   prompt. A GitHub fix works in a fresh clone, on a new branch, and opens a pull request; a
@@ -316,6 +338,7 @@ dpkg and apk versions as the distribution does. So OSV sees the versions of OS p
 language packages (accepted by the user 2026-11-06). A query that still matches more than 200 advisories (the kernel) keeps only
 those for a CVE in CISA KEV, read from the advisory id (`DEBIAN-CVE-...`; grouped `DSA-` and
 `USN-` advisories of such a query are dropped), and the report says how many were left out.
+Without the KEV catalog nothing is known to be exploited, so such a query keeps them all.
 Kernel images built from `linux-signed*` source packages are looked up as the kernel's source
 package, which is where OSV files kernel advisories. RPM distributions are not looked up:
 OSV's Rocky Linux and AlmaLinux records disagree on binary versus source names and on epochs.
@@ -727,7 +750,9 @@ The rule is conservative: anything not read with certainty is `unknown`, never
   both sides are plain dotted numbers. `GIT` ranges, unreadable versions or bounds (a manifest range such
   as `^1.2.0`), two events at one version, a range without `introduced`, and a record whose
   entries never name the component are `unknown`. OS packages are queried by version, so
-  OSV's answer is `in_range`.
+  OSV's answer is `in_range`. In PyPI a local build (`2.0.1+cu118`) is the listed version
+  `2.0.1`, as PEP 440's version matching ignores the local label when the listed version has
+  none.
 - NVD: each CPE match marked vulnerable for the component's product, with the rules in
   `feeds::cpe` (start and end bounds, including or excluding; a version named in the
   criteria; `*` without bounds is every version). A match whose version is `-` (not
@@ -735,7 +760,9 @@ The rule is conservative: anything not read with certainty is `unknown`, never
   product are `unknown`; a record that names the product only as not vulnerable (the
   platform) is `out_of_range`. A match in a configuration that ANDs several CPEs keeps its
   verdict, and its reason asks the agent to judge the platform; the app never decides
-  platforms.
+  platforms. Letters in a version order only as release stages (`dev` < `alpha` < `beta` <
+  `pre` < `rc` < `ga`, with their spellings); any other two different words (`1.0.2k` and
+  `1.0.2l`) are `unknown`, since alphabetical order put `1.0.RC1` after `1.0.GA` (2026-11-12).
 
 Out-of-range pairs are dropped from each advisory, then advisories left with none, and the
 report's `out_of_range` counts those advisories, so none disappears silently. KEV
@@ -770,7 +797,17 @@ not an OSV ecosystem, so formulae go through NVD.
   product only as not vulnerable (the platform another product runs on) is dropped, KEV or
   not (since 2026-11-10; before, a CVE in KEV was always kept).
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
-  actively exploited.
+  actively exploited. The catalog must name its `catalogVersion`, list at least 1000
+  vulnerabilities (it passed 1000 in 2023) and give each a CVE id, or it is refused like an
+  unreachable one: an empty catalog would mark nothing exploited (decided 2026-11-12).
+- A failed request uses what is cached (decided 2026-11-12): an OSV record or a product's NVD
+  CVEs that cannot be fetched again come from the cache, and the report notes it; only with
+  nothing cached does the source count as failed for the target (see "Lifecycle"). A product's
+  NVD cache older than a week does not stand in, so an NVD blocked for weeks shows as not
+  checked rather than as clear. After NVD
+  answers 403 or 429, its rate limit, it is not asked again in that sweep; asking again would
+  only extend the refusal. Pacing is per process, so `vigil advisories` takes the sweeps lock
+  before it asks NVD, and fails while a sweep runs rather than doubling the rate.
 - A product's cached CVEs are used without a request for 2 hours after the last fetch's
   coverage ended, and a product NVD's CPE dictionary does not know, with no cached CVEs, is
   not asked for CVEs for a week. On one Mac a repeated sweep had spent 11 minutes on NVD
@@ -810,7 +847,11 @@ Built in step 9a (2026-11-06):
   orange (a high one open, no critical), or green (only medium or low open, or nothing); all
   cyan (sweeping or fixing, with the tooltip "Vigil: sweeping" or "Vigil: fixing"); and with
   one arm missing, in the bar's own colour (the last sweep stopped, a target got no verdict,
-  or the schedule could not be checked, and nothing critical or high is open). A failure never hides an open critical or high (the
+  a target's newest sweep had a source fail or its files cannot be read, or the schedule could
+  not be checked, and nothing critical or high is open). A target with a failed source or an
+  unreadable file is never "All clear" (decided 2026-11-12): the headline reads "Not fully
+  checked" when nothing is open, an amber banner names each such target and what failed, its
+  row says "not fully checked", and the main view's vortex is not green. A failure never hides an open critical or high (the
   owner's rule, clarified 2026-11-11): the icon stays red or orange, and the tooltip ("Vigil:
   critical findings open; something failed, open Vigil to see it") and the popover's banner show the failure.
   Medium and low no longer colour the icon and stay

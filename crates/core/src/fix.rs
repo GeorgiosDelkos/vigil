@@ -329,6 +329,7 @@ fn plan_finding(data_dir: &DataDir, key: FindingKey) -> Result<Planned, FixError
     let entry = report
         .findings
         .into_iter()
+        .chain(report.carried)
         .chain(report.issues)
         .find(|e| e["key"] == key.to_string())
         .ok_or(StateError::UnknownKey { key })?;
@@ -412,6 +413,9 @@ struct Saved {
     started: Timestamp,
     target: String,
     findings: Vec<Value>,
+    /// Findings carried over from an earlier sweep, open until a sweep checks them again.
+    #[serde(default)]
+    carried: Vec<Value>,
     issues: Vec<Value>,
 }
 
@@ -2198,6 +2202,40 @@ mod tests {
             "The agent runs on this Mac with full access and reads what the server prints"
         ));
         assert_eq!(notes[1], "Uses your edited prompt, prompts/fix-all.md.");
+    }
+
+    #[test]
+    fn a_carried_finding_is_planned_and_checked_as_any_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let key = FindingKey::new(&["carried"]);
+        let carried = json!({"key": key, "name": "curl", "severity": "high",
+            "modified": "2026-11-01T00:00:00Z", "carried_from": "2026-11-04T00:00:00Z",
+            "fix": {"summary": "s", "steps": ["upgrade"], "commands": ["brew upgrade curl"]}});
+        let mac = data_dir.sweeps_dir().join("20261105T000000Z/mac");
+        fs::create_dir_all(&mac).unwrap();
+        let report = json!({"started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
+            "findings": [], "carried": [carried], "issues": []});
+        fs::write(mac.join("report.json"), report.to_string()).unwrap();
+        let planned = plan_finding(&data_dir, key).unwrap();
+        assert_eq!(
+            planned.fix.steps,
+            ["upgrade"],
+            "the carried fix is the one shown and run"
+        );
+
+        // The same key in another target's newest report: nothing is planned.
+        let other = data_dir.sweeps_dir().join("20261106T000000Z/server-web");
+        fs::create_dir_all(&other).unwrap();
+        let theirs = json!({"started": "2026-11-06T00:00:00Z", "target": "server:web",
+            "failure": null, "issues": [], "findings": [{"key": key, "severity": "high",
+            "modified": "2026-11-01T00:00:00Z"}]});
+        fs::write(other.join("report.json"), theirs.to_string()).unwrap();
+        let err = plan_finding(&data_dir, key).unwrap_err();
+        assert!(
+            matches!(err, FixError::State(StateError::KeyInTwoTargets { .. })),
+            "{err:?}"
+        );
     }
 
     #[test]

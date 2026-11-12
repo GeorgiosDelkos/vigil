@@ -329,13 +329,11 @@ fn overview(runner: State<'_, Runner>) -> Overview {
             Ok(config) => (Some(config), None),
             Err(e) => (None, Some(e.to_string())),
         };
-        let (targets, problem) = match (&config, problem) {
-            (Some(config), None) => match latest(runner.data_dir(), config) {
-                Ok(targets) => (targets, None),
-                Err(e) => (Vec::new(), Some(e.to_string())),
-            },
-            (_, problem) => (Vec::new(), problem),
-        };
+        // A report or state file that cannot be read is its targets' warning, not this
+        // problem: the problem view hides every target and the Sweep button.
+        let targets = config
+            .as_ref()
+            .map_or_else(Vec::new, |config| latest(runner.data_dir(), config));
         Overview {
             status: StatusView::of(status),
             busy,

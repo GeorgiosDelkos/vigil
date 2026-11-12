@@ -329,6 +329,7 @@ function Summary(props: { overview: Overview; now: Date; onSweep: () => void }) 
         </button>
       </div>
       <Show when={failed()}>{(f) => <p class="banner bad">{f().error}</p>}</Show>
+      <Show when={props.overview.warning}>{(w) => <p class="banner warn">{w()}</p>}</Show>
       <Show when={props.overview.items.length > 0}>
         <div
           class="bar"
@@ -522,12 +523,17 @@ const SEVERITY_COLOURS: Readonly<Record<Severity, string>> = {
 };
 
 /** What a target's last sweep checked, when, and how many findings are dismissed there:
- * "139 components checked · swept 1 h ago · 2 dismissed". */
+ * "139 components checked · swept 1 h ago · 2 dismissed", and "not fully checked" when a
+ * source failed or a file could not be read. */
 function sweptLine(t: TargetLine, now: Date): string {
   const parts =
     t.swept === null ? ["not swept yet"] : [t.checked, `swept ${since(t.swept, now)} ago`];
   if (t.dismissed > 0) {
     parts.push(`${t.dismissed} dismissed`);
+  }
+  // Whatever is open: a failed source may hide more.
+  if (t.warning !== null) {
+    parts.push("not fully checked");
   }
   return parts.filter((part) => part !== null).join(" · ");
 }
@@ -558,9 +564,10 @@ function Targets(props: {
                     <Show
                       when={t.to_confirm}
                       fallback={
-                        <>
+                        // Not clear while not fully checked; the line above says why.
+                        <Show when={t.warning === null}>
                           <Icon name="done" /> clear
-                        </>
+                        </Show>
                       }
                     >
                       {(text) => <span class="confirming">{text()}</span>}
@@ -619,6 +626,7 @@ function TargetFindings(props: {
             )}
           </Show>
         </div>
+        <Show when={props.line.warning}>{(w) => <p class="banner warn">{w()}</p>}</Show>
       </section>
       <Show
         when={asked()}

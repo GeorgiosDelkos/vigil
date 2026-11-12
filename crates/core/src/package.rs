@@ -226,6 +226,26 @@ mod tests {
         assert!("Debian:12".parse::<Ecosystem>().is_err());
     }
 
+    /// `Unchecked::covers` tells OS packages from a saved lookup's ecosystem name by its colon.
+    #[test]
+    fn only_os_ecosystems_have_a_colon_in_their_osv_name() {
+        let os = [
+            Ecosystem::Debian { release: 12 },
+            Ecosystem::Ubuntu { year: 24, month: 4 },
+            Ecosystem::Alpine {
+                major: 3,
+                minor: 20,
+            },
+        ];
+        for ecosystem in Ecosystem::ALL.into_iter().chain(os) {
+            assert_eq!(
+                ecosystem.osv_name().contains(':'),
+                ecosystem.queried_by_version(),
+                "{ecosystem:?}"
+            );
+        }
+    }
+
     #[test]
     fn rejects_bad_packages() {
         assert!(matches!(

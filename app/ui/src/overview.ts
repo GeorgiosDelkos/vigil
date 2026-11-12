@@ -133,6 +133,9 @@ export type TargetLine = {
   readonly dismissed: number;
   /** "Fix all 3" when Fix all takes two or more of its open items; null hides the button. */
   readonly fix_all: string | null;
+  /** Why what it shows may be incomplete: sources that failed in its newest sweep, or files
+   * Rust could not read. Null when neither. */
+  readonly warning: string | null;
 };
 
 /** What the fix history says about an open finding. */
@@ -197,6 +200,8 @@ export type Overview = {
   readonly last_swept: string | null;
   readonly first_sweep_hint: string | null;
   readonly all_clear: boolean;
+  /** One line naming each target with a warning, and the warning; null when none has. */
+  readonly warning: string | null;
   readonly target_count: string;
   readonly targets: readonly TargetLine[];
   readonly dismissed: number;

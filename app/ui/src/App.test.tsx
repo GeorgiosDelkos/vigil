@@ -519,6 +519,53 @@ describe("the popover", () => {
     expect(screen.getByText("Stopping the agent and cleaning up…")).toBeTruthy();
   });
 
+  it("says which sources failed instead of all clear, and keeps Sweep", async () => {
+    const warning = "NVD for 3 products not checked";
+    shown = overview({
+      last_swept: "2026-11-06T11:00:00Z",
+      first_sweep_hint: null,
+      headline: "Not fully checked",
+      all_clear: false,
+      warning: `This Mac: ${warning}`,
+      targets: overview().targets.map((t) => ({
+        ...t,
+        swept: "2026-11-06T11:00:00Z",
+        checked: "12 components checked",
+        warning,
+      })),
+    });
+    answer();
+    render(() => <App />);
+    const banner = await screen.findByText("This Mac: NVD for 3 products not checked");
+    expect(banner.classList.contains("warn")).toBe(true);
+    expect(document.querySelector(".orbit.green")).toBeNull();
+    expect(sceneOf(shown)).toEqual({ mood: "unswept" });
+    const mac = targetRow(/^This Mac/);
+    expect(mac.sub).toBe("12 components checked · not fully checked");
+    expect(mac.clear).toBe(false);
+    const orbitRow = screen.getByRole("button", { name: /^This Mac, not fully checked, 12 / });
+    expect(orbitRow.getAttribute("aria-label")).not.toContain("clear");
+
+    fireEvent.click(screen.getByTitle("Show details"));
+    expect(await screen.findByText("Not fully checked", { selector: "h1" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sweep" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /Targets/ }));
+    expect(listTarget("This Mac").textContent).toContain("not fully checked");
+    expect(listTarget("This Mac").querySelector(".open svg")).toBeNull();
+
+    // With something open the row still says it was not fully checked.
+    cleanup();
+    shown = {
+      ...shown,
+      items: two().items,
+      targets: shown.targets.map((t) => ({ ...t, open: 2 })),
+    };
+    answer();
+    await openList();
+    fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
+    expect(listTarget("This Mac").textContent).toContain("not fully checked");
+  });
+
   it("shows all clear once a sweep found nothing", async () => {
     const empty = overview();
     shown = overview({
@@ -923,6 +970,7 @@ describe("the tabs", () => {
           open: 6,
           to_confirm: null,
           fix_all: null,
+          warning: null,
           dismissed: 1,
         },
         {
@@ -935,6 +983,7 @@ describe("the tabs", () => {
           open: 0,
           to_confirm: null,
           fix_all: null,
+          warning: null,
           dismissed: 0,
         },
         {
@@ -947,6 +996,7 @@ describe("the tabs", () => {
           open: 0,
           to_confirm: null,
           fix_all: null,
+          warning: null,
           dismissed: 0,
         },
         {
@@ -959,6 +1009,7 @@ describe("the tabs", () => {
           open: 3,
           to_confirm: null,
           fix_all: null,
+          warning: null,
           dismissed: 0,
         },
       ],
