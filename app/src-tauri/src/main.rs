@@ -45,9 +45,18 @@ use vigil_core::startup_disk;
 use vigil_core::target_label;
 use vigil_core::write_html_report;
 
+use crate::runner::Previewed;
 use crate::runner::Runner;
 use crate::runner::Status;
 use crate::update::UpdateView;
+
+// Without `custom-protocol`, Tauri is in dev mode (tauri-build 2.7.4 sets the `dev` cfg from it
+// with `cfg_alias("dev", is_dev())` in its `src/lib.rs`, and declares it for check-cfg) and
+// the window loads the UI from the dev server's URL, http://localhost:5173. In a release build
+// that would hand every command (fix, save, dismiss) to whichever local process binds that
+// port first. Debug builds stay allowed, since `cargo tauri dev` is one.
+#[cfg(all(dev, not(debug_assertions)))]
+compile_error!("a release build of vigil-app needs `--features custom-protocol`");
 
 fn main() {
     let home = std::env::home_dir().expect("a Mac user has a home directory");
@@ -75,7 +84,6 @@ fn main() {
             fix_preview,
             fix,
             fix_all_preview,
-            fix_all,
             close_fix,
             fix_log,
             dismiss,
@@ -339,13 +347,11 @@ fn overview(app: AppHandle, runner: State<'_, Runner>) -> Overview {
             Ok(config) => (Some(config), None),
             Err(e) => (None, Some(e.to_string())),
         };
-        let (targets, problem) = match (&config, problem) {
-            (Some(config), None) => match latest(runner.data_dir(), config) {
-                Ok(targets) => (targets, None),
-                Err(e) => (Vec::new(), Some(e.to_string())),
-            },
-            (_, problem) => (Vec::new(), problem),
-        };
+        // A report or state file that cannot be read is its targets' warning, not this
+        // problem: the problem view hides every target and the Sweep button.
+        let targets = config
+            .as_ref()
+            .map_or_else(Vec::new, |config| latest(runner.data_dir(), config));
         Overview {
             status: StatusView::of(status),
             busy,
@@ -394,7 +400,7 @@ fn open_config(runner: State<'_, Runner>) -> Result<(), String> {
     if !path.exists() {
         runner.data_dir().init().map_err(|e| e.to_string())?;
     }
-    let status = Command::new("open")
+    let status = Command::new("/usr/bin/open")
         .arg("-t")
         .arg(&path)
         .status()
@@ -438,9 +444,12 @@ fn quit(app: AppHandle) {
     runner::quit(&app);
 }
 
-/// What the detail view shows before the user confirms a fix.
+/// What the detail view shows before the user confirms a fix: everything the agent is told the
+/// user confirmed.
 #[derive(Debug, Serialize)]
 struct FixPreview {
+    /// The number [`fix`] takes to run exactly this plan.
+    preview: u64,
     /// Where it runs: "this Mac", the repository, or the server and its ssh command.
     destination: String,
     /// When the sweep that found it started.
@@ -449,10 +458,13 @@ struct FixPreview {
     steps: Vec<String>,
     commands: Vec<String>,
     agent: String,
+    /// What to read before confirming, one sentence each ([`vigil_core::FixPlan::notes`]).
+    notes: Vec<String>,
 }
 
 /// Checks the fix of `key` as the CLI's `fix` does before it asks: the finding is current and
 /// not dismissed, its fix is well formed, the target is configured and the agent installed.
+/// Keeps the plan, which [`fix`] then runs.
 #[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
@@ -465,35 +477,37 @@ fn fix_preview(runner: State<'_, Runner>, key: String) -> Result<FixPreview, Str
     let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
         .map_err(|e| e.to_string())?;
     let plan = plan_fix(runner.data_dir(), &config, key).map_err(|e| e.to_string())?;
-    Ok(FixPreview {
+    let mut shown = FixPreview {
+        preview: 0,
         destination: plan.destination().to_owned(),
         found: plan.found(),
         summary: plan.fix().summary.clone(),
         steps: plan.fix().steps.clone(),
         commands: plan.fix().commands.clone(),
-        agent: plan.agent().to_string(),
-    })
+        agent: plan.agent_and_model(),
+        notes: plan.notes(),
+    };
+    shown.preview = runner.keep_preview(Previewed::One(plan));
+    Ok(shown)
 }
 
-/// Runs the fix of `key`, which the user just confirmed in the detail view, with full access.
-/// `found` is the preview's: the fix runs only when it is still the one the user saw. Async,
-/// so planning it never stalls the UI.
+/// Runs the plan of the confirmation numbered `preview`, a fix or a Fix all, which the user
+/// just confirmed, with full access (see [`runner::start_fix`]).
 #[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
-fn fix(app: AppHandle, key: String, found: Timestamp) -> Result<(), String> {
-    let key: FindingKey = key
-        .parse()
-        .map_err(|e: ParseFindingKeyError| e.to_string())?;
-    runner::start_fix(&app, key, found)
+fn fix(app: AppHandle, preview: u64) -> Result<(), String> {
+    runner::start_fix(&app, preview)
 }
 
 /// What the target view shows before the user confirms a Fix all: every item's fix, as the
 /// detail view shows one.
 #[derive(Debug, Serialize)]
 struct FixAllPreview {
+    /// The number [`fix`] takes to run exactly this plan.
+    preview: u64,
     /// Where they run: "this Mac", or the server and its ssh command.
     destination: String,
     /// When the sweep that found them started.
@@ -502,6 +516,8 @@ struct FixAllPreview {
     /// The confirming button's label: "Fix all 3".
     confirm: String,
     items: Vec<FixAllPreviewItem>,
+    /// What to read before confirming, one sentence each.
+    notes: Vec<String>,
 }
 
 /// One item of a [`FixAllPreview`].
@@ -518,7 +534,7 @@ struct FixAllPreviewItem {
 
 /// Checks the Fix all of `target` as the CLI's `fix all` does before it asks: every item is
 /// current and not dismissed, its fix well formed, the target configured and not a
-/// repository, and the agent installed.
+/// repository, and the agent installed. Keeps the plan, which [`fix`] then runs.
 #[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
@@ -528,10 +544,12 @@ fn fix_all_preview(runner: State<'_, Runner>, target: String) -> Result<FixAllPr
     let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
         .map_err(|e| e.to_string())?;
     let plan = plan_fix_all(runner.data_dir(), &config, &target).map_err(|e| error_chain(&e))?;
-    Ok(FixAllPreview {
+    let mut shown = FixAllPreview {
+        preview: 0,
+        notes: plan.notes(),
         destination: plan.destination().to_owned(),
         found: plan.found(),
-        agent: plan.agent().to_string(),
+        agent: plan.agent_and_model(),
         confirm: format!("Fix all {}", plan.items().len()),
         items: plan
             .items()
@@ -544,29 +562,9 @@ fn fix_all_preview(runner: State<'_, Runner>, target: String) -> Result<FixAllPr
                 commands: item.fix().commands.clone(),
             })
             .collect(),
-    })
-}
-
-/// Runs the Fix all of `target`, which the user just confirmed, as one agent run with full
-/// access. `keys` and `found` are the preview's: it runs only when its items are still the
-/// ones the user saw. Async, so planning it never stalls the UI.
-#[tauri::command(async)]
-#[expect(
-    clippy::needless_pass_by_value,
-    reason = "Tauri hands command arguments over by value"
-)]
-fn fix_all(
-    app: AppHandle,
-    target: String,
-    keys: Vec<String>,
-    found: Timestamp,
-) -> Result<(), String> {
-    let keys = keys
-        .iter()
-        .map(|key| key.parse())
-        .collect::<Result<Vec<FindingKey>, ParseFindingKeyError>>()
-        .map_err(|e| e.to_string())?;
-    runner::start_fix_all(&app, &target, &keys, found)
+    };
+    shown.preview = runner.keep_preview(Previewed::All(plan));
+    Ok(shown)
 }
 
 /// Closes the last fix's results (see [`runner::close_fix`]).
@@ -579,15 +577,14 @@ fn close_fix(app: AppHandle) {
     runner::close_fix(&app);
 }
 
-/// The end of the last fix's agent log, while its results show. Async, so reading the file
-/// never stalls the UI.
-#[tauri::command(async)]
+/// The end of the last fix's agent log, while its results show; the run kept it in memory.
+#[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
 fn fix_log(app: AppHandle) -> Result<LogTail, String> {
-    runner::fix_log(&app)
+    runner::fix_log(&app).map_err(str::to_owned)
 }
 
 /// Dismisses `key` for `reason`; it shows again when its advisory changes.

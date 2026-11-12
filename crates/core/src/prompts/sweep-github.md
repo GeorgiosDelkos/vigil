@@ -29,7 +29,8 @@ and need none.
     user's login, so say nothing about it;
   - `"not collected; see the problems in the report"`: the app could not read it, so say
     nothing about it;
-  - an alert setting's `{"open": n}`: how many alerts are open.
+  - an alert setting's `{"open": n}`: how many alerts are open; `{"open": "n or more"}`
+    (usually `"500 or more"`) when the alerts file holds the first n and there may be more.
 - `github/dependabot-alerts.json`, `github/code-scanning-alerts.json`,
   `github/secret-scanning-alerts.json`: the open alerts, when GitHub returned them. Secret
   values are removed.

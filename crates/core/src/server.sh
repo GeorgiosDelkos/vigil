@@ -4,11 +4,16 @@
 # lockfiles are read. Neither is on the remote command line, so other users of the server cannot
 # see the marker in `ps`.
 #
-# It only reads: it never uses sudo, writes no file and opens no connection. Each part of the
-# answer is printed as a "<marker> begin <part>" line, the part's output, an empty line and a
-# "<marker> end <exit status>" line. The marker is random per run, so no file's content can end a
-# part early. Standard error is dropped for the whole script: the exit status says whether a part
-# was read, and error text from the server would only reach the user's terminal.
+# It only reads: it never uses sudo, and writes no file. Its one connection is `docker`'s to the
+# daemon the server's docker is set up for (DOCKER_HOST or the current context), which may be
+# on another host. It is not pinned to /var/run/docker.sock, since rootless docker listens
+# elsewhere, and `ps` and `images` only read.
+#
+# Each part of the answer is printed as a "<marker> begin <part>" line, the part's output, an
+# empty line and a "<marker> end <exit status>" line. The marker is random per run, so no file's
+# content can end a part early. Standard error is dropped for the whole script: the exit status
+# says whether a part was read, and error text from the server would only reach the user's
+# terminal.
 
 # shellcheck disable=SC2154 # marker is set by the app's first line
 exec 2>/dev/null
@@ -36,9 +41,11 @@ listening() {
 
 # The lockfile names and skipped folders match the Mac's project folder walk (lockfiles.rs).
 # Names with a newline are skipped, since the list is one path per line. The exit status is
-# find's own: not 0 when some folder below could not be read.
+# find's own: not 0 when some folder below could not be read. `-H` follows the folder itself
+# when it is a symlink (a deploy's `current` link), as the `[ -d ]` check before it does;
+# without it find lists nothing under such a folder. Symlinks below it are still not followed.
 lockfiles() {
-  find "$1" -mindepth 1 \
+  find -H "$1" -mindepth 1 \
     \( -name "*$nl*" -o -type d \( -name '.*' -o -name node_modules -o -name target \
     -o -name vendor -o -name dist -o -name build \) \) -prune \
     -o -type f \( -name Cargo.lock -o -name package-lock.json -o -name npm-shrinkwrap.json \

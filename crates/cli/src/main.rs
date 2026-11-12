@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::ArgGroup;
@@ -20,6 +21,7 @@ use vigil_core::Inventory;
 use vigil_core::Latest;
 use vigil_core::Listed;
 use vigil_core::LoadConfigError;
+use vigil_core::LogTail;
 use vigil_core::NvdAccess;
 use vigil_core::OsvQuery;
 use vigil_core::Outcome;
@@ -28,12 +30,14 @@ use vigil_core::Product;
 use vigil_core::Progress;
 use vigil_core::SshConn;
 use vigil_core::SweepError;
+use vigil_core::SweepsLock;
 use vigil_core::Targets;
 use vigil_core::dismiss;
 use vigil_core::error_chain;
 use vigil_core::fix_all_outcome;
 use vigil_core::items;
 use vigil_core::latest;
+use vigil_core::plain;
 use vigil_core::plan_fix;
 use vigil_core::plan_fix_all;
 use vigil_core::report_markdown;
@@ -164,7 +168,17 @@ enum FixAll {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            error(&format!("{e:#}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Looked up only when needed, so `--data-dir X init` works without HOME.
     let home = || std::env::home_dir().context("cannot find the home directory; set HOME");
@@ -192,7 +206,7 @@ fn main() -> anyhow::Result<()> {
             run_sweep(&data_dir, &load_config(&data_dir, &home()?)?, targets)?;
         }
         Command::Findings { json } => {
-            let all = latest(&data_dir, &load_config(&data_dir, &home()?)?)?;
+            let all = latest(&data_dir, &load_config(&data_dir, &home()?)?);
             if json {
                 for target in &all {
                     print(&serde_json::to_string(target).context("write JSON")?);
@@ -313,8 +327,17 @@ fn fix_line(state: &FixState) -> String {
 fn findings_text(all: Vec<Latest>) -> String {
     let mut out = String::new();
     for mut target in all {
+        // Under the target's line and above its items, which may lack what the gap hides.
+        let mut gaps = String::new();
+        if let Some(failed) = target.unchecked.describe() {
+            gaps.push_str(&format!("  not fully checked: {failed}\n"));
+        }
+        if let Some(problem) = &target.problem {
+            gaps.push_str(&format!("  could not read: {problem}\n"));
+        }
         let Some(swept) = target.swept else {
             out.push_str(&format!("{}: no sweep with a verdict yet\n", target.target));
+            out.push_str(&gaps);
             continue;
         };
         let dismissed = match target.dismissed {
@@ -336,6 +359,7 @@ fn findings_text(all: Vec<Latest>) -> String {
             target.target,
             listed.open.len()
         ));
+        out.push_str(&gaps);
         for item in &listed.open {
             out.push_str(&item_text(item));
         }
@@ -415,15 +439,18 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
     for command in &plan.fix().commands {
         text.push_str(&format!("  $ {command}\n"));
     }
+    for note in plan.notes() {
+        text.push_str(&format!("{note}\n"));
+    }
     print(&text);
     let confirmed = confirm(
         yes,
         &format!(
             "Run this fix now with {}, with full access? [y/N]",
-            plan.agent()
+            plan.agent_and_model()
         ),
     )?;
-    let record = run_fix(
+    let (record, log) = run_fix(
         data_dir,
         &plan,
         confirmed,
@@ -438,18 +465,28 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
         .as_ref()
         .map_or(String::new(), |url| format!("\npull request: {url}"));
     print(&format!(
-        "{}: {}{pull_request}\n(log and files in {})",
-        record.outcome,
-        record.summary,
-        record.dir.display()
+        "{}: {}{pull_request}",
+        record.outcome, record.summary
     ));
     if record.outcome != Outcome::Fixed || record.exit_code != Some(0) {
+        print_log(&log);
         let exit = record
             .exit_code
             .map_or("no exit code".to_owned(), |c| format!("exit code {c}"));
         anyhow::bail!("the fix did not finish: {}, agent {exit}", record.outcome);
     }
     Ok(())
+}
+
+/// Shows the end of a fix's agent log on stderr, for a fix that did not finish: the run's
+/// folder is deleted once it is recorded, so this is the only copy left.
+fn print_log(log: &LogTail) {
+    let mut text = "The agent's log".to_owned();
+    if let Some(note) = &log.note {
+        text.push_str(&format!(" ({note})"));
+    }
+    text.push_str(&format!(":\n{}", log.text));
+    status(&text);
 }
 
 /// Asks `question` on stderr unless `yes`, and says how the run was confirmed. Fails when the
@@ -497,17 +534,20 @@ fn fix_all(data_dir: &DataDir, config: &Config, target: &str, yes: bool) -> anyh
             text.push_str(&format!("  $ {command}\n"));
         }
     }
+    for note in plan.notes() {
+        text.push_str(&format!("{note}\n"));
+    }
     print(&text);
     let confirmed = confirm(
         yes,
         &format!(
             "Run these {} fixes now with {}, with full access, in one run? [y/N]",
             plan.items().len(),
-            plan.agent()
+            plan.agent_and_model()
         ),
     )?;
     let labels = plan.labels();
-    let records = run_fix_all(
+    let (records, log) = run_fix_all(
         data_dir,
         &plan,
         confirmed,
@@ -528,12 +568,10 @@ fn fix_all(data_dir: &DataDir, config: &Config, target: &str, yes: bool) -> anyh
             record.summary
         ));
     }
-    if let Some(record) = records.first() {
-        out.push_str(&format!("(log and files in {})", record.dir.display()));
-    }
     print(&out);
     let (outcome, summary) = fix_all_outcome(&records);
     if outcome != Outcome::Fixed {
+        print_log(&log);
         anyhow::bail!("not every fix finished: {summary}");
     }
     Ok(())
@@ -541,13 +579,20 @@ fn fix_all(data_dir: &DataDir, config: &Config, target: &str, yes: bool) -> anyh
 
 /// Prints every advisory each source could fetch, as it arrives, and reports every failure on
 /// stderr. One failing source or record never hides the rest; the command still exits
-/// non-zero at the end so a script notices the gap.
+/// non-zero at the end so a script notices the gap. Records served from the cache because their
+/// source could not be asked are printed, with a warning that does not count as a failure.
+///
+/// Asking NVD takes the sweeps lock, so it never runs beside a sweep: each process paces its own
+/// NVD requests, and two at once would exceed NVD's rate limit.
 fn advisories(
     data_dir: &DataDir,
     history: History,
     packages: &[Package],
     products: &[Product],
 ) -> anyhow::Result<()> {
+    let _lock = (!products.is_empty())
+        .then(|| SweepsLock::acquire(data_dir))
+        .transpose()?;
     // Reading the Keychain can prompt the user, so only when NVD will be queried.
     let nvd = if products.is_empty() {
         NvdAccess::Anonymous
@@ -559,6 +604,12 @@ fn advisories(
     let mut fail = |what: &str, error: &dyn std::error::Error| {
         failures += 1;
         warn(&format!("{what}: {}", error_chain(error)));
+    };
+    let stale = |what: &str, error: &dyn std::error::Error| {
+        warn(&format!(
+            "{what}: cached copy, as asking failed: {}",
+            error_chain(error)
+        ));
     };
 
     let kev = feeds.kev();
@@ -581,8 +632,11 @@ fn advisories(
                 for found in &osv.advisories {
                     print(&found.advisory.to_json_line(kev));
                 }
-                for e in &osv.failures {
-                    fail("OSV record", e);
+                for failure in &osv.failures {
+                    fail("OSV record", &failure.error);
+                }
+                for cached in &osv.stale {
+                    stale(&format!("OSV record {}", cached.id), &cached.error);
                 }
                 for crowded in &osv.crowded {
                     warn(&format!(
@@ -597,8 +651,11 @@ fn advisories(
     for product in products {
         match feeds.nvd(product, history) {
             Ok(found) => {
-                for advisory in &found {
+                for advisory in &found.advisories {
                     print(&advisory.to_json_line(kev));
+                }
+                if let Some(e) = &found.stale {
+                    stale(&format!("NVD product {product}"), e);
                 }
             }
             Err(e) => fail(&format!("NVD product {product}"), &e),
@@ -729,7 +786,7 @@ fn show_progress(progress: &Progress<'_>) {
     reason = "the CLI's one output function for progress"
 )]
 fn status(text: &str) {
-    eprintln!("{text}");
+    eprintln!("{}", terminal_safe(text));
 }
 
 #[expect(
@@ -737,7 +794,23 @@ fn status(text: &str) {
     reason = "the CLI's one output function for warnings"
 )]
 fn warn(text: &str) {
-    eprintln!("warning: {text}");
+    eprintln!("warning: {}", terminal_safe(text));
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI's one output function for the error that ends a command"
+)]
+fn error(text: &str) {
+    eprintln!("error: {}", terminal_safe(text));
+}
+
+/// `text` with every control or invisible character except the line breaks replaced, as
+/// [`plain`] does. Warnings and errors quote what the CLI does not control (a lockfile's line in
+/// a parse error, a tool's or the agent's stderr), and an escape sequence printed raw would act
+/// on the terminal: OSC 52 writes the clipboard, OSC 8 hides a link behind other text.
+fn terminal_safe(text: &str) -> String {
+    text.lines().map(plain).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]
@@ -790,6 +863,8 @@ mod tests {
             open: vec![open],
             fixed: vec![fixed],
             dismissed: 0,
+            unchecked: vigil_core::Unchecked::default(),
+            problem: None,
         };
         let text = findings_text(vec![latest]);
         assert!(
@@ -922,5 +997,14 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
         let cli = Cli::try_parse_from(["vigil", "advisories", "--product", "zlib"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn terminal_safe_keeps_line_breaks_and_drops_escapes() {
+        let text = "line 1 | \u{1b}]52;c;aGk=\u{7}\nline 2 \u{202e}txt.exe\r";
+        assert_eq!(
+            terminal_safe(text),
+            "line 1 | \u{fffd}]52;c;aGk=\u{fffd}\nline 2 \u{fffd}txt.exe "
+        );
     }
 }

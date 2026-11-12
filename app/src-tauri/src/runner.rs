@@ -11,6 +11,13 @@
 //! or after [`QUIT_WAIT`]. However the app ends, the core's watchdog stops every program a
 //! sweep started; a sweep the app did not let end leaves an unfinished folder, which the
 //! schedule thread removes when the app starts ([`schedule`]).
+//!
+//! A fix runs exactly the plan its confirmation showed: the preview keeps the plan here, under
+//! a number the UI sends back when the user confirms ([`Runner::keep_preview`],
+//! [`start_fix`]). Planning again at the click would read `config.toml` and the prompt again,
+//! so an edit made while the user read the question (another host, agent or model) would run
+//! without being shown. The core still checks under the sweeps lock that the plan's finding is
+//! current.
 
 use std::panic;
 use std::panic::AssertUnwindSafe;
@@ -32,8 +39,7 @@ use vigil_core::Cancel;
 use vigil_core::Config;
 use vigil_core::Confirmed;
 use vigil_core::DataDir;
-use vigil_core::FindingKey;
-use vigil_core::FixAllItem;
+use vigil_core::FixAllPlan;
 use vigil_core::FixPlan;
 use vigil_core::FixProgress;
 use vigil_core::FixRun;
@@ -46,8 +52,6 @@ use vigil_core::alerts;
 use vigil_core::clean_up_interrupted;
 use vigil_core::error_chain;
 use vigil_core::last_sweep_started;
-use vigil_core::plan_fix;
-use vigil_core::plan_fix_all;
 use vigil_core::run_fix;
 use vigil_core::run_fix_all;
 use vigil_core::sweep;
@@ -94,6 +98,54 @@ struct Shared {
     /// The last update check, and an update waiting for a restart. Under this lock so that
     /// installing one is refused in the same step that sees whether a sweep or fix runs.
     updates: Updates,
+    /// The plan of the last confirmation shown, which Run fix or Fix all runs.
+    previews: Previews<Previewed>,
+}
+
+/// A plan a confirmation showed.
+#[derive(Debug)]
+pub(crate) enum Previewed {
+    One(FixPlan),
+    All(FixAllPlan),
+}
+
+/// The plan of the last confirmation shown, under its number. One at a time: the popover shows
+/// one confirmation, and a newer preview replaces an older one, whose Run then fails and asks
+/// for the question again. Numbers are never reused, so an old confirmation can never run a
+/// newer plan. Generic only so tests can keep plain values; the app keeps [`Previewed`].
+#[derive(Debug)]
+struct Previews<T> {
+    /// The number the next preview gets.
+    next: u64,
+    kept: Option<(u64, T)>,
+}
+
+impl<T> Previews<T> {
+    fn new() -> Self {
+        Self {
+            next: 1,
+            kept: None,
+        }
+    }
+
+    /// Keeps `plan`, replacing any older one, and returns its number.
+    fn keep(&mut self, plan: T) -> u64 {
+        let number = self.next;
+        self.next += 1;
+        self.kept = Some((number, plan));
+        number
+    }
+
+    /// Takes the plan numbered `number`, which then cannot run again.
+    fn take(&mut self, number: u64) -> Result<T, &'static str> {
+        match self.kept.take() {
+            Some((kept, plan)) if kept == number => Ok(plan),
+            other => {
+                self.kept = other;
+                Err("this confirmation is out of date; open the fix again to see what it runs")
+            }
+        }
+    }
 }
 
 /// How far quitting has got.
@@ -207,8 +259,15 @@ impl Runner {
                 cancel: Cancel::new(),
                 quit: Quit::No,
                 updates: Updates::default(),
+                previews: Previews::new(),
             }),
         }
+    }
+
+    /// Keeps the plan a confirmation is about to show, and returns the number the UI sends
+    /// back to run it ([`start_fix`]).
+    pub(crate) fn keep_preview(&self, plan: Previewed) -> u64 {
+        self.lock().previews.keep(plan)
     }
 
     pub(crate) fn data_dir(&self) -> &DataDir {
@@ -252,13 +311,13 @@ impl Runner {
         }
     }
 
-    /// The end of the last fix's `agent.log`, while its results show.
-    fn fix_log(&self) -> Result<LogTail, String> {
-        // `status` clones the run out, so the file is read without the lock held.
-        let Status::Fixed { run, .. } = self.status() else {
-            return Err("no fix's results are showing".to_owned());
-        };
-        run.log_tail().map_err(|e| error_chain(&e))
+    /// The end of the last fix's `agent.log`, while its results show. The run read it before
+    /// it deleted its folder.
+    fn fix_log(&self) -> Result<LogTail, &'static str> {
+        match &self.lock().status {
+            Status::Fixed { run, .. } => Ok(run.log_tail().clone()),
+            _ => Err("no fix's results are showing"),
+        }
     }
 
     /// Reads or changes the update state under the lock. `f` must not block: every command
@@ -373,8 +432,9 @@ pub(crate) fn start(app: &AppHandle) -> Result<(), &'static str> {
 ///
 /// # Errors
 ///
-/// Fails when no sweep is running. A fix cannot be cancelled: stopped halfway, it could leave
-/// a change half made.
+/// Fails when no sweep is running. The popover offers no Cancel for a fix, as a fix stopped
+/// halfway could leave a change half made; only quitting ([`quit`]) stops one, and its outcome
+/// is then recorded as unknown.
 pub(crate) fn cancel_sweep(app: &AppHandle) -> Result<(), &'static str> {
     let runner = app.state::<Runner>();
     let mut shared = runner.lock();
@@ -489,79 +549,51 @@ fn advance(status: &mut Status, progress: &Progress<'_>) {
     *step_started = Timestamp::now();
 }
 
-/// Runs the confirmed fix of `key` on its own thread; its results then show as
-/// [`Status::Fixed`].
+/// Runs the plan of the confirmation numbered `preview`, a fix or a Fix all, on its own thread
+/// as one agent run; its results then show as [`Status::Fixed`].
 ///
-/// The fix is planned again and runs only when it comes from the sweep that found the one the
-/// user confirmed (`found`, from the preview), so a sweep that landed since the preview is
-/// refused instead of running commands the user never saw. `run_fix` checks the plan against
-/// the reports once more under the sweeps lock, which catches a sweep that lands after this.
-///
-/// # Errors
-///
-/// Fails when the fix cannot be planned, changed since the preview, or a sweep or another fix
-/// is running.
-pub(crate) fn start_fix(app: &AppHandle, key: FindingKey, found: Timestamp) -> Result<(), String> {
-    let plan = plan(app, key)?;
-    if plan.found() != found {
-        return Err("a newer sweep ran; open the finding again to see its fix".to_owned());
-    }
-    let cancel = app.state::<Runner>().claim(fixing(
-        plan.fix().summary.clone(),
-        target_label(plan.target()),
-        FixProgress::labels(plan.agent()),
-    ))?;
-    changed(app);
-    fix_thread(app, move |data_dir, progress| {
-        let record = run_fix(data_dir, &plan, Confirmed::Asked, progress, &cancel)
-            .map_err(|e| e.to_string())?;
-        Ok(FixRun::single(record))
-    });
-    Ok(())
-}
-
-/// Runs the confirmed Fix all of `target` on its own thread, as one agent run; its results then
-/// show as [`Status::Fixed`].
-///
-/// As for one fix, it is planned again and runs only when it is the list the user confirmed:
-/// the same items, in the same order (`keys`), from the sweep that found them (`found`), both
-/// from the preview. `run_fix_all` checks every item once more under the sweeps lock.
+/// The plan is the one the confirmation showed, kept since the preview, so nothing the user
+/// did not see runs. `run_fix` and `run_fix_all` check under the sweeps lock that it is still
+/// current: a sweep, a fix or a dismissal since the preview refuses it.
 ///
 /// # Errors
 ///
-/// Fails when it cannot be planned, its items changed since the preview, or a sweep or a fix
-/// is running.
-pub(crate) fn start_fix_all(
-    app: &AppHandle,
-    target: &str,
-    keys: &[FindingKey],
-    found: Timestamp,
-) -> Result<(), String> {
+/// Fails when `preview` is not the last confirmation shown, or a sweep or a fix is running;
+/// either way the plan is dropped, and the user opens the fix again.
+pub(crate) fn start_fix(app: &AppHandle, preview: u64) -> Result<(), String> {
     let runner = app.state::<Runner>();
-    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
-        .map_err(|e| e.to_string())?;
-    let plan = plan_fix_all(runner.data_dir(), &config, target).map_err(|e| error_chain(&e))?;
-    let planned: Vec<FindingKey> = plan.items().iter().map(FixAllItem::key).collect();
-    if plan.found() != found || planned != keys {
-        return Err(
-            "a sweep, fix or dismissal changed this target's items; open Fix all again to see \
-             them"
-                .to_owned(),
-        );
+    let plan = runner.lock().previews.take(preview)?;
+    match plan {
+        Previewed::One(plan) => {
+            let cancel = runner.claim(fixing(
+                plan.fix().summary.clone(),
+                target_label(plan.target()),
+                FixProgress::labels(plan.agent()),
+            ))?;
+            changed(app);
+            fix_thread(app, move |data_dir, progress| {
+                let (record, log) = run_fix(data_dir, &plan, Confirmed::Asked, progress, &cancel)
+                    .map_err(|e| e.to_string())?;
+                Ok(FixRun::single(record, log))
+            });
+        }
+        Previewed::All(plan) => {
+            // One agent at a time (the owner's rule, 2026-11-11): claimed like any fix, so
+            // Sweep now, the schedule, Fix and another Fix all are refused until it ends.
+            let cancel = runner.claim(fixing(
+                plan.title(),
+                target_label(plan.target()),
+                plan.labels(),
+            ))?;
+            changed(app);
+            fix_thread(app, move |data_dir, progress| {
+                let (records, log) =
+                    run_fix_all(data_dir, &plan, Confirmed::Asked, progress, &cancel)
+                        .map_err(|e| error_chain(&e))?;
+                Ok(FixRun::all(&plan, records, log))
+            });
+        }
     }
-    // One agent at a time (the owner's rule, 2026-11-11): claimed like any fix, so Sweep now,
-    // the schedule, Fix and another Fix all are refused until it ends.
-    let cancel = runner.claim(fixing(
-        plan.title(),
-        target_label(plan.target()),
-        plan.labels(),
-    ))?;
-    changed(app);
-    fix_thread(app, move |data_dir, progress| {
-        let records = run_fix_all(data_dir, &plan, Confirmed::Asked, progress, &cancel)
-            .map_err(|e| error_chain(&e))?;
-        Ok(FixRun::all(&plan, records))
-    });
     Ok(())
 }
 
@@ -648,16 +680,10 @@ pub(crate) fn close_fix(app: &AppHandle) {
 ///
 /// # Errors
 ///
-/// Fails when no fix's results show, or when the log is missing or cannot be read.
-pub(crate) fn fix_log(app: &AppHandle) -> Result<LogTail, String> {
+/// Fails when no fix's results show. The log is kept in memory: the run read it before it
+/// deleted its folder.
+pub(crate) fn fix_log(app: &AppHandle) -> Result<LogTail, &'static str> {
     app.state::<Runner>().fix_log()
-}
-
-fn plan(app: &AppHandle, key: FindingKey) -> Result<FixPlan, String> {
-    let runner = app.state::<Runner>();
-    let config = Config::load_or_default(&runner.data_dir().config_file(), runner.home())
-        .map_err(|e| e.to_string())?;
-    plan_fix(runner.data_dir(), &config, key).map_err(|e| e.to_string())
 }
 
 /// Idle when every target got a verdict, otherwise the first that did not, and why.
@@ -924,7 +950,7 @@ mod tests {
 
     /// A single fix's record, ended `partial`.
     fn partial_run() -> FixRun {
-        FixRun::single(vigil_core::FixRecord {
+        let record = vigil_core::FixRecord {
             key: "00000000000000c1".parse().unwrap(),
             title: "CVE-1 in sqlite 3.45".to_owned(),
             found: Timestamp::UNIX_EPOCH,
@@ -937,8 +963,37 @@ mod tests {
             summary: "no newer sqlite release".to_owned(),
             pull_request: None,
             confirmed: Confirmed::Asked,
-            dir: PathBuf::from("/fixes/x"),
-        })
+        };
+        let log = LogTail {
+            text: "checked sqlite".to_owned(),
+            note: None,
+        };
+        FixRun::single(record, log)
+    }
+
+    #[test]
+    fn only_the_last_confirmation_shown_runs_and_only_once() {
+        let mut previews = Previews::new();
+        let first = previews.keep("first");
+        assert_eq!(previews.take(first), Ok("first"));
+        assert!(previews.take(first).is_err(), "a plan runs once");
+
+        let older = previews.keep("older");
+        let newer = previews.keep("newer");
+        assert_ne!(older, newer);
+        assert!(
+            previews
+                .take(older)
+                .unwrap_err()
+                .starts_with("this confirmation is out of date"),
+            "a newer preview replaced it"
+        );
+        assert_eq!(
+            previews.take(newer),
+            Ok("newer"),
+            "a refused number keeps the plan"
+        );
+        assert!(previews.take(first).is_err(), "numbers are never reused");
     }
 
     #[test]
@@ -1037,10 +1092,10 @@ mod tests {
             "no fix's results are showing"
         );
         runner.set(finished(&fixing(), Ok(partial_run())));
-        let err = runner.fix_log().unwrap_err();
-        assert!(
-            err.contains("/fixes/x/agent.log"),
-            "the run's own log: {err}"
+        assert_eq!(
+            runner.fix_log().unwrap().text,
+            "checked sqlite",
+            "the run's own log, kept in memory"
         );
     }
 

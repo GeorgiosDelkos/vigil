@@ -26,6 +26,7 @@ use tauri::tray::TrayIconEvent;
 use tauri_plugin_positioner::Position;
 use tauri_plugin_positioner::WindowExt as _;
 use vigil_core::Config;
+use vigil_core::PopoverView;
 use vigil_core::Severity;
 use vigil_core::latest;
 use vigil_core::popover_view;
@@ -138,8 +139,9 @@ enum Look {
     Failed,
 }
 
-/// Whether the runner's status is `Failed`: the last sweep stopped, a target in it got no
-/// verdict, the schedule could not be checked, or a fix ended without results.
+/// Whether something failed: the runner's status is `Failed` (the last sweep stopped, a target
+/// in it got no verdict, the schedule could not be checked, or a fix ended without results), or
+/// a target's newest sweep had a source fail or its files cannot be read.
 #[derive(Debug, Clone, Copy)]
 enum Health {
     Ok,
@@ -290,11 +292,19 @@ fn look(app: &AppHandle) -> Look {
     else {
         return Look::Failed;
     };
-    let Ok(targets) = latest(runner.data_dir(), &config) else {
-        return Look::Failed;
-    };
     // The popover's open items, so a fix reported done colours neither the icon nor the list.
-    Look::of(popover_view(targets).worst(), health)
+    look_of(&popover_view(latest(runner.data_dir(), &config)), health)
+}
+
+/// The look of an app running nothing whose popover shows `view`, with the runner's `health`.
+/// A target with a warning (a source failed, a file cannot be read) is a failure too: never a
+/// green all-clear, and never a hidden critical either, as [`Look::of`] keeps the colour.
+fn look_of(view: &PopoverView, health: Health) -> Look {
+    let health = match (health, &view.warning) {
+        (Health::Ok, None) => Health::Ok,
+        _ => Health::Failed,
+    };
+    Look::of(view.worst(), health)
 }
 
 fn toggle(app: &AppHandle) {
@@ -326,6 +336,7 @@ mod tests {
     use jiff::Timestamp;
     use vigil_core::Latest;
     use vigil_core::Open;
+    use vigil_core::Unchecked;
 
     use super::*;
 
@@ -419,6 +430,38 @@ mod tests {
     }
 
     #[test]
+    fn a_target_not_fully_checked_is_a_failure_that_keeps_the_colour() {
+        let warned = |open, unchecked: Unchecked, problem: Option<&str>| {
+            let mut targets = swept(open);
+            targets[0].unchecked = unchecked;
+            targets[0].problem = problem.map(str::to_owned);
+            look_of(&popover_view(targets), Health::Ok)
+        };
+        let nvd_down = || Unchecked {
+            nvd: ["curl".to_owned()].into(),
+            ..Unchecked::default()
+        };
+        assert!(matches!(warned(Vec::new(), nvd_down(), None), Look::Failed));
+        assert!(matches!(
+            warned(vec![finding(1, Severity::Critical)], nvd_down(), None),
+            Look::Critical(Health::Failed)
+        ));
+        let unreadable = Some("cannot read report.json");
+        assert!(matches!(
+            warned(
+                vec![finding(1, Severity::High)],
+                Unchecked::default(),
+                unreadable
+            ),
+            Look::High(Health::Failed)
+        ));
+        assert!(matches!(
+            warned(Vec::new(), Unchecked::default(), None),
+            Look::Clear
+        ));
+    }
+
+    #[test]
     fn a_fix_has_its_own_tooltip_and_the_sweeping_icon() {
         assert_eq!(Look::Fixing.tooltip(), "Vigil: fixing");
         assert_eq!(Look::Sweeping.tooltip(), "Vigil: sweeping");
@@ -455,6 +498,8 @@ mod tests {
             open,
             fixed: Vec::new(),
             dismissed: 0,
+            unchecked: Unchecked::default(),
+            problem: None,
         }]
     }
 

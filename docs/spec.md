@@ -77,6 +77,7 @@ Core modules (one concept each):
   sweeps/.lock
   fixes/<utc-timestamp>-<key>/{PROMPT.md, fix.json, result.schema.json, agent.log, result.json}
   fixes/<utc-timestamp>-all/{PROMPT.md, fixes.json, result.schema.json, agent.log, results.jsonl}
+    (only while the fix runs: deleted once its run is in state/fixes.jsonl)
   sweeps/<utc-timestamp>[-n]/<target>/{bundle/, agent-1.log, agent-2.log, report.json, report.md}
     (<target> is `mac`, `github-<owner>--<name>` or `server-<name>`)
 ```
@@ -115,9 +116,31 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   shown again), resolved is what was shown then and is gone now; a key dismissed since is
   neither. Only `<sweep>/<target>/report.json` is read, newest sweep first, stopping at the
   first with a verdict. A report without a verdict has none, and a report that cannot be read
-  is a note. Accepted
-  downside: a source that fails (OSV offline) makes its findings show as resolved; the report
-  lists the failed source under "Not checked".
+  is a note.
+- Degraded sweeps (decided 2026-11-12; until then a source that failed, OSV offline say, made
+  its findings show as resolved, confirmed pending fixes, and left a green icon and "All
+  clear"): each report has `unchecked`, a typed record of the sources that failed for its
+  target: the KEV catalog, OSV (the id query, or records that could not be fetched and had no
+  cached copy), and the NVD products with nothing fetched and nothing cached in the last week. A finding of the
+  target's last report with a verdict that this sweep did not find, and that a failed source
+  could have produced (an OSV finding when OSV failed or a record its package's query returned
+  did, an NVD finding when its product failed, an OS package's finding when the KEV catalog
+  failed, since without it a crowded query is not thinned and the agent judges another set),
+  goes into the new report's `carried` as that report saved it, with `carried_from`, the start
+  of the last sweep that checked it. It stays open, is neither
+  resolved nor new, and its fix is not confirmed until a sweep that checks it; a fix planned
+  from any report since `carried_from` is still "fix reported". A target whose newest report
+  has anything `unchecked` is never clear (see "UI"). A report saved before these fields reads
+  as fully checked with nothing carried. A source served from its cache, because it could not
+  be asked again, is a note in the report, not a failure. Accepted downside: a build from
+  before these fields ignores `carried`, so after a downgrade a carried finding reads as
+  resolved and its fix as confirmed.
+- Reading: one report or state file that cannot be read is a problem of the targets it
+  touches, never of all of them (decided 2026-11-12, after one broken `report.json` blanked
+  the popover and greyed a red icon). A target whose newest report cannot be read shows the
+  newest one that can, with the problem; dismissals that cannot be read dismiss nothing, and a
+  fix history that cannot be read reports no fix, each a problem on every target. Fix all and
+  `vigil fix` still refuse to act on what they cannot read.
 - Fixes: the fix in the sweep's finding is the plan the user confirms; there is no
   separate planning run. A confirmed fix is one agent run with full access and the `fix`
   prompt. A GitHub fix works in a fresh clone, on a new branch, and opens a pull request; a
@@ -273,6 +296,11 @@ the user's `gh` login; the agent never calls GitHub and reads only the bundle.
 | Workflows | `repos/{repo}/contents/.github/workflows` and each file | `github/workflows/<name>` |
 | Settings | the repository's `security_and_analysis`, `vulnerability-alerts`, the default branch's protection, `rulesets`, `actions/permissions`, `actions/permissions/workflow`, and for an organization owner its 2FA requirement | `github/settings.json`, one key per setting |
 
+Each kind of alert is read 100 a page, following the cursor in GitHub's `Link` header, for at
+most 5 pages: the bundle keeps the first 500, and when a sixth page is linked `settings.json`
+says "n or more" open (n the alerts kept, so usually "500 or more") instead of a count, so a
+repository with thousands of alerts costs five requests.
+
 A feature that is off answers with a 403 or 404 and a message ("Dependabot alerts are
 disabled", "no analysis found", "Branch not protected"); that answer is the setting's value in
 `settings.json`, not a failure, so the agent can report it. Any other failure of a part is a
@@ -294,9 +322,14 @@ instead and the agent only reads the bundle, as for GitHub.
 The app sends one fixed script, `server.sh`, on ssh's stdin and runs it with `sh -s -- <random
 marker> <dirs...>`. It only reads and never uses sudo. ssh runs with `BatchMode=yes` (a prompt
 fails the target), `StrictHostKeyChecking=yes` (the host key must already be in
-`known_hosts`, which a sweep never updates), agent, X11 and port forwarding off, and no
-connection sharing. The marker and the folders travel on stdin, not on the server's process
-list. The Mac reads at most 256 MiB of the answer and decodes each part on its own.
+`known_hosts`, which a sweep never updates), agent, X11, port, tunnel and Kerberos credential
+forwarding off, a server that stops answering dropped after 30 s, and no connection sharing.
+These are command-line options, so `ProxyJump` hops do not get them; the README asks for
+`BatchMode` and `StrictHostKeyChecking` on each hop in `~/.ssh/config`. The marker and the
+folders travel on stdin, not on the server's process list. The Mac reads at most 256 MiB of
+the answer and decodes each part on its own. It keeps at most 32 MiB of a package database and
+1 MiB of any other part but a lockfile, cut on a package or line boundary and noted in the
+report, so a server cannot fill the agent's bundle.
 
 | Part | Read with | In the bundle as |
 |---|---|---|
@@ -315,6 +348,7 @@ dpkg and apk versions as the distribution does. So OSV sees the versions of OS p
 language packages (accepted by the user 2026-11-06). A query that still matches more than 200 advisories (the kernel) keeps only
 those for a CVE in CISA KEV, read from the advisory id (`DEBIAN-CVE-...`; grouped `DSA-` and
 `USN-` advisories of such a query are dropped), and the report says how many were left out.
+Without the KEV catalog nothing is known to be exploited, so such a query keeps them all.
 Kernel images built from `linux-signed*` source packages are looked up as the kernel's source
 package, which is where OSV files kernel advisories. RPM distributions are not looked up:
 OSV's Rocky Linux and AlmaLinux records disagree on binary versus source names and on epochs.
@@ -352,8 +386,45 @@ use ssh.
   target with a verdict (a newer sweep without it means it is gone, and an old fix could
   downgrade a package), it is not dismissed, its fix passes the sweep's text checks again, the
   target is still in `config.toml`, and the agent is installed. The question shows where the
-  fix runs (for a server, the exact ssh command) and when the sweep found it. A summary is
-  shown on one line, so it cannot pass for a command. Not confirming exits non-zero.
+  fix runs (for a server, the exact ssh command), the agent and its model, when the sweep
+  found it, the summary, the steps and the exact commands, as the agent is told the user
+  confirmed all three; and notes:
+  for a server, that the agent on this Mac reads the server's output, and when the user's
+  edited `prompts/fix.md` is used. A summary is shown on one line, so it cannot pass for a
+  command. Not confirming exits non-zero.
+- What runs is the plan the question showed (decided 2026-11-12): the plan holds where it runs,
+  the agent and model, and the prompt template, read once. The app keeps the plan of the last
+  confirmation it showed under a number the UI sends back with Run; a newer preview replaces
+  it, and an old number is refused. Planning again at the click was the old design: it read
+  `config.toml` again, so a host, agent or model edited while the user read the question ran
+  unseen. A fix prompt without `{{access}}`, where the "Where to work" rules go, is refused.
+- A repository fix whose commands may address another repository is refused before asking
+  (decided 2026-11-12). The rule is an allow-list and conservative; commands are split into
+  words and parts as a shell splits them, nothing is expanded. No word names a `GH_*`,
+  `GITHUB_*` or `GIT_*` variable, holds a character the shell expands (`$`, a backquote, a
+  glob or brace character), or runs other words (`sh`, `bash`, `eval`, `source`, `xargs`,
+  `alias`, ...), and a word with spaces passes the rule itself. Every word naming `gh`, `git`,
+  `curl`, `wget`, `cd` or `pushd` is checked as a call with the words after it, so no wrapper,
+  keyword or argument before it hides one. In those calls every GitHub address
+  (`github.com/<owner>/<name>`, `github.com:<owner>/<name>`, `github.com.`, any case) names
+  this repository with no `..` or `%` after it, and every `api.github.com` address is under
+  `/repos/<this repository>` with no `..` or `%`, and not `forks`, `generate` or `transfer`.
+  `gh` runs only `api`, `secret`, `variable`, `workflow`, `pr`, `issue`, `label`, `release`
+  or `repo edit`, never with `--hostname`, `--org`, `-o` or `--owner`; `gh api` calls one
+  path under `repos/<this repository>`; every other subcommand names the repository with
+  `--repo` (or `gh repo edit <repo>`), as `gh` otherwise takes it from the folder it runs in.
+  `cd` and `pushd`, and `git -C`, `--git-dir` and `--work-tree`, go only to a relative folder
+  with no `..`, and git takes no `-c`, `--config-env` or `--exec-path=<dir>`, which can make it
+  run a shell. Other
+  programs and interpreters are not checked: `go get github.com/<module>`
+  names a module, not a repository to change, and a script or `python -c` reaching GitHub is
+  the accepted risk of a full-access agent; the rule is defence in depth around what the user
+  reads, not a sandbox. A fix it refuses wrongly (a package named `gh`, say) is for the user
+  to run by hand. A settings fix, which needs no pull request, is one whose every command is
+  a single `gh` call, the word `gh` first, other than `gh pr`.
+- A finding key is a 64-bit hash over every target, so two targets could share one (a crafted
+  lockfile path in a repository). Looking a key up for a fix or a dismissal fails, naming both
+  reports, when the newest report of another target also has it.
 - The agent gets `fix.json` with the key, target, severity, advisories or subject, the
   installed component and the fix, not the sweep's evidence and explanation: those were
   written from untrusted advisory text and files, and the user confirmed the fix, not them.
@@ -365,17 +436,41 @@ use ssh.
   `result.json`, the agent's `agent.log`, and `result.json`, which the agent writes: `outcome`
   (`fixed`, `partial`, `failed`), a one-line `summary`, and for a repository the
   `pull_request` URL (`https://github.com/<owner>/<name>/pull/<number>` of that repository
-  only).
+  only, owner and name compared case-insensitively as GitHub does). Files the agent wrote are
+  read only when regular (no link, no FIFO, which would block the read) and only up to a cap.
+  Once the run is recorded the folder is deleted (the owner's decision, 2026-11-12), under the
+  sweeps lock, without following links; the app keeps the end of `agent.log` in memory for the
+  results view, and the CLI prints it for a fix that did not finish. A run whose record cannot
+  be appended keeps its folder.
 - Where to work: this Mac; for a repository, a clone in the fix folder, a branch
-  `vigil/fix-<key>`, and a pull request (never a push to the default branch); for a
-  server, every command through `ssh` with the sweep's options to that one host, carried to the
-  server's `sh -s` in a quoted heredoc, so a quote in a command cannot end the ssh line and run
-  the rest on the Mac. Accepted risk: a repository fix lets the full-access agent read the
-  clone, which may hold agent instruction files; the repositories are the user's own, and the
-  agent's project settings and hooks come from its working folder, the fix folder.
+  `vigil/fix-<key>-<start time to the millisecond>`, new for each run, and a pull request
+  into the default branch (never a push to the default branch); for a server, every command
+  through `ssh` with the sweep's options to that one host, carried to the server's `sh -s` in
+  a quoted heredoc, so a quote in a command cannot end the ssh line and run the rest on the
+  Mac.
+- A repository fix's agent runs with git hooks off (`GIT_CONFIG_COUNT` setting
+  `core.hooksPath=/dev/null`, which every git command it runs reads as command-line
+  configuration) and package lifecycle scripts off (`npm_config_ignore_scripts=true` for npm
+  and pnpm, `YARN_ENABLE_SCRIPTS=false`), the owner's decision of 2026-11-12. The prompt says
+  that files in the clone such as `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and `.cursorrules` are
+  data. Before the run the app reads the default branch and its head with `gh`; after it, the
+  default branch must be the same branch with the same head, a reported pull request must be
+  open from the run's branch of this repository into it, and a fix reported `fixed` must name
+  one unless every confirmed command is a `gh` call other than `gh pr` (a settings fix).
+  Otherwise the run is recorded `unknown`, with why and what the agent reported. Accepted
+  risk: the full-access
+  agent still reads the clone, could unset those variables, and could push to other branches
+  or tags, which are not checked; the check sees the end state, not each push, so a push to
+  the default branch undone before the agent exits is not seen; the repositories are the user's own, and the agent's
+  project settings and hooks come from its working folder, the fix folder.
+- Server fixes keep the full-access agent on this Mac (the owner's decision, 2026-11-12). It
+  reads the server's output, which a compromised server controls; the confirmation says so.
 - `state/fixes.jsonl` gets one line per run: key, target, agent, start and end, exit code,
-  outcome (`unknown` when `result.json` is missing or invalid or the agent did not start, with
-  why), summary, pull request, how it was confirmed (`asked` or `yes_flag`), folder. Appends
+  outcome (`unknown` when `result.json` is missing or invalid, the agent did not start, or a
+  repository's check after the run failed, with why), summary, pull request, how it was
+  confirmed (`asked` or `yes_flag`). Records written before 2026-11-12 also name the folder,
+  which those versions kept; this version does not remove such folders, nor one whose
+  deletion a quit cut short. Appends
   take `state/.lock`; a last line cut short by a crash is ended first. The CLI exits non-zero
   unless the outcome is `fixed` and the agent exited 0.
 - A fix holds `sweeps/.lock`, so no sweep or other fix runs while it changes the target.
@@ -397,8 +492,9 @@ The owner asked for a Fix all button on a target's screen and chose "one run, on
   well formed, target configured, agent installed), and all come from the same report. The
   one question lists every item: its name and version, the fix's summary and exact commands,
   where it runs and with which agent, then "Fix all N" and Cancel.
-- Staleness: the app runs only the list it showed (the same keys in the same order, from the
-  same sweep). Under the sweeps lock the list is made again as planning makes it, and must be
+- Staleness: the app runs only the list it showed: the plan the question showed, kept as for
+  one fix, so the same keys in the same order, from the same sweep, with the same destination,
+  agent and prompt. Under the sweeps lock the list is made again as planning makes it, and must be
   the same keys in the same order from the same report: a sweep, a fix reported in between, a
   dismissal or undismissal, or a new lead refuses the whole run, naming the first item that
   differs ("nothing was run: curl 8.1.2: a sweep, fix or dismissal changed the list while it
@@ -664,7 +760,9 @@ The rule is conservative: anything not read with certainty is `unknown`, never
   both sides are plain dotted numbers. `GIT` ranges, unreadable versions or bounds (a manifest range such
   as `^1.2.0`), two events at one version, a range without `introduced`, and a record whose
   entries never name the component are `unknown`. OS packages are queried by version, so
-  OSV's answer is `in_range`.
+  OSV's answer is `in_range`. In PyPI a local build (`2.0.1+cu118`) is the listed version
+  `2.0.1`, as PEP 440's version matching ignores the local label when the listed version has
+  none.
 - NVD: each CPE match marked vulnerable for the component's product, with the rules in
   `feeds::cpe` (start and end bounds, including or excluding; a version named in the
   criteria; `*` without bounds is every version). A match whose version is `-` (not
@@ -672,7 +770,9 @@ The rule is conservative: anything not read with certainty is `unknown`, never
   product are `unknown`; a record that names the product only as not vulnerable (the
   platform) is `out_of_range`. A match in a configuration that ANDs several CPEs keeps its
   verdict, and its reason asks the agent to judge the platform; the app never decides
-  platforms.
+  platforms. Letters in a version order only as release stages (`dev` < `alpha` < `beta` <
+  `pre` < `rc` < `ga`, with their spellings); any other two different words (`1.0.2k` and
+  `1.0.2l`) are `unknown`, since alphabetical order put `1.0.RC1` after `1.0.GA` (2026-11-12).
 
 Out-of-range pairs are dropped from each advisory, then advisories left with none, and the
 report's `out_of_range` counts those advisories, so none disappears silently. KEV
@@ -707,7 +807,17 @@ not an OSV ecosystem, so formulae go through NVD.
   product only as not vulnerable (the platform another product runs on) is dropped, KEV or
   not (since 2026-11-10; before, a CVE in KEV was always kept).
 - KEV: the full CISA JSON catalog each sweep (about 2 MB); marks advisories whose CVE is
-  actively exploited.
+  actively exploited. The catalog must name its `catalogVersion`, list at least 1000
+  vulnerabilities (it passed 1000 in 2023) and give each a CVE id, or it is refused like an
+  unreachable one: an empty catalog would mark nothing exploited (decided 2026-11-12).
+- A failed request uses what is cached (decided 2026-11-12): an OSV record or a product's NVD
+  CVEs that cannot be fetched again come from the cache, and the report notes it; only with
+  nothing cached does the source count as failed for the target (see "Lifecycle"). A product's
+  NVD cache older than a week does not stand in, so an NVD blocked for weeks shows as not
+  checked rather than as clear. After NVD
+  answers 403 or 429, its rate limit, it is not asked again in that sweep; asking again would
+  only extend the refusal. Pacing is per process, so `vigil advisories` takes the sweeps lock
+  before it asks NVD, and fails while a sweep runs rather than doubling the rate.
 - A product's cached CVEs are used without a request for 2 hours after the last fetch's
   coverage ended, and a product NVD's CPE dictionary does not know, with no cached CVEs, is
   not asked for CVEs for a week. On one Mac a repeated sweep had spent 11 minutes on NVD
@@ -748,7 +858,11 @@ Built in step 9a (2026-11-06):
   orange (a high one open, no critical), or green (only medium or low open, or nothing); all
   cyan (sweeping or fixing, with the tooltip "Vigil: sweeping" or "Vigil: fixing"); and with
   one arm missing, in the bar's own colour (the last sweep stopped, a target got no verdict,
-  or the schedule could not be checked, and nothing critical or high is open). A failure never hides an open critical or high (the
+  a target's newest sweep had a source fail or its files cannot be read, or the schedule could
+  not be checked, and nothing critical or high is open). A target with a failed source or an
+  unreadable file is never "All clear" (decided 2026-11-12): the headline reads "Not fully
+  checked" when nothing is open, an amber banner names each such target and what failed, its
+  row says "not fully checked", and the main view's vortex is not green. A failure never hides an open critical or high (the
   owner's rule, clarified 2026-11-11): the icon stays red or orange, and the tooltip ("Vigil:
   critical findings open; something failed, open Vigil to see it") and the popover's banner show the failure.
   Medium and low no longer colour the icon and stay
@@ -790,8 +904,9 @@ Built in step 9a (2026-11-06):
     did), and a repository fix's pull request: plain wrapped text, shown and never acted on.
   - Show log shows the end of the run's `agent.log`, its last 64 KiB from a whole line, in a
     scrollable monospace block (the one place not in IBM Plex Sans: the owner asked for
-    monospace), each line plain. The app reads it through the core's `FixRun::log_tail`, from
-    the folder Rust kept, never a path from the UI. A missing or unreadable log says so.
+    monospace), each line plain. The run read it before it deleted its folder, and the app
+    keeps it in memory in the core's `FixRun` (`FixRun::log_tail`), never a path from the UI.
+    A missing or unreadable log says so.
   - At the bottom, one line from Rust: "5 of 9 fixed · 4 partial" (then failed, then "with no
     result", each only when there are any).
   - Close, or Escape, returns to where the fix was started: the target's screen or the
@@ -861,8 +976,10 @@ Built in step 9b (2026-11-06):
 - Saves take an exclusive lock on `.config.toml.lock`, so two at once (quick clicks; any
   other process that saves later) both land. A key written another way than a change expects (an inline
   table, `repos = "o/r"`) is refused with what to change, never replaced.
-- A confirmed fix carries the preview's `found`; the app refuses it when a newer sweep
-  changed the finding, and the confirm shows the commands that will run.
+- A confirmed fix or Fix all carries the preview's number, and the app runs the plan it kept
+  for that preview (see "Fix flow"); the core refuses it when a sweep, fix or dismissal changed
+  the finding since. The confirm shows the summary, the steps, the commands that will run and
+  Rust's notes.
 - The NVD key is saved with `/usr/bin/security -i`, the command on stdin, so the program
   that reads it before each sweep is the one that created it and is trusted without a
   prompt. Accepted: a key saved by an earlier build through Security.framework may prompt

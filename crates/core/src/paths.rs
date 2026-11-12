@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::io;
+use std::io::Read as _;
 use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -144,6 +146,76 @@ pub(crate) fn replace_file(path: &Path, text: &str) -> io::Result<()> {
         // Best effort: the write's error is what matters, and a leftover partial file is
         // harmless, since readers open files by their own names.
         .inspect_err(|_| drop(fs::remove_file(&partial)))
+}
+
+/// Opens `path` for reading only when it is a regular file, not a link: every file an agent
+/// may have written is opened through this, the fix agent's while it runs (the activity and
+/// step polls) and after, and each agent's log once it exits. The fix agent has full access in
+/// its folder and can put a link or a FIFO in a file's place: a link shows nothing it could
+/// not have written, but opening a FIFO would block the reading thread for good, and the
+/// threads that read after the agent exits hold the sweeps lock.
+///
+/// The open itself refuses both, so there is no gap between a check and the open for a swap:
+/// `O_NOFOLLOW` fails on a link (`ELOOP`), and `O_NONBLOCK` makes opening a FIFO return at once
+/// (POSIX `open`), after which the open file's own metadata is checked.
+pub(crate) fn open_regular(path: &Path) -> io::Result<fs::File> {
+    let not_regular = || io::Error::new(io::ErrorKind::InvalidInput, "not a regular file");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) => not_regular(),
+            _ => e,
+        })?;
+    if !file.metadata()?.is_file() {
+        return Err(not_regular());
+    }
+    Ok(file)
+}
+
+/// At most `limit` bytes from the start of `path`, a file an agent wrote, opened with
+/// [`open_regular`].
+pub(crate) fn read_capped(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_regular(path)?.take(limit).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Makes a FIFO at `path`, as an agent could in place of a file the app reads, that cannot
+/// hang a test: for the next few seconds a thread keeps opening it for writing without
+/// blocking, which releases a reader that wrongly blocked on opening it. A correct reader never
+/// blocks, so those opens find no reader and fail at once, harmlessly. Without this, code that
+/// regressed to a blocking open would hang its test until the harness times it out.
+#[cfg(test)]
+pub(crate) fn releasing_fifo(path: &Path) {
+    let made = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(path)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo {}", path.display());
+    release_fifo(path);
+}
+
+/// Starts the thread [`releasing_fifo`] describes, for a FIFO at `path` that something else
+/// makes, now or in the next few seconds. Only code that wrongly blocks needs it, so correct
+/// code passes whatever its timing.
+#[cfg(test)]
+pub(crate) fn release_fifo(path: &Path) {
+    let path = path.to_owned();
+    // Detached on purpose: it ends by itself after its tries, and holds nothing a test waits on.
+    // 50 tries 100 ms apart: arbitrary, a few seconds, far below the harness's timeout.
+    std::thread::spawn(move || {
+        for _ in 0..50 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&path),
+            );
+        }
+    });
 }
 
 #[cfg(test)]
