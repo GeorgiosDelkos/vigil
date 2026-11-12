@@ -74,6 +74,7 @@ use crate::paths::DataDir;
 use crate::prompts;
 use crate::prompts::Prompt;
 use crate::server;
+use crate::unchecked;
 use crate::unchecked::OsvUnchecked;
 use crate::unchecked::Unchecked;
 
@@ -765,7 +766,7 @@ impl Shared<'_> {
 
     /// The findings of the target's last report with a verdict that this sweep, which found
     /// `findings`, could not check again ([`lifecycle::carried_over`]); none, with a note, when
-    /// that report cannot be read.
+    /// the report it picked cannot be read again whole.
     fn carry_over(
         &self,
         dir_name: &str,
@@ -1170,11 +1171,10 @@ fn fetch_osv(
             crowded.kept,
         ));
     }
-    // As `ecosystem:name`, the form `Unchecked::covers` reads back from a saved lookup.
     let unchecked = (!osv.failures.is_empty()).then(|| {
         let packages = (osv.failures.iter())
             .flat_map(|f| &f.packages)
-            .map(|p| format!("{}:{}", p.ecosystem.osv_name(), p.name))
+            .map(|p| unchecked::package_key(&p.ecosystem.osv_name(), &p.name))
             .collect();
         OsvUnchecked::Packages(packages)
     });

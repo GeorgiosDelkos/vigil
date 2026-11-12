@@ -355,8 +355,9 @@ struct Entries {
     carried: Vec<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// The findings of the target's newest report with a verdict in `<sweep>/<dir_name>` that are
-/// not in `found`, this sweep's findings, and that a source failed in `unchecked` could have
+/// The findings of the target's newest readable report with a verdict in `<sweep>/<dir_name>`,
+/// passing over reports that cannot be read (the sweep notes their error with its changes), that
+/// are not in `found`, this sweep's findings, and that a source failed in `unchecked` could have
 /// produced, each with its dismissal in `dismissals`. A finding carried before keeps the time
 /// it was first carried from.
 pub(crate) fn carried_over(

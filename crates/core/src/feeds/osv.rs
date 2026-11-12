@@ -60,6 +60,7 @@ pub(super) fn fetch(
     let mut failures = Vec::new();
     let mut stale = Vec::new();
     for (id, queried) in ids {
+        let packages = || queried.queries.iter().map(|q| q.package.clone()).collect();
         // One bad record must not hide the others: keep going and report it.
         let Record {
             header,
@@ -68,7 +69,7 @@ pub(super) fn fetch(
         } = match record(feeds, &id, queried.modified) {
             Ok(fetched) => fetched,
             Err(error) => {
-                let packages = queried.queries.iter().map(|q| q.package.clone()).collect();
+                let packages = packages();
                 failures.push(RecordFailure {
                     id,
                     packages,
@@ -78,7 +79,7 @@ pub(super) fn fetch(
             }
         };
         if let Some(error) = why {
-            let packages = queried.queries.iter().map(|q| q.package.clone()).collect();
+            let packages = packages();
             stale.push(RecordFailure {
                 id,
                 packages,

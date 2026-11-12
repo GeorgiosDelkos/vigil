@@ -87,8 +87,11 @@ impl Unchecked {
     /// A failed KEV catalog covers the findings of OS packages: a query of one that matches
     /// over 200 advisories (the kernel) keeps only those in the catalog, so without it the
     /// agent judges another, far larger set, and last sweep's findings may not be among what it
-    /// lists. OSV names an OS release with a colon (`Debian:12`, `Ubuntu:24.04:LTS`), a
-    /// language ecosystem never (`npm`, `crates.io`).
+    /// lists. Which OS packages were crowded is not known without the catalog, so every OS
+    /// package's finding is carried: one fixed since stays open until the catalog is back,
+    /// which errs toward showing too much. A saved lookup has only the ecosystem's OSV name,
+    /// and the OS ecosystems are those whose name has a colon (`Debian:12`), as the test
+    /// `only_os_ecosystems_have_a_colon_in_their_osv_name` in `package` pins.
     pub(crate) fn covers(&self, lookup: &Value) -> bool {
         if let Some(package) = lookup.get("package") {
             let field = |name| {
@@ -103,7 +106,7 @@ impl Unchecked {
                 || match &self.osv {
                     Some(OsvUnchecked::All) => true,
                     Some(OsvUnchecked::Packages(packages)) => {
-                        packages.contains(&format!("{ecosystem}:{name}"))
+                        packages.contains(&package_key(ecosystem, name))
                     }
                     None => false,
                 };
@@ -113,6 +116,12 @@ impl Unchecked {
             .and_then(Value::as_str)
             .is_some_and(|product| self.nvd.contains(product))
     }
+}
+
+/// How [`OsvUnchecked::Packages`] names a package: its ecosystem's OSV name and its name,
+/// `npm:lodash`. The sweep writes it and [`Unchecked::covers`] reads it, so both use this.
+pub(crate) fn package_key(ecosystem: &str, name: &str) -> String {
+    format!("{ecosystem}:{name}")
 }
 
 #[cfg(test)]
