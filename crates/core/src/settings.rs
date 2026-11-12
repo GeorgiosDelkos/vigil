@@ -354,12 +354,23 @@ fn lock(path: &Path) -> Result<fs::File, SaveSettingError> {
 /// regular file, which would cut the user's link without a word.
 fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
     let target = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_symlink() => {
-            fs::canonicalize(path).map_err(|source| SaveSettingError::Link {
-                path: path.to_owned(),
-                source,
-            })?
-        }
+        Ok(meta) if meta.is_symlink() => match fs::canonicalize(path) {
+            Ok(target) => target,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                return Err(SaveSettingError::Link {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+            // A link loop, or a folder on the way that cannot be read. Reading the config
+            // fails on these first, so this is for a link changed since the read.
+            Err(source) => {
+                return Err(SaveSettingError::Write {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        },
         _ => path.to_owned(),
     };
     let write_err = |source| SaveSettingError::Write {
@@ -370,8 +381,12 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
     let dir = target.parent().expect("the config file has a folder");
     // One name is enough: saves hold the lock from `save_setting` while writing it.
     let partial = dir.join(".config.toml.partial");
-    // None for a new file, which gets the default permissions.
-    let permissions = fs::metadata(&target).ok().map(|meta| meta.permissions());
+    let permissions = match fs::metadata(&target) {
+        Ok(meta) => Some(meta.permissions()),
+        // A new file gets the default permissions.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(write_err(e)),
+    };
     fs::File::create(&partial)
         .and_then(|mut file| {
             if let Some(permissions) = permissions {
@@ -381,9 +396,11 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
             file.sync_data()
         })
         .and_then(|()| fs::rename(&partial, &target))
-        // The rename is durable only once the folder's entry is.
-        .and_then(|()| fs::File::open(dir)?.sync_all())
         .inspect_err(|_| drop(fs::remove_file(&partial)))
+        // The rename is durable only once the folder's entry is. If this sync fails the new
+        // config is already in place, and the error still says the save may not last; saving
+        // again is harmless, since a save writes the whole file.
+        .and_then(|()| fs::File::open(dir)?.sync_all())
         .map_err(write_err)
 }
 
@@ -830,5 +847,15 @@ mod tests {
         let link = fs::symlink_metadata(data_dir.config_file()).unwrap();
         assert!(link.is_symlink(), "the link stays");
         assert!(!gone.exists());
+
+        // A loop is not a missing file: reading it already fails, and it is not replaced.
+        let other = tmp.path().join("other.toml");
+        fs::remove_file(data_dir.config_file()).unwrap();
+        std::os::unix::fs::symlink(&other, data_dir.config_file()).unwrap();
+        std::os::unix::fs::symlink(data_dir.config_file(), &other).unwrap();
+        let err = save(&data_dir, repo_added("o/r")).unwrap_err();
+        assert!(matches!(err, SaveSettingError::Read { .. }), "{err:?}");
+        let link = fs::symlink_metadata(data_dir.config_file()).unwrap();
+        assert!(link.is_symlink(), "the link stays");
     }
 }
