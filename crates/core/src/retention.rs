@@ -10,8 +10,9 @@
 //! comparison with the last sweep has been made by then.
 //!
 //! A target removed from the config is never swept again, so the folders it has stay until the
-//! user deletes them: its newest only, if it was swept since this rule came in, or all of them. A cancelled sweep writes no report for the target it stopped in, so nothing
-//! of that target is removed.
+//! user deletes them: its newest only, if it was swept since this rule came in, or all of them.
+//! A cancelled sweep writes no report for the target it stopped in, so nothing of that target
+//! is removed.
 
 use std::fs;
 use std::io;
