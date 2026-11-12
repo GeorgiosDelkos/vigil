@@ -51,9 +51,16 @@ const WORKFLOW_LIMIT: usize = 8;
 /// kilobytes; the cap keeps one file from filling the agent's context.
 const WORKFLOW_SIZE_LIMIT: usize = 256 * 1024;
 
-/// The most alerts of one kind put in the bundle. Arbitrary, for the same reason; the count
-/// in `settings.json` stays exact.
-const ALERT_LIMIT: usize = 500;
+/// The most alerts of one kind put in the bundle. Arbitrary, for the same reason. When GitHub
+/// links a page past the last one read, or sends more than this, `settings.json` says `"N or
+/// more"`, N being the alerts kept, since the pages after the limit are not fetched.
+const ALERT_LIMIT: usize = ALERT_PAGES * ALERTS_PER_PAGE;
+
+/// The most pages of one kind of alert fetched.
+const ALERT_PAGES: usize = 5;
+
+/// Alerts asked for per page: GitHub's most.
+const ALERTS_PER_PAGE: usize = 100;
 
 /// The value of a setting that could not be collected; the reason is a problem in the report.
 const NOT_COLLECTED: &str = "not collected; see the problems in the report";
@@ -82,7 +89,7 @@ impl Repo {
     /// Adds the dependency graph's packages as components, or a problem saying why not.
     fn sbom(&mut self, gh: &str, repo: &RepoSlug, base: &str) {
         let path = format!("{base}/dependency-graph/sbom");
-        match api(gh, &path, Paging::Single) {
+        match api(gh, &path) {
             Ok(Answer::Ok(sbom)) => {
                 let (components, skipped) = components_from_sbom(&sbom, &repo.to_string());
                 self.components = components;
@@ -112,36 +119,32 @@ impl Repo {
         }
     }
 
-    /// Writes `github/<name>-alerts.json` and returns the setting value: the open count, or
-    /// GitHub's refusal.
+    /// Writes `github/<name>-alerts.json` and returns the setting value: the open count (or
+    /// `"N or more"` when more pages are linked), or GitHub's refusal.
     fn alerts(&mut self, gh: &str, name: &str, path: &str) -> Value {
-        match api(gh, path, Paging::All) {
-            Ok(Answer::Ok(Value::Array(mut alerts))) => {
-                for alert in &mut alerts {
-                    // The request asks GitHub to leave the secret out; this is the second guard,
-                    // so a secret never reaches the bundle or the agent's context.
-                    remove_secrets(alert);
-                }
+        match alert_pages(gh, path) {
+            Ok(Alerts::All(alerts)) => {
                 let open = alerts.len();
-                if open > ALERT_LIMIT {
-                    self.problems.push(format!(
-                        "{name} alerts: {open} open, only the first {ALERT_LIMIT} are in the bundle"
-                    ));
-                    alerts.truncate(ALERT_LIMIT);
-                }
-                self.files.push((
-                    format!("github/{name}-alerts.json"),
-                    pretty(&Value::Array(alerts)),
-                ));
+                self.alert_file(name, alerts);
                 json!({ "open": open })
             }
-            Ok(Answer::Ok(other)) => {
+            Ok(Alerts::First(alerts)) => {
+                // The count read, not the limit: five short pages that still link a sixth
+                // (GitHub misbehaving) hold fewer than the limit.
+                let read = alerts.len();
+                self.problems.push(format!(
+                    "{name} alerts: {read} or more open, only the first {read} are in the bundle"
+                ));
+                self.alert_file(name, alerts);
+                json!({ "open": format!("{read} or more") })
+            }
+            Ok(Alerts::Other(Answer::Ok(other))) => {
                 let what = kind_of(&other);
                 self.problems
                     .push(format!("{name} alerts: expected a list, got {what}"));
                 json!(NOT_COLLECTED)
             }
-            Ok(Answer::Refused { status, message }) => refused(status, &message),
+            Ok(Alerts::Other(Answer::Refused { status, message })) => refused(status, &message),
             Err(e) => {
                 self.problems.push(format!("{name} alerts: {e}"));
                 json!(NOT_COLLECTED)
@@ -149,11 +152,24 @@ impl Repo {
         }
     }
 
+    /// Adds `github/<name>-alerts.json`, every secret value removed.
+    fn alert_file(&mut self, name: &str, mut alerts: Vec<Value>) {
+        for alert in &mut alerts {
+            // The request asks GitHub to leave the secret out; this is the second guard, so a
+            // secret never reaches the bundle or the agent's context.
+            remove_secrets(alert);
+        }
+        self.files.push((
+            format!("github/{name}-alerts.json"),
+            pretty(&Value::Array(alerts)),
+        ));
+    }
+
     /// Adds the default branch's workflow files under `github/workflows/`.
     fn workflows(&mut self, gh: &str, base: &str) {
         // The contents API reads the default branch when no `ref` is given.
         let list = format!("{base}/contents/.github/workflows");
-        let entries = match api(gh, &list, Paging::Single) {
+        let entries = match api(gh, &list) {
             Ok(Answer::Ok(Value::Array(entries))) => entries,
             // No workflows folder.
             Ok(Answer::Refused { status: 404, .. }) => return,
@@ -236,7 +252,7 @@ impl Repo {
 
     /// One setting's value: the answer, GitHub's refusal, or [`NOT_COLLECTED`] with a problem.
     fn setting(&mut self, gh: &str, key: &str, path: &str) -> Value {
-        match api(gh, path, Paging::Single) {
+        match api(gh, path) {
             Ok(Answer::Ok(value)) => value,
             Ok(Answer::Refused { status, message }) => refused(status, &message),
             Err(e) => {
@@ -250,7 +266,7 @@ impl Repo {
     /// failure stays as it is.
     fn two_factor(&mut self, gh: &str, login: &str) -> Value {
         let path = format!("orgs/{}", path_segment(login));
-        match api(gh, &path, Paging::Single) {
+        match api(gh, &path) {
             Ok(Answer::Ok(org)) => org
                 .get("two_factor_requirement_enabled")
                 .cloned()
@@ -271,14 +287,6 @@ enum Answer {
     Ok(Value),
     /// A 403 or 404 with GitHub's message: the feature is off, or the login may not see it.
     Refused { status: u16, message: String },
-}
-
-/// How many pages to ask for.
-#[derive(Debug, Clone, Copy)]
-enum Paging {
-    Single,
-    /// Every page, joined into one array.
-    All,
 }
 
 /// A failure that stops a repository's sweep, or one part of it.
@@ -311,6 +319,12 @@ pub(crate) enum GitHubError {
     /// `gh` failed without GitHub's answer (not logged in, offline).
     #[error(transparent)]
     Gh(#[from] InventoryError),
+    /// GitHub's link to the next page has no cursor that can be passed on.
+    #[error("GitHub's link to the page after {path} has no usable cursor")]
+    Cursor {
+        /// The API path of the page whose link this is.
+        path: String,
+    },
     /// `gh` printed something that is not JSON.
     #[error("unexpected answer from GitHub for {path}")]
     Answer {
@@ -333,7 +347,7 @@ pub(crate) enum GitHubError {
 /// that fails is a problem in the result instead.
 pub(crate) fn collect(gh: &str, repo: &RepoSlug) -> Result<Repo, GitHubError> {
     let base = format!("repos/{repo}");
-    let meta = match api(gh, &base, Paging::Single)? {
+    let meta = match api(gh, &base)? {
         Answer::Ok(meta) => meta,
         Answer::Refused { message, .. } => {
             return Err(GitHubError::Repo {
@@ -356,18 +370,19 @@ pub(crate) fn collect(gh: &str, repo: &RepoSlug) -> Result<Repo, GitHubError> {
     ));
 
     out.sbom(gh, repo, &base);
+    let page = format!("state=open&per_page={ALERTS_PER_PAGE}");
     for (name, path) in [
-        ("dependabot", "dependabot/alerts?state=open&per_page=100"),
+        ("dependabot", format!("{base}/dependabot/alerts?{page}")),
         (
             "code-scanning",
-            "code-scanning/alerts?state=open&per_page=100",
+            format!("{base}/code-scanning/alerts?{page}"),
         ),
         (
             "secret-scanning",
-            "secret-scanning/alerts?state=open&per_page=100&hide_secret=true",
+            format!("{base}/secret-scanning/alerts?{page}&hide_secret=true"),
         ),
     ] {
-        let value = out.alerts(gh, name, &format!("{base}/{path}"));
+        let value = out.alerts(gh, name, &path);
         settings.insert(format!("{}_alerts", name.replace('-', "_")), value);
     }
     out.workflows(gh, &base);
@@ -494,32 +509,130 @@ fn is_failure(message: &str) -> bool {
 
 /// Runs `gh api` on `path`. A 403 or 404 that GitHub explains is a [`Answer::Refused`]; any
 /// other failure is an error.
-fn api(gh: &str, path: &str, paging: Paging) -> Result<Answer, GitHubError> {
-    let all = matches!(paging, Paging::All);
-    let mut args = vec!["api"];
-    if all {
-        args.extend(["--paginate", "--slurp"]);
+fn api(gh: &str, path: &str) -> Result<Answer, GitHubError> {
+    let output =
+        command::run_any_status(gh, &["api", path], &Cancel::new())?.ok_or(GitHubError::NoGh)?;
+    answer(path, &output.stdout, &output)
+}
+
+/// The open alerts of one kind, as far as they are read.
+#[derive(Debug)]
+enum Alerts {
+    /// Every open alert.
+    All(Vec<Value>),
+    /// The first alerts, at most [`ALERT_LIMIT`]: GitHub links more pages, or sent too many.
+    First(Vec<Value>),
+    /// A page that is not a list, or GitHub's refusal.
+    Other(Answer),
+}
+
+/// Open alerts from `path`, which carries its filters as a query (`...?state=open&per_page=100`),
+/// at most [`ALERT_PAGES`] pages of them.
+///
+/// `gh api --paginate` would fetch every page before the limit applies: a burnt rate limit and a
+/// timed-out request on a repository with thousands of alerts. Each next page is the original
+/// path plus the cursor from GitHub's `Link` header: `after=` for Dependabot, which takes no
+/// page number (GitHub's REST docs, "List Dependabot alerts for a repository", read
+/// 2026-11-12), and `after=` or `page=` for the others. So the request's own filters,
+/// `hide_secret=true` among them, hold on every page whatever the header's link says.
+fn alert_pages(gh: &str, path: &str) -> Result<Alerts, GitHubError> {
+    assert!(
+        path.contains('?'),
+        "alert paths carry their filters as a query: {path}"
+    );
+    let mut alerts = Vec::new();
+    let mut page = path.to_owned();
+    for _ in 0..ALERT_PAGES {
+        let output = command::run_any_status(gh, &["api", "--include", &page], &Cancel::new())?
+            .ok_or(GitHubError::NoGh)?;
+        // `--include` prints the status line (ending in `\n`), each header (ending in `\r\n`)
+        // and an empty `\r\n` line before the body (checked with gh 2.96 on 2026-11-12).
+        // Without them (gh failed before any answer) the whole output is the body.
+        let (head, body) = output
+            .stdout
+            .split_once("\r\n\r\n")
+            .unwrap_or(("", &output.stdout));
+        match answer(&page, body, &output)? {
+            Answer::Ok(Value::Array(items)) => alerts.extend(items),
+            other => return Ok(Alerts::Other(other)),
+        }
+        let Some(cursor) = next_cursor(head, &page)? else {
+            // A page longer than asked for would otherwise take the bundle past the limit.
+            if alerts.len() > ALERT_LIMIT {
+                alerts.truncate(ALERT_LIMIT);
+                return Ok(Alerts::First(alerts));
+            }
+            return Ok(Alerts::All(alerts));
+        };
+        page = format!("{path}&{cursor}");
     }
-    args.push(path);
-    let output = command::run_any_status(gh, &args, &Cancel::new())?.ok_or(GitHubError::NoGh)?;
+    alerts.truncate(ALERT_LIMIT);
+    Ok(Alerts::First(alerts))
+}
+
+/// The cursor of the next page from the `Link` header among `headers` (`Link:
+/// <https://api.github.com/...?per_page=100&after=X>; rel="next", ...`), or `None` on the last
+/// page. `after=` wins over `page=`: GitHub's links can carry both, and a cursor endpoint
+/// ignores the page number. A next link without a cursor that can be passed on is an error:
+/// stopping there would report a partial list as complete.
+fn next_cursor(headers: &str, path: &str) -> Result<Option<String>, GitHubError> {
+    let link = headers.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("link").then_some(value)
+    });
+    let next = link.and_then(|link| {
+        link.split(',').find_map(|entry| {
+            let (url, params) = entry.split_once(';')?;
+            // RFC 8288 allows the relation quoted or not. A list of relations (`rel="next
+            // last"`) is not split: GitHub sends one per link.
+            let is_next = params
+                .split(';')
+                .any(|p| matches!(p.trim(), "rel=\"next\"" | "rel=next"));
+            is_next.then_some(url)
+        })
+    });
+    let Some(url) = next else {
+        return Ok(None);
+    };
+    let (_, query) = url
+        .trim()
+        .trim_matches(['<', '>'])
+        .split_once('?')
+        .unwrap_or_default();
+    let named = |name: &str| {
+        query
+            .split('&')
+            .find(|pair| pair.split_once('=').is_some_and(|(key, _)| key == name))
+    };
+    named("after")
+        .or_else(|| named("page"))
+        // A cursor is URL-encoded, so this keeps it one argument and one query parameter.
+        .filter(|pair| {
+            let (_, value) = pair.split_once('=').unwrap_or_default();
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"=%-_.~".contains(&b))
+        })
+        .map(|pair| Some(pair.to_owned()))
+        .ok_or_else(|| GitHubError::Cursor {
+            path: path.to_owned(),
+        })
+}
+
+/// What `gh api` answered on `path`, from its `body` and how it exited.
+fn answer(path: &str, body: &str, output: &command::Output) -> Result<Answer, GitHubError> {
     if output.success {
-        if output.stdout.trim().is_empty() {
+        if body.trim().is_empty() {
             return Ok(Answer::Ok(json!({ "status": 204 })));
         }
-        let body: Value =
-            serde_json::from_str(&output.stdout).map_err(|source| GitHubError::Answer {
-                path: path.to_owned(),
-                source,
-            })?;
-        return Ok(Answer::Ok(match body {
-            // `--slurp` wraps each page: `[[...], [...]]`.
-            Value::Array(pages) if all => {
-                Value::Array(pages.into_iter().flat_map(page_items).collect())
-            }
-            body => body,
-        }));
+        let body: Value = serde_json::from_str(body).map_err(|source| GitHubError::Answer {
+            path: path.to_owned(),
+            source,
+        })?;
+        return Ok(Answer::Ok(body));
     }
-    match error_body(&output.stdout) {
+    match error_body(body) {
         Some((status @ (403 | 404), message)) if !is_failure(&message) => {
             Ok(Answer::Refused { status, message })
         }
@@ -529,33 +642,22 @@ fn api(gh: &str, path: &str, paging: Paging) -> Result<Answer, GitHubError> {
             message,
         }),
         None => Err(GitHubError::Gh(InventoryError::Command {
-            command: output.command,
-            detail: output.detail,
+            command: output.command.clone(),
+            detail: output.detail.clone(),
         })),
     }
 }
 
-/// The status and message of GitHub's error body, as a failed `gh api` prints it: an object,
-/// or that object in a list under `--slurp`, with the status as a string or a number. `None`
-/// for anything else (an HTML error page), whose explanation is gh's own message.
-fn error_body(stdout: &str) -> Option<(u16, String)> {
-    let body: Value = serde_json::from_str(stdout).ok()?;
-    let error = match &body {
-        Value::Array(list) if list.len() == 1 => &list[0],
-        other => other,
-    };
+/// The status and message of GitHub's error body, as a failed `gh api` prints it: an object
+/// with the status as a string or a number. `None` for anything else (an HTML error page),
+/// whose explanation is gh's own message.
+fn error_body(body: &str) -> Option<(u16, String)> {
+    let error: Value = serde_json::from_str(body).ok()?;
     let status = error["status"]
         .as_str()
         .and_then(|s| s.parse::<u16>().ok())
         .or_else(|| error["status"].as_u64().and_then(|s| u16::try_from(s).ok()))?;
     Some((status, error["message"].as_str()?.to_owned()))
-}
-
-fn page_items(page: Value) -> Vec<Value> {
-    match page {
-        Value::Array(items) => items,
-        other => vec![other],
-    }
 }
 
 /// Fetches a file's raw text through the contents API.
@@ -694,25 +796,45 @@ mod tests {
     /// A fake `gh` that answers by the API path (its last argument), as `gh api` does: JSON on
     /// stdout, exit 1 for an HTTP error, with GitHub's error body. Fixtures (`<name>.json`) sit
     /// beside it. A raw file is served only with the raw `Accept` header, and secret alerts only
-    /// with `hide_secret=true`, so dropping either fails a test.
+    /// with `hide_secret=true`, so dropping either fails a test. `paged` serves page `<n>` of a
+    /// list as `gh api --include` prints it, with a `Link` to page `<n + 1>` up to its last page.
+    /// Every path asked for is appended to `calls`.
     const FAKE_GH: &str = r#"#!/bin/sh
 for last; do :; done
 d=$(dirname "$0")
+echo "$last" >>"$d/calls"
+args="$*"
 ok() { cat "$d/$1.json"; }
 no() { cat "$d/$1.json"; exit 1; }
 refuse() { echo "{\"message\":\"$2\",\"status\":\"$1\"}"; exit 1; }
 file() {
   case "$*" in *application/vnd.github.raw*) ;; *) echo "not raw" >&2; exit 3 ;; esac
 }
-slurp() {
-  case "$*" in *--paginate*--slurp*) ;; *) echo "not slurped" >&2; exit 3 ;; esac
+# paged <fixture> <cursor parameter> <last page>
+paged() {
+  case "$args" in *--include*) ;; *) echo "no headers asked for" >&2; exit 3 ;; esac
+  n=0
+  case "$last" in *"&$2="*) n=${last##*&"$2"=} ;; esac
+  printf 'HTTP/2.0 200 OK\nContent-Type: application/json\r\n'
+  if [ "$n" -lt "$3" ]; then
+    printf 'Link: <https://api.github.com/repositories/1/x?state=open&%s=%s>; rel="next", ' \
+      "$2" $((n + 1))
+    printf '<https://api.github.com/repositories/1/x?state=open&%s=%s>; rel="last"\r\n' "$2" "$3"
+  fi
+  printf '\r\n'
+  cat "$d/$1-$n.json"
 }
 case "$last" in
   repos/o/r) ok repo ;;
   repos/o/r/dependency-graph/sbom) ok sbom ;;
   repos/o/r/dependabot/alerts*) no dependabot ;;
   repos/o/r/code-scanning/alerts*) no code-scanning ;;
-  repos/o/r/secret-scanning/alerts*hide_secret=true*) slurp "$@"; ok secret-scanning ;;
+  repos/o/r/secret-scanning/alerts*hide_secret=true*) paged secret-scanning after 1 ;;
+  repos/o/paged) echo '{"default_branch":"main","owner":{"type":"User","login":"o"}}' ;;
+  repos/o/paged/dependabot/alerts*) paged hundred after 9 ;;
+  repos/o/paged/code-scanning/alerts*) paged hundred page 2 ;;
+  repos/o/paged/secret-scanning/alerts*hide_secret=true*) paged ten after 99 ;;
+  repos/o/paged/*) echo '[]' ;;
   repos/o/r/contents/.github/workflows) ok workflows ;;
   repos/o/r/contents/.github/workflows/ci.yml) file "$@"; echo 'on: push' ;;
   repos/o/r/contents/.github/workflows/release.yaml) file "$@"; echo 'on: release' ;;
@@ -798,21 +920,22 @@ esac
             ),
             (
                 "dependabot",
-                json!([{
+                json!({
                     "message": "Dependabot alerts are disabled for this repository.",
                     "status": "403"
-                }]),
+                }),
             ),
             (
                 "code-scanning",
-                json!([{"message": "no analysis found", "status": "404"}]),
+                json!({"message": "no analysis found", "status": "404"}),
             ),
             (
-                "secret-scanning",
-                json!([
-                    [{"number": 1, "secret": "hunter2", "secret_type": "t"}],
-                    [{"number": 2, "secret": "x", "nested": [{"secret": "deep"}]}]
-                ]),
+                "secret-scanning-0",
+                json!([{"number": 1, "secret": "hunter2", "secret_type": "t"}]),
+            ),
+            (
+                "secret-scanning-1",
+                json!([{"number": 2, "secret": "x", "nested": [{"secret": "deep"}]}]),
             ),
             (
                 "workflows",
@@ -830,13 +953,24 @@ esac
                     {"type": "file", "name": "release.yaml"}
                 ]),
             ),
-            ("many-alerts", json!([many_alerts])),
+            ("many-alerts", json!(many_alerts)),
             ("many-workflows", workflows(WORKFLOW_LIMIT + 1)),
             ("limit-workflows", at_limit),
-            ("limit-alerts", json!([limit_alerts])),
+            ("limit-alerts", json!(limit_alerts)),
         ];
         for (name, value) in fixtures {
             fs::write(dir.join(format!("{name}.json")), value.to_string()).unwrap();
+        }
+        for page in 0..10 {
+            let alerts: Vec<Value> = (0..100)
+                .map(|n| json!({"number": page * 100 + n}))
+                .collect();
+            let path = dir.join(format!("hundred-{page}.json"));
+            fs::write(path, Value::Array(alerts).to_string()).unwrap();
+            // Short pages that always link another: only five are read.
+            let ten: Vec<Value> = (0..10).map(|n| json!({"number": page * 10 + n})).collect();
+            let path = dir.join(format!("ten-{page}.json"));
+            fs::write(path, Value::Array(ten).to_string()).unwrap();
         }
         path.to_str().unwrap().to_owned()
     }
@@ -964,7 +1098,7 @@ esac
         let settings = settings(&repo);
         assert_eq!(
             settings["dependabot_alerts"], NOT_COLLECTED,
-            "an empty failed slurp"
+            "an empty list from a failed request"
         );
         assert_eq!(
             settings["code_scanning_alerts"], NOT_COLLECTED,
@@ -976,7 +1110,7 @@ esac
         );
         assert_eq!(
             settings["secret_scanning_alerts"],
-            json!({"open": ALERT_LIMIT + 1})
+            json!({"open": "500 or more"})
         );
         assert!(
             settings.get("default_branch_protection").is_none(),
@@ -997,7 +1131,7 @@ esac
             "dependabot alerts: `",
             "code-scanning alerts: `",
             "HTTP 502",
-            "secret-scanning alerts: 501 open, only the first 500 are in the bundle",
+            "secret-scanning alerts: 500 or more open, only the first 500 are in the bundle",
             "workflows: 403: Must have admin rights",
             "names no default branch",
             "setting organization_two_factor_requirement: GitHub answered 403",
@@ -1008,6 +1142,96 @@ esac
             !problems.contains("turn on the dependency graph"),
             "{problems}"
         );
+    }
+
+    /// Alerts are fetched a page at a time, following the cursor in each `Link` header, and
+    /// no page past the limit is asked for.
+    #[test]
+    fn alerts_stop_at_the_page_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = fake_gh(tmp.path());
+        let repo = collect(&gh, &slug("o/paged")).unwrap();
+        let settings = settings(&repo);
+
+        // Ten pages of 100 Dependabot alerts: five are read.
+        assert_eq!(
+            settings["dependabot_alerts"],
+            json!({"open": "500 or more"})
+        );
+        let alerts: Value =
+            serde_json::from_str(file(&repo, "github/dependabot-alerts.json")).unwrap();
+        let numbers: Vec<u64> = alerts
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["number"].as_u64().unwrap())
+            .collect();
+        assert_eq!(numbers, (0..500).collect::<Vec<_>>());
+        assert!(
+            repo.problems.contains(
+                &"dependabot alerts: 500 or more open, only the first 500 are in the bundle"
+                    .to_owned()
+            ),
+            "{:?}",
+            repo.problems
+        );
+        // Three pages of code scanning alerts, by page number: all are read.
+        assert_eq!(settings["code_scanning_alerts"], json!({"open": 300}));
+        // Five short pages that still link a sixth: the count read, not the limit.
+        assert_eq!(
+            settings["secret_scanning_alerts"],
+            json!({"open": "50 or more"})
+        );
+        assert!(
+            repo.problems.contains(
+                &"secret-scanning alerts: 50 or more open, only the first 50 are in the bundle"
+                    .to_owned()
+            ),
+            "{:?}",
+            repo.problems
+        );
+
+        let calls = fs::read_to_string(tmp.path().join("calls")).unwrap();
+        let dependabot: Vec<&str> = calls.lines().filter(|c| c.contains("dependabot")).collect();
+        let first = "repos/o/paged/dependabot/alerts?state=open&per_page=100";
+        assert_eq!(
+            dependabot,
+            [0, 1, 2, 3, 4].map(|n| if n == 0 {
+                first.to_owned()
+            } else {
+                format!("{first}&after={n}")
+            })
+        );
+    }
+
+    #[test]
+    fn next_cursor_takes_only_a_plain_cursor_of_the_next_link() {
+        let head = |link: &str| format!("HTTP/2.0 200 OK\nX-A: b\r\n{link}\r\nX-C: d");
+        let next = |link: &str| next_cursor(&head(link), "p");
+        let link = "link: <https://x/repositories/1/a?state=open&page=1>; rel=\"prev\", \
+                    <https://x/repositories/1/a?per_page=100&after=Y3U%3D&x=1>; rel=\"next\"";
+        assert_eq!(next(link).unwrap().as_deref(), Some("after=Y3U%3D"));
+        let last_only = "Link: <https://x/a?page=9>; rel=\"last\"";
+        assert_eq!(next(last_only).unwrap(), None);
+        assert_eq!(next_cursor("HTTP/2.0 200 OK\n", "p").unwrap(), None);
+        let odd = "Link: <https://x/a?after=a&b>; rel=\"next\"";
+        assert_eq!(next(odd).unwrap().as_deref(), Some("after=a"));
+        // As GitHub sends it for issues: the cursor, then a page number it ignores.
+        let both = "Link: <https://x/a?page=2&state=open&after=Y3U%3D>; rel=next";
+        assert_eq!(next(both).unwrap().as_deref(), Some("after=Y3U%3D"));
+        let page = "Link: <https://x/a?per_page=100&page=3>; rel=\"next\"";
+        assert_eq!(next(page).unwrap().as_deref(), Some("page=3"));
+        let lookalike = "Link: <https://x/a?pages=2&page=3>; rel=\"next\"";
+        assert_eq!(next(lookalike).unwrap().as_deref(), Some("page=3"));
+        for unusable in [
+            "Link: <https://x/a?after=a%20b c>; rel=\"next\"",
+            "Link: <https://x/a?after=&page=2>; rel=\"next\"",
+            "Link: <https://x/a?per_page=100>; rel=\"next\"",
+            "Link: <https://x/a>; rel=\"next\"",
+        ] {
+            let err = next(unusable).unwrap_err();
+            assert!(matches!(err, GitHubError::Cursor { .. }), "{unusable}");
+        }
     }
 
     #[test]

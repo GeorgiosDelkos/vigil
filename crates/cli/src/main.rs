@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::ArgGroup;
@@ -36,6 +37,7 @@ use vigil_core::error_chain;
 use vigil_core::fix_all_outcome;
 use vigil_core::items;
 use vigil_core::latest;
+use vigil_core::plain;
 use vigil_core::plan_fix;
 use vigil_core::plan_fix_all;
 use vigil_core::report_markdown;
@@ -166,7 +168,17 @@ enum FixAll {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            error(&format!("{e:#}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // Looked up only when needed, so `--data-dir X init` works without HOME.
     let home = || std::env::home_dir().context("cannot find the home directory; set HOME");
@@ -778,7 +790,7 @@ fn show_progress(progress: &Progress<'_>) {
     reason = "the CLI's one output function for progress"
 )]
 fn status(text: &str) {
-    eprintln!("{text}");
+    eprintln!("{}", terminal_safe(text));
 }
 
 #[expect(
@@ -786,7 +798,23 @@ fn status(text: &str) {
     reason = "the CLI's one output function for warnings"
 )]
 fn warn(text: &str) {
-    eprintln!("warning: {text}");
+    eprintln!("warning: {}", terminal_safe(text));
+}
+
+#[expect(
+    clippy::print_stderr,
+    reason = "the CLI's one output function for the error that ends a command"
+)]
+fn error(text: &str) {
+    eprintln!("error: {}", terminal_safe(text));
+}
+
+/// `text` with every control or invisible character except the line breaks replaced, as
+/// [`plain`] does. Warnings and errors quote what the CLI does not control (a lockfile's line in
+/// a parse error, a tool's or the agent's stderr), and an escape sequence printed raw would act
+/// on the terminal: OSC 52 writes the clipboard, OSC 8 hides a link behind other text.
+fn terminal_safe(text: &str) -> String {
+    text.lines().map(plain).collect::<Vec<_>>().join("\n")
 }
 
 #[cfg(test)]
@@ -973,5 +1001,14 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
         let cli = Cli::try_parse_from(["vigil", "advisories", "--product", "zlib"]);
         assert!(cli.is_ok());
+    }
+
+    #[test]
+    fn terminal_safe_keeps_line_breaks_and_drops_escapes() {
+        let text = "line 1 | \u{1b}]52;c;aGk=\u{7}\nline 2 \u{202e}txt.exe\r";
+        assert_eq!(
+            terminal_safe(text),
+            "line 1 | \u{fffd}]52;c;aGk=\u{fffd}\nline 2 \u{fffd}txt.exe "
+        );
     }
 }

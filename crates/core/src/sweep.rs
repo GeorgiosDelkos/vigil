@@ -467,13 +467,13 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
                 if group.len() == 1 {
                     return group[0].title.clone();
                 }
-                plain(&format!(
+                format!(
                     "{} {}, {}: {} advisories",
                     group_name(installed),
                     installed.version,
                     installed.found_in,
                     group.len()
-                ))
+                )
             });
         let issues = report
             .issues
@@ -483,7 +483,8 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
         alerts.extend(
             components
                 .chain(issues)
-                .map(|t| format!("{}: {t}", report.target)),
+                // Titles and targets are read back from report.json: one plain line.
+                .map(|t| plain(&format!("{}: {t}", report.target))),
         );
     }
     alerts
@@ -1376,10 +1377,11 @@ pub(crate) fn locate_configured(config: &Config) -> Result<(AgentKind, Located),
 }
 
 /// `text` as one line: `\n`, `\r` and `\t` become spaces, and every other control or
-/// invisible character ([`is_forging`]) becomes U+FFFD. For messages that quote the agent (a
-/// rejected id, a serde error naming its field) and reach the terminal, `report.json` or the
-/// agent's next prompt.
-pub(crate) fn plain(text: &str) -> String {
+/// invisible character (a bidirectional override, a zero-width space, a tag character) becomes
+/// U+FFFD. For messages that quote the agent, a server or a file (a rejected id, a serde error
+/// naming its field, a lockfile's parse error) and reach the terminal, `report.json`, a
+/// notification or the agent's next prompt.
+pub fn plain(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' | '\r' | '\t' => ' ',
@@ -2515,6 +2517,40 @@ mod tests {
         assert_eq!(
             alerts(&[first]),
             ["mac: curl 1.0, Homebrew formula curl: 2 advisories"]
+        );
+    }
+
+    /// The target and the titles of a lone finding and of an issue are read back from
+    /// `report.json`, so the alert cleans them again rather than trust the file.
+    #[test]
+    fn alerts_are_plain_lines() {
+        let mut first = Report {
+            first_verdict: true,
+            ..report(
+                vec![report_finding("GHSA-1", "critical", false, "npm:a")],
+                &[],
+            )
+        };
+        first.findings[0].title = "GHSA-1 in \u{202e}exe.txt\n".to_owned();
+        first.issues = vec![ReportIssue {
+            key: FindingKey::new(&["f"]),
+            title: "file \u{1b}]52;c;aGk=\u{7}".to_owned(),
+            name: "f".to_owned(),
+            first_seen: Timestamp::UNIX_EPOCH,
+            issue: serde_json::from_value(json!({
+                "subject": {"file": "f"}, "severity": "high", "evidence": "e",
+                "explanation": "x", "fix": {"summary": "s", "steps": [], "commands": []}
+            }))
+            .unwrap(),
+            dismissed: None,
+        }];
+        first.target = "m\u{200b}ac".to_owned();
+        assert_eq!(
+            alerts(&[first]),
+            [
+                "m\u{fffd}ac: GHSA-1 in \u{fffd}exe.txt ",
+                "m\u{fffd}ac: file \u{fffd}]52;c;aGk=\u{fffd}"
+            ]
         );
     }
 
