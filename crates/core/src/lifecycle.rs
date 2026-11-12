@@ -1088,11 +1088,18 @@ fn newest(sweeps: &Path, key: FindingKey) -> Result<Option<SavedEntry>, StateErr
     Ok(newest_report(sweeps, key)?.map(|(_, entry)| entry))
 }
 
-/// The newest `report.json` with a verdict that has `key`, with the entry. Taken again for the
-/// reasons [`newest_verdict`] gives. One case is left: a target folder created in a listed
-/// sweep folder after it was listed, whose whole sweep (bundle, agent, report) ends before
-/// this scan reads an older folder. A target's sweep takes minutes and a scan milliseconds;
-/// accepted.
+/// The newest `report.json` with a verdict that has `key`, with the entry.
+///
+/// Keys are 64-bit hashes over every target, so two targets' findings could share one, by
+/// chance or by a crafted repository lockfile path. A fix or dismissal must not then act on
+/// the other target's finding, so this fails ([`StateError::KeyInTwoTargets`]) when the newest
+/// report with a verdict of any other target also has `key`. After the first hit only those
+/// newest reports are read; the folder listings of older sweeps are still walked.
+///
+/// Taken again for the reasons [`newest_verdict`] gives. One case is left: a target folder
+/// created in a listed sweep folder after it was listed, whose whole sweep (bundle, agent,
+/// report) ends before this scan reads an older folder. A target's sweep takes minutes and a
+/// scan milliseconds; accepted.
 pub(crate) fn newest_report(
     sweeps: &Path,
     key: FindingKey,
@@ -1110,23 +1117,55 @@ fn newest_report_read_by(
     for _ in 0..SCANS {
         let listed = newest_first(sweeps)?;
         let mut unreported = Vec::new();
-        found = 'scan: {
-            for sweep in &listed {
-                for target in folders(sweep)? {
-                    let Some(saved) = read(&target)? else {
-                        unreported.push(target);
-                        continue;
-                    };
-                    let entry = saved.entries().find(|e| e.key == key);
-                    if let Some(entry) = entry.filter(|_| saved.failure.is_none()) {
-                        break 'scan Some((target.join("report.json"), entry.clone()));
-                    }
-                }
-            }
-            None
-        };
+        found = scan_for_key(&listed, key, read, &mut unreported)?;
         if !reported_since(&unreported) && newest_first(sweeps)? == listed {
             break;
+        }
+    }
+    Ok(found)
+}
+
+/// One scan of [`newest_report`] over the `listed` sweep folders, pushing each target folder
+/// read without a report to `unreported`.
+fn scan_for_key(
+    listed: &[PathBuf],
+    key: FindingKey,
+    read: &mut dyn FnMut(&Path) -> Result<Option<Saved>, StateError>,
+    unreported: &mut Vec<PathBuf>,
+) -> Result<Option<(PathBuf, SavedEntry)>, StateError> {
+    let mut found: Option<(PathBuf, SavedEntry)> = None;
+    // The targets whose newest report with a verdict was already read.
+    let mut seen = BTreeSet::new();
+    for sweep in listed {
+        for target in folders(sweep)? {
+            let name = target.file_name().map(ToOwned::to_owned);
+            if found.is_some() && seen.contains(&name) {
+                continue;
+            }
+            let Some(saved) = read(&target)? else {
+                unreported.push(target);
+                continue;
+            };
+            if saved.failure.is_some() {
+                continue;
+            }
+            // Once a hit is found, only targets not seen yet get here, and this report is their
+            // newest with a verdict: a second hit is always another target's newest report.
+            seen.insert(name);
+            let Some(entry) = saved.entries().find(|e| e.key == key) else {
+                continue;
+            };
+            let path = target.join("report.json");
+            match &found {
+                None => found = Some((path, entry.clone())),
+                Some((first, _)) => {
+                    return Err(StateError::KeyInTwoTargets {
+                        key,
+                        first: first.clone(),
+                        second: path,
+                    });
+                }
+            }
         }
     }
     Ok(found)
@@ -1153,6 +1192,22 @@ pub enum StateError {
     NotDismissed {
         /// The key.
         key: FindingKey,
+    },
+    /// Two targets' reports have the key, so which finding it names is unclear.
+    #[error(
+        "finding {key} is in the reports of two targets, {} and {}, so nothing was done; \
+         fix or dismiss it after the next sweep of either target, or delete the older report \
+         if its target is gone",
+        first.display(),
+        second.display()
+    )]
+    KeyInTwoTargets {
+        /// The key.
+        key: FindingKey,
+        /// The newest report that has it.
+        first: PathBuf,
+        /// The newest report of another target that has it too.
+        second: PathBuf,
     },
     /// A state file could not be read.
     #[error("cannot read {}; fix or delete it", path.display())]
@@ -1448,6 +1503,44 @@ mod tests {
             Err(StateError::NotDismissed { .. })
         ));
         assert!(Dismissals::load(&data_dir).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn a_key_in_two_targets_newest_reports_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path().join("sweeps");
+        let (shared, other) = (FindingKey(1), FindingKey(2));
+        let at = "2026-11-01T00:00:00Z";
+        save(
+            &sweeps,
+            "20261105T000000Z/mac",
+            &report("2026-11-05T00:00:00Z", None, &[shared], at),
+        );
+        // The repository's newer sweep has the key too: two findings, one key.
+        save(
+            &sweeps,
+            "20261106T000000Z/github-o--r",
+            &report("2026-11-06T00:00:00Z", None, &[shared, other], at),
+        );
+        let err = newest_report(&sweeps, shared).unwrap_err();
+        assert!(
+            matches!(&err, StateError::KeyInTwoTargets { first, second, .. }
+                if first.ends_with("github-o--r/report.json")
+                    && second.ends_with("mac/report.json")),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("so nothing was done"), "{err}");
+        assert!(newest_report(&sweeps, other).unwrap().is_some());
+
+        // Gone from the Mac's newest report, the key names one finding again, though an older
+        // Mac report still has it.
+        save(
+            &sweeps,
+            "20261107T000000Z/mac",
+            &report("2026-11-07T00:00:00Z", None, &[], at),
+        );
+        let (path, _) = newest_report(&sweeps, shared).unwrap().unwrap();
+        assert!(path.ends_with("20261106T000000Z/github-o--r/report.json"));
     }
 
     #[test]

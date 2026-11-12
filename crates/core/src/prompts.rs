@@ -7,7 +7,9 @@
 //! version is written beside it as `<name>.default.md`, and the sweep notes it once, when that
 //! file is written or changes. The note says the built-in prompt may be newer, not that it is:
 //! without a record of the version the user started from, an edit of the current version looks
-//! the same as an edit of an old one. A missing copy is left for [`render`] to create on first use.
+//! the same as an edit of an old one. A missing copy is left for [`ensure_copy`] to create on first
+//! use. Until a sweep replaces an unedited old copy, [`load`] reads it as the current built-in
+//! version, so a fix planned before the next sweep gets the current rules.
 //!
 //! How "never edited" is known (owner's decision, 2026-11-10): the app carries the hash of
 //! every built-in version in its git history ([`Prompt::shipped`]), and a copy whose hash is in
@@ -43,7 +45,8 @@ impl Prompt {
         Self::FixAll,
     ];
 
-    fn file_name(self) -> &'static str {
+    /// Its file in `prompts/`.
+    pub(crate) fn file_name(self) -> &'static str {
         match self {
             Self::Mac => "sweep.md",
             Self::GitHub => "sweep-github.md",
@@ -107,7 +110,11 @@ impl Prompt {
                 0x7204_4cf2_d0b2_ddbe, // On #57's branch only; its squash merge left it out.
                 0x9723_54ab_1f75_134c,
             ],
-            Self::Fix => &[0x77ef_cded_9b10_794c, 0x55ae_3d08_e3e0_8813],
+            Self::Fix => &[
+                0x77ef_cded_9b10_794c,
+                0x55ae_3d08_e3e0_8813,
+                0x5c57_389a_a9f6_eb89,
+            ],
             Self::FixAll => &[0xd72c_2266_ddd2_d7f2],
         }
     }
@@ -115,25 +122,68 @@ impl Prompt {
 
 /// The user's copy of `kind`'s prompt, created from the built-in one on first use, with the
 /// target filled in. Must run under the sweeps lock, as the first write uses a shared temporary
-/// name. Written whole or not at all, as a torn copy would match no built-in version and be kept
-/// as an edit.
+/// name.
 pub(crate) fn render(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<String, SweepError> {
-    let dir = data_dir.prompts_dir();
-    let path = dir.join(kind.file_name());
-    let template = match fs::read_to_string(&path) {
-        Ok(text) => text,
+    ensure_copy(data_dir, kind)?;
+    Ok(load(data_dir, kind)?.text().replace("{{target}}", target))
+}
+
+/// A prompt template as [`load`] found it.
+#[derive(Debug)]
+pub(crate) enum Template {
+    /// The current built-in prompt: the copy is missing, current, or a version some build
+    /// shipped, which the next sweep's [`update`] replaces with the current one.
+    BuiltIn(&'static str),
+    /// A copy the user edited, which matches no built-in version.
+    Edited(String),
+}
+
+impl Template {
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Self::BuiltIn(text) => text,
+            Self::Edited(text) => text,
+        }
+    }
+}
+
+/// The template of `kind`: the user's copy when they edited it, otherwise the current built-in
+/// prompt. Only reads, so it needs no lock: a fix reads it when it is planned, to say before
+/// the user confirms whether an edited prompt is used, and then runs with what it read.
+pub(crate) fn load(data_dir: &DataDir, kind: Prompt) -> Result<Template, SweepError> {
+    let path = data_dir.prompts_dir().join(kind.file_name());
+    let copy = match fs::read(&path) {
+        Ok(copy) => copy,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            fs::create_dir_all(&dir)
-                .and_then(|()| paths::replace_file(&path, kind.default_text()))
-                .map_err(|source| SweepError::Write {
-                    path: path.clone(),
-                    source,
-                })?;
-            kind.default_text().to_owned()
+            return Ok(Template::BuiltIn(kind.default_text()));
         }
         Err(source) => return Err(SweepError::Read { path, source }),
     };
-    Ok(template.replace("{{target}}", target))
+    if kind.shipped().contains(&fnv1a(&copy)) {
+        return Ok(Template::BuiltIn(kind.default_text()));
+    }
+    String::from_utf8(copy)
+        .map(Template::Edited)
+        .map_err(|e| SweepError::Read {
+            path,
+            source: io::Error::new(io::ErrorKind::InvalidData, e),
+        })
+}
+
+/// Writes the built-in prompt of `kind` to `prompts/` when the user has no copy yet, so there
+/// is one to edit. Must run under the sweeps lock, as the write uses a shared temporary name.
+/// Written whole or not at all, as a torn copy would match no built-in version and be kept as
+/// an edit. A copy that exists but cannot be read is left alone, for [`load`] to report.
+pub(crate) fn ensure_copy(data_dir: &DataDir, kind: Prompt) -> Result<(), SweepError> {
+    let dir = data_dir.prompts_dir();
+    let path = dir.join(kind.file_name());
+    match fs::metadata(&path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir_all(&dir)
+            .and_then(|()| paths::replace_file(&path, kind.default_text()))
+            .map_err(|source| SweepError::Write { path, source }),
+        Err(source) => Err(SweepError::Read { path, source }),
+    }
 }
 
 /// Replaces each unedited copy in `prompts/` with the current built-in version, and pushes to
@@ -276,6 +326,61 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(matches!(result, Err(SweepError::Read { .. })), "{result:?}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "Mine: {{target}}");
+    }
+
+    #[test]
+    fn a_copy_that_cannot_be_looked_at_is_not_written_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = DataDir::new(tmp.path());
+        // A file where the prompts folder goes: looking for the copy fails, but not with
+        // NotFound, so nothing may be created in its place.
+        fs::write(data.prompts_dir(), "not a folder").unwrap();
+        let err = ensure_copy(&data, Prompt::Fix).unwrap_err();
+        assert!(matches!(err, SweepError::Read { .. }), "{err:?}");
+        assert_eq!(
+            fs::read_to_string(data.prompts_dir()).unwrap(),
+            "not a folder"
+        );
+
+        fs::remove_file(data.prompts_dir()).unwrap();
+        ensure_copy(&data, Prompt::Fix).unwrap();
+        assert_eq!(
+            read(&data, "fix.md"),
+            Prompt::Fix.default_text(),
+            "a missing copy is made"
+        );
+    }
+
+    #[test]
+    fn load_tells_an_edited_copy_from_a_built_in_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = DataDir::new(tmp.path());
+        let built_in = |data: &DataDir| {
+            matches!(load(data, Prompt::Fix).unwrap(),
+                Template::BuiltIn(text) if text == Prompt::Fix.default_text())
+        };
+        assert!(built_in(&data), "no copy yet");
+        assert!(!data.prompts_dir().exists(), "loading writes nothing");
+
+        let old = versions_in_git(Prompt::Fix)
+            .pop()
+            .expect("fix.md has a first version");
+        let (_tmp, data) = with_copy(Prompt::Fix, &old);
+        assert!(
+            built_in(&data),
+            "an unedited old copy reads as the current built-in prompt"
+        );
+
+        let (_tmp, data) = with_copy(Prompt::Fix, b"Mine: {{target}}");
+        assert!(matches!(
+            load(&data, Prompt::Fix).unwrap(),
+            Template::Edited(text) if text == "Mine: {{target}}"
+        ));
+        let (_tmp, data) = with_copy(Prompt::Fix, b"\xff");
+        assert!(matches!(
+            load(&data, Prompt::Fix),
+            Err(SweepError::Read { .. })
+        ));
     }
 
     #[test]

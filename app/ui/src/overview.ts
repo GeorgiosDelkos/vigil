@@ -213,13 +213,18 @@ export type Overview = {
   readonly disk: Disk | null;
 };
 
+/** What the single fix's confirmation shows: everything the agent is told the user confirmed. */
 export type FixPreview = {
+  /** The number `fix` takes to run exactly the plan shown. */
+  readonly preview: number;
   readonly destination: string;
   readonly found: string;
   readonly summary: string;
   readonly steps: readonly string[];
   readonly commands: readonly string[];
   readonly agent: string;
+  /** What to read before confirming, one sentence each, in Rust's words. */
+  readonly notes: readonly string[];
 };
 
 /** One item of a Fix all, with its fix as the single-item preview shows one. */
@@ -234,12 +239,16 @@ export type FixAllPreviewItem = {
 
 /** What a target's screen asks before a Fix all: every item's fix, for one confirmation. */
 export type FixAllPreview = {
+  /** The number `fix` takes to run exactly the plan shown. */
+  readonly preview: number;
   readonly destination: string;
   readonly found: string;
   readonly agent: string;
   /** The confirming button's label: "Fix all 3". */
   readonly confirm: string;
   readonly items: readonly FixAllPreviewItem[];
+  /** What to read before confirming, one sentence each, in Rust's words. */
+  readonly notes: readonly string[];
 };
 
 /** How one item of a finished fix ended (the core's `FixRunItem`). */
