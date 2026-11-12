@@ -155,19 +155,19 @@ pub(crate) fn replace_file(path: &Path, text: &str) -> io::Result<()> {
 /// not have written, but opening a FIFO would block the reading thread for good, and the
 /// threads that read after the agent exits hold the sweeps lock.
 ///
-/// The open itself refuses both, so a file swapped after the first check gains nothing:
-/// `O_NOFOLLOW` fails on a link, and `O_NONBLOCK` makes opening a FIFO return at once (POSIX
-/// `open`), after which the open file's own metadata is checked. The first check only gives a
-/// clear error for the common case.
+/// The open itself refuses both, so there is no gap between a check and the open for a swap:
+/// `O_NOFOLLOW` fails on a link (`ELOOP`), and `O_NONBLOCK` makes opening a FIFO return at once
+/// (POSIX `open`), after which the open file's own metadata is checked.
 pub(crate) fn open_regular(path: &Path) -> io::Result<fs::File> {
     let not_regular = || io::Error::new(io::ErrorKind::InvalidInput, "not a regular file");
-    if !fs::symlink_metadata(path)?.is_file() {
-        return Err(not_regular());
-    }
     let file = fs::OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path)?;
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) => not_regular(),
+            _ => e,
+        })?;
     if !file.metadata()?.is_file() {
         return Err(not_regular());
     }

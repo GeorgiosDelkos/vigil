@@ -586,8 +586,9 @@ fn last_activity(log: &Path) -> Option<String> {
 /// Blocks until the agent finishes; there is no time limit. An agent that cannot start is
 /// recorded as `unknown` with the reason, like one that writes no result, and so is one that
 /// `cancel` stops (the app quitting, or Ctrl-C in the CLI): it may have done part of the fix.
-/// A repository fix whose default branch moved, or whose pull request is not open from the
-/// run's branch into the default branch, is recorded as `unknown` with why.
+/// A repository fix whose default branch changed or moved, whose pull request is not open from
+/// the run's branch into the default branch, or whose change to files was reported `fixed`
+/// without one, is recorded as `unknown` with why.
 ///
 /// # Errors
 ///

@@ -40,39 +40,52 @@ pub(super) const ENV: [(&str, &str); 5] = [
 /// split into words as a shell would (quotes and backslashes), and into parts at `;`, `&`,
 /// `|`, parentheses and line breaks. Then:
 ///
-/// - nothing sets a `GH_*` or `GITHUB_*` variable (`GH_REPO`, `GH_HOST`, a token);
-/// - in a `gh`, `git`, `curl`, `wget` or `cd` part, no word holds `$` or a backquote, whose
-///   expansion cannot be checked;
-/// - in a `gh`, `git`, `curl` or `wget` part, every GitHub address (`github.com/<owner>/<name>`,
-///   `github.com:<owner>/<name>`, any case) names `repo`, and every API address
-///   (`api.github.com/...`) is under `/repos/<repo>` with no `..` or `%` in it;
+/// - nothing sets a `GH_*`, `GITHUB_*` or `GIT_*` variable (`GH_REPO`, `GH_HOST`, a token,
+///   `GIT_DIR`, or the `GIT_CONFIG_*` that turns hooks off);
+/// - no word holds `$` or a backquote, whose expansion cannot be checked;
+/// - a word with spaces in it, which `sh -c` or `eval` could run, passes these rules itself;
+/// - the checked programs (`gh`, `git`, `curl`, `wget`, `cd`) are found anywhere in a part, so
+///   no wrapper (`sudo -u`, `env -i`, `time`, `{`, `if ... then`) hides one. In their parts
+///   every GitHub address (`github.com/<owner>/<name>`, `github.com:<owner>/<name>`, any case)
+///   names `repo` with no `..` or `%` after it, and every API address (`api.github.com/...`)
+///   is under `/repos/<repo>` ([`under_repo`]);
 /// - `gh` runs only `api`, `secret`, `variable`, `workflow`, `pr`, `issue`, `label`, `release`
 ///   or `repo edit`, never with `--hostname`, `--org`, `-o` or `--owner`. `gh api` calls one
-///   path under `repos/<repo>` with no `..` or `%` (so no `graphql`, `user` or `orgs/...`).
-///   Every other subcommand names `repo` with `-R` or `--repo` (`gh repo edit` with its
-///   argument), as `gh` otherwise takes the repository from the folder it runs in, and names
-///   no other `owner/name`;
-/// - `cd` goes only to a relative folder with no `..`: the agent works in the clone.
+///   path under `repos/<repo>` (so no `graphql`, `user` or `orgs/...`). Every other
+///   subcommand names `repo` with `-R` or `--repo` (`gh repo edit` with its argument), as `gh`
+///   otherwise takes the repository from the folder it runs in, and names no other
+///   `owner/name`;
+/// - `cd`, and `git`'s `-C`, `--git-dir` and `--work-tree`, go only to a relative folder with
+///   no `..`: the agent works in the clone.
 ///
 /// Unchecked: other programs. `go get github.com/<module>` names a module, not a repository
 /// to change, and a program that reaches GitHub another way (a script in the clone) is the
-/// accepted risk of a full-access agent. Owner and name compare case-insensitively, as GitHub
-/// does.
+/// accepted risk of a full-access agent. A word that is one of the checked programs counts as
+/// running it even as an argument (`npm install gh`), which refuses such a fix wrongly. Owner
+/// and name compare case-insensitively, as GitHub does.
 pub(super) fn foreign_command(command: &str, repo: &str) -> Option<String> {
     let parts = shell_parts(command);
-    let words = parts.iter().flatten();
-    if let Some(word) = words.clone().find(|w| sets_github_variable(w)) {
+    let words = || parts.iter().flatten();
+    if let Some(word) = words().find(|w| sets_checked_variable(w)) {
         let name = word.split_once('=').map_or(word.as_str(), |(name, _)| name);
         return Some(format!("it sets {name}"));
     }
-    parts.iter().find_map(|part| foreign_part(part, repo))
+    if let Some(word) = words().find(|w| w.contains(['$', '`'])) {
+        return Some(format!("`{word}` cannot be checked before it runs"));
+    }
+    words()
+        .filter(|w| w.contains(char::is_whitespace))
+        .find_map(|w| foreign_command(w, repo))
+        .or_else(|| parts.iter().find_map(|part| foreign_part(part, repo)))
 }
 
-/// Whether `word` is an assignment to a `GH_*` or `GITHUB_*` variable, which can point `gh`
-/// or `git` at another repository or host.
-fn sets_github_variable(word: &str) -> bool {
+/// Whether `word` is an assignment to a `GH_*`, `GITHUB_*` or `GIT_*` variable, which can
+/// point `gh` or `git` at another repository, host or folder, or turn hooks back on.
+fn sets_checked_variable(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
-        (name.starts_with("GH_") || name.starts_with("GITHUB_"))
+        ["GH_", "GITHUB_", "GIT_"]
+            .iter()
+            .any(|p| name.starts_with(p))
             && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
     })
 }
@@ -80,36 +93,54 @@ fn sets_github_variable(word: &str) -> bool {
 /// Why `part`, the words of one piece of a command, may address another repository.
 fn foreign_part(part: &[String], repo: &str) -> Option<String> {
     let (program, args) = program(part)?;
-    if !matches!(program, "gh" | "git" | "curl" | "wget" | "cd") {
-        return None;
-    }
-    if let Some(word) = args.iter().find(|w| w.contains(['$', '`'])) {
-        return Some(format!("`{word}` cannot be checked before it runs"));
-    }
     if program == "cd" {
         let target = args.first().map_or("", String::as_str);
-        let inside = !target.is_empty()
-            && !target.starts_with(['/', '~', '-'])
-            && !target.split('/').any(|segment| segment == "..");
-        return (!inside).then(|| format!("it changes to {target:?}, outside the clone"));
+        return outside_clone(target)
+            .then(|| format!("it changes to {target:?}, outside the clone"));
     }
     if let Some(why) = args.iter().find_map(|word| foreign_address(word, repo)) {
         return Some(why);
     }
     match program {
         "gh" => foreign_gh(args, repo),
+        "git" => foreign_git(args),
         _ => None,
     }
 }
 
-/// The program `part` runs, by its file name, and its arguments: the first word after
-/// variable assignments and the wrappers that run the next word as a command.
+/// The checked program `part` runs, by its file name, and its arguments: the first word
+/// anywhere in the part that names one, so no wrapper or shell keyword before it hides it.
 fn program(part: &[String]) -> Option<(&str, &[String])> {
-    let at = part.iter().position(|w| {
-        !w.contains('=') && !matches!(w.as_str(), "sudo" | "env" | "command" | "exec" | "nohup")
-    })?;
-    let name = part[at].rsplit('/').next().unwrap_or_default();
-    Some((name, &part[at + 1..]))
+    const CHECKED: [&str; 5] = ["gh", "git", "curl", "wget", "cd"];
+    part.iter().enumerate().find_map(|(at, word)| {
+        let name = word
+            .rsplit('/')
+            .next()
+            .expect("rsplit yields at least one piece");
+        CHECKED.contains(&name).then(|| (name, &part[at + 1..]))
+    })
+}
+
+/// Whether the folder `target` may be outside the clone: empty, absolute, from home, an
+/// option, or with a `..` segment.
+fn outside_clone(target: &str) -> bool {
+    target.is_empty()
+        || target.starts_with(['/', '~', '-'])
+        || target.split('/').any(|segment| segment == "..")
+}
+
+/// Why the `git` call with `args` may work outside the clone: `-C`, `--git-dir` and
+/// `--work-tree` must name a folder inside it ([`outside_clone`]).
+fn foreign_git(args: &[String]) -> Option<String> {
+    args.iter().enumerate().find_map(|(i, arg)| {
+        let value = match arg.as_str() {
+            "-C" | "--git-dir" | "--work-tree" => args.get(i + 1).map_or("", String::as_str),
+            _ => arg
+                .strip_prefix("--git-dir=")
+                .or_else(|| arg.strip_prefix("--work-tree="))?,
+        };
+        outside_clone(value).then(|| format!("it runs git in {value:?}, outside the clone"))
+    })
 }
 
 /// Why the GitHub addresses in `word` may not be `repo`'s.
@@ -124,6 +155,12 @@ fn foreign_address(word: &str, repo: &str) -> Option<String> {
                 .err()
                 .map(|why| format!("it calls the API at {why}"));
         }
+        // git and curl remove dot segments before the request: `o/r/../../x/y` reaches x/y.
+        if path.contains('%') || path.split(['/', '?']).any(|s| s == ".." || s == ".") {
+            return Some(format!(
+                "it names github.com/{path}, which may lead elsewhere"
+            ));
+        }
         let named = path
             .split(['/', '?', '#'])
             .take(2)
@@ -134,8 +171,9 @@ fn foreign_address(word: &str, repo: &str) -> Option<String> {
     })
 }
 
-/// Checks that the API `path` is under `repos/<repo>`, with a leading `/` allowed, and holds
-/// no `..` segment or `%` escape that could move it elsewhere; the error names the path.
+/// Checks that the API `path` is under `repos/<repo>`, with a leading `/` allowed, holds no
+/// `..` segment or `%` escape that could move it elsewhere, and is not `forks` or `generate`,
+/// which make another repository; the error names the path.
 fn under_repo(path: &str, repo: &str) -> Result<(), String> {
     let path = path.strip_prefix('/').unwrap_or(path);
     let prefix = format!("repos/{repo}");
@@ -143,8 +181,12 @@ fn under_repo(path: &str, repo: &str) -> Result<(), String> {
         .get(..prefix.len())
         .is_some_and(|p| p.eq_ignore_ascii_case(&prefix))
         && matches!(path.as_bytes().get(prefix.len()), None | Some(b'/' | b'?'));
-    let moves = path.contains('%') || path.split(['/', '?']).any(|s| s == ".." || s == ".");
-    if under && !moves {
+    let segments = || path.split(['/', '?']);
+    let moves = path.contains('%') || segments().any(|s| s == ".." || s == ".");
+    let creates = segments()
+        .nth(3)
+        .is_some_and(|s| s.eq_ignore_ascii_case("forks") || s.eq_ignore_ascii_case("generate"));
+    if under && !moves && !creates {
         Ok(())
     } else {
         Err(format!("{path}, not under {prefix}"))
@@ -154,7 +196,7 @@ fn under_repo(path: &str, repo: &str) -> Result<(), String> {
 /// Why the `gh` call with `args` may address another repository.
 fn foreign_gh(args: &[String], repo: &str) -> Option<String> {
     if let Some(flag) = args.iter().find(|a| {
-        let name = a.split('=').next().unwrap_or_default();
+        let name = a.split_once('=').map_or(a.as_str(), |(name, _)| name);
         matches!(name, "--hostname" | "--org" | "-o" | "--owner")
     }) {
         return Some(format!("it runs gh with {flag}"));
@@ -391,14 +433,15 @@ fn default_branch_of(gh: &str, repo: &str) -> Result<String, String> {
         .ok_or_else(|| format!("GitHub named no default branch of {repo}"))
 }
 
-/// Whether the fix with `commands` only changes settings: every command is one `gh api` call,
-/// which opens no pull request. A fix without commands is done by its steps, on files.
+/// Whether the fix with `commands` only changes settings: every command is one `gh` call
+/// other than `gh pr` (`gh api`, `gh secret`, `gh workflow disable`, ...), which opens no pull
+/// request. A fix without commands is done by its steps, on files.
 pub(super) fn settings_only(commands: &[String]) -> bool {
     !commands.is_empty()
         && commands.iter().all(|command| {
             matches!(shell_parts(command).as_slice(), [part]
             if program(part).is_some_and(|(program, args)| {
-                program == "gh" && args.first().is_some_and(|a| a == "api")
+                program == "gh" && args.first().is_some_and(|a| a != "pr")
             }))
         })
 }
@@ -529,6 +572,31 @@ mod tests {
             ("echo x | /usr/local/bin/gh api user", "not under repos/o/r"),
             ("\\gh api user", "not under repos/o/r"),
             ("gh repo delete x/y --yes", "gh repo, which"),
+            ("sudo -u root gh repo delete x/y --yes", "gh repo, which"),
+            ("env -i gh api -X DELETE repos/x/y", "not under repos/o/r"),
+            ("time gh api -X DELETE repos/x/y", "not under repos/o/r"),
+            ("{ gh repo delete x/y --yes; }", "gh repo, which"),
+            ("! gh repo delete x/y --yes", "gh repo, which"),
+            (
+                "if true; then gh repo delete x/y --yes; fi",
+                "gh repo, which",
+            ),
+            ("echo `gh repo delete x/y --yes`", "cannot be checked"),
+            ("sh -c 'gh repo delete x/y --yes'", "gh repo, which"),
+            ("eval 'gh api -X DELETE repos/x/y'", "not under repos/o/r"),
+            ("git -C /Users/me/other push --force", "outside the clone"),
+            ("git --git-dir=../other/.git push", "outside the clone"),
+            ("GIT_DIR=/tmp/x/.git git push", "it sets GIT_DIR"),
+            (
+                "GIT_CONFIG_COUNT=0 git commit -m x",
+                "it sets GIT_CONFIG_COUNT",
+            ),
+            (
+                "git push https://github.com/o/r/../../x/y.git",
+                "may lead elsewhere",
+            ),
+            ("gh api -X POST repos/o/r/forks", "not under repos/o/r"),
+            ("gh api -X POST repos/o/r/generate", "not under repos/o/r"),
             ("gh extension install x/y", "gh extension, which"),
             ("gh alias set z 'api orgs/acme/members'", "gh alias, which"),
             ("gh auth token", "gh auth, which"),
@@ -542,16 +610,44 @@ mod tests {
     }
 
     #[test]
-    fn only_gh_api_calls_are_a_settings_fix() {
+    fn only_gh_calls_without_a_pull_request_are_a_settings_fix() {
         let fix = |commands: &[&str]| {
             settings_only(&commands.iter().map(|&c| c.to_owned()).collect::<Vec<_>>())
         };
         assert!(fix(&["gh api -X PUT repos/o/r/vulnerability-alerts"]));
-        assert!(fix(&["gh api repos/o/r -f a=b", "sudo gh api repos/o/r/x"]));
+        assert!(fix(&[
+            "gh api repos/o/r -f a=b",
+            "sudo -E gh api repos/o/r/x"
+        ]));
+        assert!(fix(&[
+            "gh secret delete T -R o/r",
+            "gh workflow disable ci.yml -R o/r"
+        ]));
         assert!(!fix(&[]), "a fix done by its steps changes files");
         assert!(!fix(&["npm install lodash@4.17.21"]));
         assert!(!fix(&["gh api repos/o/r && npm install x"]), "two parts");
-        assert!(!fix(&["gh secret delete T -R o/r"]));
+        assert!(
+            !fix(&["gh pr create -R o/r"]),
+            "a pull request is a change to files"
+        );
+    }
+
+    proptest::proptest! {
+        /// Whatever wrapper or shell keyword comes first, a `gh` that deletes another
+        /// repository is found.
+        #[test]
+        fn no_prefix_hides_a_checked_program(
+            prefix in proptest::collection::vec(
+                proptest::sample::select(vec![
+                    "sudo", "-u", "root", "env", "-i", "time", "nohup", "{", "!", "if", "then",
+                    "exec", "command", "nice", "-n", "5", "xargs", "A=b",
+                ]),
+                0..6,
+            )
+        ) {
+            let command = format!("{} gh repo delete x/y --yes", prefix.join(" "));
+            proptest::prop_assert!(foreign_command(&command, "o/r").is_some(), "{}", command);
+        }
     }
 
     #[test]

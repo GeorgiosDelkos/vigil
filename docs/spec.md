@@ -367,18 +367,22 @@ use ssh.
   unseen. A fix prompt without `{{access}}`, where the "Where to work" rules go, is refused.
 - A repository fix whose commands may address another repository is refused before asking
   (decided 2026-11-12). The rule is an allow-list and conservative; commands are split into
-  words and parts as a shell splits them, nothing is expanded. No `GH_*` or `GITHUB_*`
-  variable is set. In a `gh`, `git`, `curl`, `wget` or `cd` part no word holds `$` or a
-  backquote. In a `gh`, `git`, `curl` or `wget` part every GitHub address
-  (`github.com/<owner>/<name>`, `github.com:<owner>/<name>`, any case) names this repository,
-  and every `api.github.com` address is under `/repos/<this repository>` with no `..` or `%`.
+  words and parts as a shell splits them, nothing is expanded. No `GH_*`, `GITHUB_*` or
+  `GIT_*` variable is set, no word holds `$` or a backquote, and a word with spaces (which
+  `sh -c` or `eval` could run) passes the rule itself. `gh`, `git`, `curl`, `wget` and `cd`
+  are found anywhere in a part, so no wrapper or shell keyword hides them. In their parts
+  every GitHub address (`github.com/<owner>/<name>`, `github.com:<owner>/<name>`, any case)
+  names this repository with no `..` or `%` after it, and every `api.github.com` address is
+  under `/repos/<this repository>` with no `..` or `%`, and not `forks` or `generate`.
   `gh` runs only `api`, `secret`, `variable`, `workflow`, `pr`, `issue`, `label`, `release`
   or `repo edit`, never with `--hostname`, `--org`, `-o` or `--owner`; `gh api` calls one
   path under `repos/<this repository>`; every other subcommand names the repository with
   `--repo` (or `gh repo edit <repo>`), as `gh` otherwise takes it from the folder it runs in.
-  `cd` goes only to a relative folder with no `..`. Other programs are not checked:
-  `go get github.com/<module>` names a module, not a repository to change. A fix it refuses
-  wrongly is for the user to run by hand.
+  `cd`, and `git -C`, `--git-dir` and `--work-tree`, go only to a relative folder with no
+  `..`. Other programs are not checked: `go get github.com/<module>` names a module, not a
+  repository to change. A fix it refuses wrongly (a package named `gh`, say) is for the user
+  to run by hand. A settings fix, which needs no pull request, is one whose every command is
+  a `gh` call other than `gh pr`.
 - A finding key is a 64-bit hash over every target, so two targets could share one (a crafted
   lockfile path in a repository). Looking a key up for a fix or a dismissal fails, naming both
   reports, when the newest report of another target also has it.
@@ -413,8 +417,9 @@ use ssh.
   data. Before the run the app reads the default branch and its head with `gh`; after it, the
   default branch must be the same branch with the same head, a reported pull request must be
   open from the run's branch of this repository into it, and a fix reported `fixed` must name
-  one unless every confirmed command is a `gh api` call (a settings fix). Otherwise the run is
-  recorded `unknown`, with why and what the agent reported. Accepted risk: the full-access
+  one unless every confirmed command is a `gh` call other than `gh pr` (a settings fix).
+  Otherwise the run is recorded `unknown`, with why and what the agent reported. Accepted
+  risk: the full-access
   agent still reads the clone, could unset those variables, and could push to other branches
   or tags, which are not checked; the check sees the end state, not each push, so a push to
   the default branch undone before the agent exits is not seen; the repositories are the user's own, and the agent's

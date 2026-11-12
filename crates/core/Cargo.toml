@@ -11,6 +11,9 @@ publish = false
 [dependencies]
 # std: date and timestamp parsing. serde: `Timestamp` fields in feed records and caches.
 jiff = { version = "0.2.39", default-features = false, features = ["serde", "std"] }
+# O_NONBLOCK and O_NOFOLLOW, which std does not export, to open files an agent wrote without
+# following a link or blocking on a FIFO. Already in the tree through many crates.
+libc = "0.2.191"
 # derive: config, feed and cache types. std: `PathBuf` and `String` impls.
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
 # raw_value: advisory records kept byte-for-byte as served, for the agent.
@@ -18,9 +21,6 @@ serde_json = { version = "1.0.154", default-features = false, features = ["std",
 # Stores the NVD key in the Keychain without putting it on a command line. Already in the
 # tree through native-tls.
 thiserror = "2.0.21"
-# O_NONBLOCK and O_NOFOLLOW, which std does not export, to open files the fix agent wrote
-# without following a link or blocking on a FIFO. Already in the tree through many crates.
-libc = "0.2.191"
 # parse + serde: `toml::from_str` into the `Raw*` config types.
 toml = { version = "1.2.0", default-features = false, features = ["parse", "serde"] }
 # The settings window's edits to config.toml, keeping the user's comments and layout.
