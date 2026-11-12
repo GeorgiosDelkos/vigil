@@ -18,6 +18,8 @@
 //! check, download and install run here, and the UI calls only [`restart_to_update`].
 
 use std::fmt;
+use std::panic;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -31,12 +33,24 @@ use tauri::async_runtime;
 use tauri_plugin_notification::NotificationExt as _;
 use tauri_plugin_updater::Update;
 use tauri_plugin_updater::UpdaterExt as _;
+use vigil_core::error_chain;
 
 use crate::runner;
 use crate::runner::Runner;
 
 /// How often a running app checks for an update: the owner's choice (2026-11-12).
 const CHECK_EVERY: SignedDuration = SignedDuration::from_hours(12);
+
+/// How soon a failed check is tried again: a Mac that launches Vigil at login is often not
+/// online yet, and waiting [`CHECK_EVERY`] after that would miss the launch check. Arbitrary:
+/// often enough to catch the network coming up, rare enough to stay quiet while offline.
+const RETRY_AFTER_FAILURE: SignedDuration = SignedDuration::from_hours(1);
+
+/// How long the check, and separately the download, may take before it fails. Without it the
+/// plugin and reqwest wait forever, and one stalled request (a captive portal, a silent proxy)
+/// would stop every later check, since they run one after another on one thread. Arbitrary:
+/// generous for a package of about 15 MB on a slow link.
+const REQUEST_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// How often the check thread wakes to see whether a check is due. Due is decided on the wall
 /// clock rather than by one long sleep, so time the Mac spends asleep counts toward
@@ -55,13 +69,18 @@ pub(crate) struct Updates {
 }
 
 impl Updates {
-    /// Whether a check is due at `now`: no update waits already, and none has run yet or the
-    /// last ended [`CHECK_EVERY`] ago.
+    /// Whether a check is due at `now`: no update waits already, and none has run yet, or the
+    /// last ended [`CHECK_EVERY`] ago, or [`RETRY_AFTER_FAILURE`] ago when it failed.
     pub(crate) fn due(&self, now: Timestamp) -> bool {
+        let wait = if self.problem.is_some() {
+            RETRY_AFTER_FAILURE
+        } else {
+            CHECK_EVERY
+        };
         self.ready.is_none()
             && self
                 .checked
-                .is_none_or(|last| now.duration_since(last) >= CHECK_EVERY)
+                .is_none_or(|last| now.duration_since(last) >= wait)
     }
 
     /// Records a check that ended at `at` with `found`. Returns the version it made ready, so
@@ -184,7 +203,7 @@ pub(crate) fn schedule(app: AppHandle) {
     }
     thread::spawn(move || {
         loop {
-            if app.state::<Runner>().updates(|u| u.due(Timestamp::now())) {
+            if app.state::<Runner>().update_due(Timestamp::now()) {
                 check(&app);
             }
             thread::sleep(WAKE_EVERY);
@@ -196,7 +215,7 @@ pub(crate) fn schedule(app: AppHandle) {
 fn check(app: &AppHandle) {
     // The network and the download run outside the runner's lock.
     let found = async_runtime::block_on(fetch(app))
-        .map_err(|e| format!("the last update check failed: {e}"));
+        .map_err(|e| format!("the last update check failed: {}", error_chain(&e)));
     if let Err(problem) = &found {
         log(problem);
     }
@@ -218,9 +237,12 @@ fn check(app: &AppHandle) {
 
 /// Asks the endpoint for a newer version, and downloads it when there is one.
 async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<Ready>> {
-    let Some(update) = app.updater()?.check().await? else {
+    let updater = app.updater_builder().timeout(REQUEST_TIMEOUT).build()?;
+    let Some(mut update) = updater.check().await? else {
         return Ok(None);
     };
+    // The plugin does not pass the builder's timeout on to the update it returns.
+    update.timeout = Some(REQUEST_TIMEOUT);
     // `download` checks the signature, and the signed version, before it returns the bytes.
     let package = update.download(|_, _| {}, || {}).await?;
     Ok(Some(Ready { update, package }))
@@ -237,15 +259,25 @@ async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<Ready>> {
 pub(crate) fn restart_to_update(app: AppHandle) -> Result<(), String> {
     let runner = app.state::<Runner>();
     let ready = runner.claim_restart()?;
-    if let Err(e) = ready.update.install(&ready.package) {
+    // A panic would otherwise leave the runner installing for good: no sweep could start and
+    // every exit would wait.
+    let installed = panic::catch_unwind(AssertUnwindSafe(|| {
+        ready
+            .update
+            .install(&ready.package)
+            .map_err(|e| error_chain(&e))
+    }))
+    .unwrap_or_else(|_| Err("the install stopped unexpectedly".to_owned()));
+    if let Err(e) = installed {
         let problem = format!("cannot install Vigil {}: {e}", ready.update.version);
         log(&problem);
         runner.restart_failed(ready, problem.clone());
         runner::changed(&app);
         return Err(problem);
     }
-    // Through the exit request, which `runner::must_wait_to_quit` lets pass: the claim marked
-    // the app as quitting.
+    // Through the exit request, which `runner::must_wait_to_quit` lets pass once `installed`
+    // says the install is done.
+    runner.installed();
     app.request_restart();
     Ok(())
 }
@@ -295,18 +327,23 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_check_counts_as_a_check_and_is_kept_until_one_succeeds() {
+    fn a_failed_check_is_kept_until_one_succeeds_and_retried_after_an_hour() {
         let start = Timestamp::from_second(1_000_000).unwrap();
         let mut updates = Updates::default();
         let ready = updates.record(start, Err("offline".to_owned()));
         assert_eq!(ready, None);
         assert_eq!(updates.problem.as_deref(), Some("offline"));
-        assert!(
-            !updates.due(start + SignedDuration::from_hours(1)),
-            "a failure waits for the next check, like a success"
-        );
-        let later = start + SignedDuration::from_hours(12);
+        assert!(!updates.due(start + SignedDuration::from_mins(59)));
+        let later = start + SignedDuration::from_hours(1);
+        assert!(updates.due(later), "offline at login is retried soon");
         updates.record(later, Ok(None));
-        assert_eq!((updates.checked, updates.problem), (Some(later), None));
+        assert_eq!(
+            (updates.checked, updates.problem.as_deref()),
+            (Some(later), None)
+        );
+        assert!(
+            !updates.due(later + SignedDuration::from_hours(11)),
+            "a success waits the full twelve hours"
+        );
     }
 }

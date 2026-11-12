@@ -82,19 +82,6 @@ jobs:
             exit 1
           fi
 
-      # Tauri reads APPLE_API_KEY as the key id and APPLE_API_KEY_PATH as the .p8 file.
-      - name: Write the App Store Connect key to a runner file
-        env:
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-        run: |
-          key_dir="${RUNNER_TEMP}/private_keys"
-          mkdir -p "${key_dir}"
-          key_path="${key_dir}/AuthKey_${APPLE_API_KEY}.p8"
-          umask 077
-          printf '%s\n' "${APPLE_API_KEY_P8}" > "${key_path}"
-          echo "APPLE_API_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
-
       # rust-toolchain.toml names the exact toolchain, which rustup installs with no argument.
       # No build cache in this workflow, for pnpm or cargo: an entry another run wrote must not
       # reach a signed app.
@@ -130,6 +117,21 @@ jobs:
       - name: pnpm install --frozen-lockfile
         working-directory: app/ui
         run: pnpm install --frozen-lockfile
+
+      # Tauri reads APPLE_API_KEY as the key id and APPLE_API_KEY_PATH as the .p8 file. Written
+      # after the dependency installs and removed after notarization, so the steps without a
+      # use for it never find it on disk.
+      - name: Write the App Store Connect key to a runner file
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          key_dir="${RUNNER_TEMP}/private_keys"
+          mkdir -p "${key_dir}"
+          key_path="${key_dir}/AuthKey_${APPLE_API_KEY}.p8"
+          umask 077
+          printf '%s\n' "${APPLE_API_KEY_P8}" > "${key_path}"
+          echo "APPLE_API_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
 
       # The official Tauri action. tauriScript is the CLI pnpm installed from app/ui's lockfile:
       # without it the action runs `npm install -g @tauri-apps/cli@v2`, an unpinned CLI that
@@ -249,6 +251,10 @@ jobs:
             gh release upload "${RELEASE_TAG}" "${dmg}" --repo "${GITHUB_REPOSITORY}" --clobber
           fi
 
+      - name: Remove the App Store Connect key file
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/private_keys"
+
       # The updater installs only a package whose signature verifies with the public key in
       # tauri.conf.json and names the version announced (requireSignedVersion). Prove both here
       # with the same verifier, so a mismatched TAURI_SIGNING_PRIVATE_KEY fails this run instead
@@ -265,19 +271,39 @@ jobs:
           echo "trusted comment: ${comment}"
           version="$(cargo metadata --locked --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "vigil-app") | .version')"
-          case "${comment}" in
-            *"version:${version}"*) ;;
-            *) echo "::error::the signature does not name version ${version}"; exit 1 ;;
-          esac
+          # The trusted comment's fields are tab separated ("timestamp:... file:... version:..."):
+          # compare the whole field, so 0.1.1 does not match a signature of 0.1.10.
+          printf '%s\n' "${comment}" | tr '\t' '\n' | grep -Fqx "version:${version}" \
+            || { echo "::error::the signature does not name version ${version}"; exit 1; }
 
       - name: Publish the release
         if: env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
-            --json assets --jq '.assets[].name' > release-assets.txt
-          cat release-assets.txt
-          grep -Fqx latest.json release-assets.txt \
-            || { echo "::error::the draft for ${RELEASE_TAG} has no latest.json"; exit 1; }
-          gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false --latest
+          set -euo pipefail
+          # What installed apps will read: the draft's latest.json must announce this version,
+          # with the signature checked above under the keys the updater looks up.
+          feed="${RUNNER_TEMP}/feed"
+          mkdir -p "${feed}"
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern latest.json --dir "${feed}"
+          signature="$(cat "${BUNDLE}/macos/Vigil.app.tar.gz.sig")"
+          jq -e --arg v "${RELEASE_TAG#v}" --arg s "${signature}" '
+            .version == $v and all(
+              .platforms["darwin-aarch64-app", "darwin-x86_64-app", "darwin-aarch64",
+                "darwin-x86_64"];
+              .signature == $s and (.url | startswith("https://")))
+          ' "${feed}/latest.json" > /dev/null \
+            || { echo "::error::the draft's latest.json does not match this build"; exit 1; }
+
+          # The updater reads releases/latest, so only a version above the current latest may
+          # take its place; a re-run of an older tag publishes without moving it back.
+          current="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName \
+            --jq .tagName 2> /dev/null || true)"
+          newest="$(printf '%s\n%s\n' "${current#v}" "${RELEASE_TAG#v}" | sort -V | tail -n 1)"
+          latest=--latest=false
+          if [ -z "${current}" ] || [ "${newest}" = "${RELEASE_TAG#v}" ]; then
+            latest=--latest
+          fi
+          gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false "${latest}"

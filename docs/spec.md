@@ -914,15 +914,19 @@ The owner's decisions, and why:
   announces, so an older signed release cannot be passed off as a newer one (nothing was
   released before, so no old signature lacks the version).
 - **When:** at launch and every 12 hours while the app runs, measured on the wall clock (the
-  check thread wakes every 10 minutes), so time asleep counts. A failed check waits for the
-  next one.
+  check thread wakes every 10 minutes), so time asleep counts. A failed check is retried after
+  an hour (a Mac launching Vigil at login is often not online yet). The check and the download
+  each time out after 5 minutes: the plugin sets no timeout by default, and one stalled request
+  would stop every later check.
 - **Download in the background, install on the user's click.** A newer version is downloaded
   and verified at once, then waits in memory. The popover shows "Update ready: Vigil x.y.z" with
   Restart to update, and one notification says so. The click installs it (the plugin replaces
   the bundle on disk) and restarts. It never installs or restarts while a sweep or fix runs: the
   button waits, and Rust refuses it under the runner's lock in the same step that checks its
-  status, then marks the app as quitting so nothing new starts during the install. An install
-  that fails keeps the update waiting.
+  status, then marks it installing: nothing new starts, no check runs, and an exit request (a
+  Cmd-Q, a logout) waits, so no exit lands between the plugin moving the old app out and the
+  new one in. Only then does the restart's exit pass. An install that fails keeps the update
+  waiting. A Quit clicked during the install is dropped (accepted: it lasts a moment).
 - **Failures are quiet.** Offline, GitHub down or a bad signature leave one line under Settings
   ("the last update check failed: ...") and one on stderr. They never set the runner's failed
   status, so no banner, no tray change, and never a held-up sweep.

@@ -376,8 +376,8 @@ and the app take it from there.
 
 `release.yml` then checks that the tag is `v` plus that version, builds a universal app, signs
 it with the Developer ID, notarizes it and the `.dmg`, signs the updater package with the updater
-key, verifies all of it, and publishes the GitHub Release with the `.dmg`, `Vigil.app.tar.gz`,
-its `.sig` and `latest.json`. Installed apps find the new version within 12 hours. Running the
+key, verifies all of it, and publishes the GitHub Release with the `.dmg`, the updater package
+(`Vigil_<version>_universal.app.tar.gz`), its `.sig` and `latest.json`. Installed apps find the new version within 12 hours. Running the
 workflow by hand (workflow_dispatch) is a dry run: the same build, signing and checks, with no
 release.
 

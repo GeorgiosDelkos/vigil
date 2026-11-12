@@ -1,12 +1,22 @@
-import { Show } from "solid-js";
+import { Show, createSignal } from "solid-js";
 
 import type { UpdateView } from "./overview.ts";
 import { ago } from "./time.ts";
 
 /** The popover's line once an update is downloaded and verified. The button waits while a sweep
  * or fix runs, and Rust refuses it then too: an update never installs during a run, and only
- * this click restarts the app (the owner's decision, 2026-11-12). */
-export function UpdateReady(props: { version: string; busy: boolean; onRestart: () => void }) {
+ * this click restarts the app (the owner's decision, 2026-11-12). After the click it stays off
+ * while the update installs, and comes back only if Rust refuses or the install fails. */
+export function UpdateReady(props: {
+  version: string;
+  busy: boolean;
+  onRestart: () => Promise<unknown>;
+}) {
+  const [installing, setInstalling] = createSignal(false);
+  const restart = () => {
+    setInstalling(true);
+    props.onRestart().catch(() => setInstalling(false));
+  };
   return (
     <div class="banner good update">
       <span>
@@ -16,10 +26,10 @@ export function UpdateReady(props: { version: string; busy: boolean; onRestart: 
       <button
         type="button"
         class="btn small primary x"
-        disabled={props.busy}
-        onClick={() => props.onRestart()}
+        disabled={props.busy || installing()}
+        onClick={restart}
       >
-        Restart to update
+        {installing() ? "Installing…" : "Restart to update"}
       </button>
     </div>
   );

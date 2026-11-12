@@ -1,8 +1,9 @@
 //! Runs sweeps off the UI thread, one at a time, and on the configured schedule.
 //!
 //! [`Runner`] holds the one piece of shared state behind a single lock: the status, when the
-//! app last started a sweep, and the update state (`crate::update`). [`start`] takes it to check and claim the sweeping state in
-//! one step, so two clicks, or a click and the schedule, cannot start two sweeps. The core's
+//! app last started a sweep, and the update state (`crate::update`). [`start`] takes it to
+//! check and claim the sweeping state in one step, so two clicks, or a click and the schedule,
+//! cannot start two sweeps. The core's
 //! own lock on the sweeps folder still guards against a sweep from the CLI; that one surfaces
 //! as a failed sweep.
 //!
@@ -103,6 +104,11 @@ enum Quit {
     No,
     /// It is waiting for the sweep or fix to end; nothing new starts, and only this wait exits.
     Waiting,
+    /// An update is being installed ([`Runner::claim_restart`]): nothing new starts, no update
+    /// check runs, and an exit request waits, since the install may be between moving the old
+    /// app out and the new one in. A quit asked for meanwhile is dropped (accepted: the app
+    /// restarts in a moment, or the install fails and the user can quit again).
+    Installing,
     /// It may exit now.
     Ready,
 }
@@ -186,7 +192,7 @@ impl Status {
 fn must_wait(quit: Quit, status: &Status) -> bool {
     match quit {
         Quit::No => status.is_busy(),
-        Quit::Waiting => true,
+        Quit::Waiting | Quit::Installing => true,
         Quit::Ready => false,
     }
 }
@@ -262,9 +268,16 @@ impl Runner {
         f(&mut self.lock().updates)
     }
 
+    /// Whether an update check is due at `now`: never while an update installs or the app
+    /// quits, when the waiting update is out of [`Updates`] and a check would fetch it again.
+    pub(crate) fn update_due(&self, now: Timestamp) -> bool {
+        let shared = self.lock();
+        shared.quit == Quit::No && shared.updates.due(now)
+    }
+
     /// Takes the waiting update to install it, unless a sweep or fix runs or the app is
-    /// quitting, and marks the app as quitting, so nothing new starts while it installs and
-    /// restarts: one check and one write under one lock.
+    /// quitting, and marks it installing ([`Quit::Installing`]), so nothing new starts and no
+    /// exit cuts the install short: one check and one write under one lock.
     pub(crate) fn claim_restart(&self) -> Result<Ready, &'static str> {
         let mut shared = self.lock();
         if shared.quit != Quit::No {
@@ -274,8 +287,13 @@ impl Runner {
             return Err("a sweep or fix is running; restart once it ends");
         }
         let ready = shared.updates.take_ready().ok_or("no update is ready")?;
-        shared.quit = Quit::Ready;
+        shared.quit = Quit::Installing;
         Ok(ready)
+    }
+
+    /// Lets the exit that restarts into the installed update pass ([`must_wait_to_quit`]).
+    pub(crate) fn installed(&self) {
+        self.lock().quit = Quit::Ready;
     }
 
     /// Undoes [`Self::claim_restart`] after the install failed with `problem`: the update waits
@@ -1049,6 +1067,29 @@ mod tests {
         runner.set(Status::Idle);
         runner.lock().quit = Quit::Waiting;
         assert_eq!(runner.claim_restart().unwrap_err(), "the app is quitting");
+    }
+
+    #[test]
+    fn while_an_update_installs_nothing_starts_no_check_runs_and_exits_wait() {
+        let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
+        let now = Timestamp::UNIX_EPOCH;
+        assert!(runner.update_due(now), "no check has run yet");
+        runner.lock().quit = Quit::Installing;
+        assert!(
+            !runner.update_due(now),
+            "the taken update would be fetched again"
+        );
+        assert_eq!(runner.claim(fixing()).unwrap_err(), "the app is quitting");
+        assert_eq!(runner.claim_restart().unwrap_err(), "the app is quitting");
+        assert!(
+            must_wait(Quit::Installing, &Status::Idle),
+            "an exit could cut the install short"
+        );
+        runner.installed();
+        assert!(
+            !must_wait(runner.lock().quit, &Status::Idle),
+            "the restart exits"
+        );
     }
 
     #[test]

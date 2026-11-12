@@ -1960,6 +1960,8 @@ describe("an update", () => {
     expect(invoke).not.toHaveBeenCalledWith("restart_to_update");
     fireEvent.click(restart);
     expect(invoke).toHaveBeenCalledWith("restart_to_update");
+    expect(restart.textContent).toBe("Installing…");
+    expect((restart as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("shows Rust's reason when the install is refused", async () => {
@@ -1972,6 +1974,8 @@ describe("an update", () => {
     render(() => <App />);
     fireEvent.click(await screen.findByRole("button", { name: "Restart to update" }));
     expect(await screen.findByText(/cannot install Vigil 0\.2\.0/)).toBeTruthy();
+    const again = await screen.findByRole("button", { name: "Restart to update" });
+    expect((again as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("offers no restart while none is ready", async () => {

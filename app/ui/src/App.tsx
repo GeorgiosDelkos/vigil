@@ -177,7 +177,13 @@ export function App() {
           <UpdateReady
             version={version()}
             busy={overview()?.busy ?? false}
-            onRestart={() => run(() => invoke("restart_to_update"))}
+            onRestart={() => {
+              setError(null);
+              return invoke("restart_to_update").catch((e: unknown) => {
+                setError(String(e));
+                throw e;
+              });
+            }}
           />
         )}
       </Show>
