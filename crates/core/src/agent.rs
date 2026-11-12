@@ -29,6 +29,7 @@ use std::fs;
 use std::io;
 use std::io::Read as _;
 use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -73,6 +74,16 @@ const CREDENTIAL_PATHS: &[&str] = &[
     ".config/gcloud",
     ".azure",
     ".env*",
+    // Tokens kept by git, cargo and the agents themselves (each CLI reads its own login, not
+    // through these tools).
+    ".git-credentials",
+    ".config/git/credentials",
+    ".cargo/credentials",
+    ".cargo/credentials.toml",
+    ".codex/auth.json",
+    ".grok/auth.json",
+    ".gemini/oauth_creds.json",
+    ".local/share/opencode/auth.json",
 ];
 
 /// Each [`CREDENTIAL_PATHS`] entry in any folder, after `anywhere`, and everything under it,
@@ -667,9 +678,15 @@ const LOG_HEAD: u64 = 4096;
 
 /// The first [`LOG_HEAD`] bytes of `log`, or none when it cannot be read: the log was just
 /// written, and an unreadable one only means the start failure is reported as the exit status.
+/// A fix runs in the folder that holds its log, so the agent can leave a FIFO or a link there:
+/// the log is opened without following a link and without waiting for a writer.
 fn log_head(log: &Path) -> Vec<u8> {
     let mut head = Vec::new();
-    let read = fs::File::open(log).and_then(|file| file.take(LOG_HEAD).read_to_end(&mut head));
+    let read = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(log)
+        .and_then(|file| file.take(LOG_HEAD).read_to_end(&mut head));
     if read.is_err() {
         head.clear();
     }
@@ -1163,7 +1180,11 @@ mod tests {
         let pattern = rules[2]["argsPattern"].as_str().unwrap();
         assert!(pattern.starts_with(r#"["/](?:\.ssh|\.aws|"#), "{pattern}");
         assert!(pattern.contains(r"|Library/Keychains|"), "{pattern}");
-        assert!(pattern.ends_with(r"|\.env)"), "{pattern}");
+        assert!(pattern.contains(r"|\.env|\.git-credentials|"), "{pattern}");
+        assert!(
+            pattern.ends_with(r"|\.local/share/opencode/auth\.json)"),
+            "{pattern}"
+        );
         for rule in rules {
             assert_eq!(rule["decision"].as_str(), Some("deny"));
         }
@@ -1273,5 +1294,19 @@ mod tests {
         fs::write(&log, "short").unwrap();
         assert_eq!(log_head(&log), b"short");
         assert_eq!(log_head(&tmp.path().join("missing")), b"");
+
+        // A FIFO left in place of the log is read without waiting, a link not at all.
+        let fifo = tmp.path().join("fifo.log");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert_eq!(log_head(&fifo), b"");
+        let link = tmp.path().join("link.log");
+        std::os::unix::fs::symlink(&log, &link).unwrap();
+        assert_eq!(log_head(&link), b"");
     }
 }

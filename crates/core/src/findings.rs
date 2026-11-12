@@ -452,8 +452,8 @@ fn check_text(at: &str, evidence: &str, explanation: &str, fix: &Fix, problems: 
     check_fix(&format!("{at}.fix"), fix, problems);
 }
 
-/// Checks text that may span lines: not empty, at most `limit` bytes, and see
-/// [`check_line`].
+/// Checks text that may span lines: not empty, without control or invisible characters other
+/// than line breaks, and see [`check_length_and_addresses`].
 fn check_prose(at: &str, value: &str, limit: usize, problems: &mut Vec<String>) {
     if value.trim().is_empty() {
         problems.push(format!("{at} is empty"));

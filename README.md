@@ -132,7 +132,7 @@ acts on what it reads. Vigil is built around that.
 
 | | Sweeps | Fixes |
 |---|---|---|
-| **Agent permissions** | Restricted through each agent's own controls (see [Supported agents](#supported-agents)): reading is allowed except credential files, writing is limited to the bundle folder, and there is no shell (Codex: only inside its sandbox), web, MCP or subagent tool | Full access, and only after you confirm that specific fix |
+| **Agent permissions** | Restricted through each agent's own controls (see [Supported agents](#supported-agents)): reading is allowed except credential files (Codex cannot deny them, but has no network), writing is limited to the bundle folder, and there is no shell (Codex: only inside its sandbox), web, MCP or subagent tool | Full access, and only after you confirm that specific fix |
 | **Network** | No path out of the sweep run itself, apart from its own model provider. What the agent writes in `findings.json` is shown to you, and reaches a fix run only after you confirm that fix | As the agent needs |
 | **Your agent settings** | Not applied where they could grant more: Claude Code loads none of your settings files, Codex not your `config.toml`, opencode not your plugins, Grok not Claude Code's or Cursor's hooks, MCP servers and skills, Gemini CLI no extensions | Applied |
 | **Environment** | Only what a login needs and the agent's own variables (`ANTHROPIC_*` for Claude Code, `OPENAI_*` for Codex, ...); an SSH agent socket or another provider's token is removed | Inherited |
@@ -294,9 +294,10 @@ numbers only for a server's OS packages, where the distribution's own version ru
 | [opencode](https://opencode.ai) | `opencode` | Its own sweep agent, denied by default: reads (credentials denied), finds and lists files, writes `findings.json`; no grep, shell, web, subagent or MCP tools; no plugins | Full access after confirmation, except what your own opencode config denies |
 
 Credentials denied means `.ssh`, `.aws`, `.config/gh`, `.gnupg`, `.netrc`, `.npmrc`, `.pypirc`,
-`.docker/config.json`, `.kube`, `Library/Keychains`, `.config/gcloud`, `.azure` and `.env*`
-files, in any folder, so other spellings of your home folder are covered too; another letter
-case of the same name (`~/.SSH`) is not, since the agents' rules do not fold case. Because
+`.docker/config.json`, `.kube`, `Library/Keychains`, `.config/gcloud`, `.azure`, `.env*` files,
+and the token files of git, cargo and the agents (`.git-credentials`, `.codex/auth.json`, ...),
+in any folder, so other spellings of your home folder are covered too; another letter case of
+the same name (`~/.SSH`) is not, since the agents' rules do not fold case. Because
 Claude Code and Codex sweeps skip your own settings files, a provider set up only there (an
 `env` block for Bedrock in `~/.claude/settings.json`, a `model_provider` in
 `~/.codex/config.toml`) is not used during sweeps; a login, an API key in the environment, and

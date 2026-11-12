@@ -465,7 +465,8 @@ and command rules under "Bundle and findings". Concretely:
   tools denied), and Grok its own `~/.grok` hooks; both are code the user installed.
 - Credential paths denied (one list, `CREDENTIAL_PATHS` in `agent.rs`): `.ssh`, `.aws`,
   `.config/gh`, `.gnupg`, `.netrc`, `.npmrc`, `.pypirc`, `.docker/config.json`, `.kube`,
-  `Library/Keychains`, `.config/gcloud`, `.azure` and `.env*`, in any folder: the home folder
+  `Library/Keychains`, `.config/gcloud`, `.azure`, `.env*`, and the token files of git, cargo
+  and the agents (`.git-credentials`, `.codex/auth.json`, ...), in any folder: the home folder
   has other spellings (`/System/Volumes/Data/Users/<name>`) that a rule anchored at `~/` would
   miss. Not covered: another letter case (`~/.SSH`), which APFS accepts and no CLI's rules fold.
   Gemini CLI gets them as a policy rule over each tool call's arguments; Codex cannot deny reads
