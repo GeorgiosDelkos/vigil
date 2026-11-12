@@ -71,6 +71,7 @@ use crate::paths::DataDir;
 use crate::paths::DataDirError;
 use crate::prompts;
 use crate::prompts::Prompt;
+use crate::retention;
 use crate::server;
 
 /// How often [`Lock::acquire`] tries, and how long it waits between tries. Arbitrary: 100 ms in
@@ -645,6 +646,21 @@ impl Shared<'_> {
         self.sweep_target(sweep_dir, collected, progress)
     }
 
+    /// Saves `report` in `dir` (see [`save_report`]) and, once it is written, removes the
+    /// target's older sweeps (see [`retention::remove_older`]): the comparison with the last
+    /// sweep has been made. A failure to remove them is a problem in the returned report only,
+    /// as the saved one is already written; the next sweep of the target removes them.
+    fn save(&self, dir: &Path, report: &mut Report) {
+        if save_report(dir, report)
+            && let Err(e) = retention::remove_older(&self.data_dir.sweeps_dir(), dir)
+        {
+            report.problems.push(format!(
+                "removing the target's older sweeps: {}",
+                error_chain(&e)
+            ));
+        }
+    }
+
     /// Saves the report of a target that could not be collected: the reason, and no agent run.
     fn uncollected(
         &self,
@@ -659,7 +675,7 @@ impl Shared<'_> {
         })?;
         let mut report = Report::new(started, target, self.agent, dir.to_owned());
         report.failure = Some(plain(&error_chain(error)));
-        save_report(dir, &mut report);
+        self.save(dir, &mut report);
         Ok(report)
     }
 
@@ -753,7 +769,7 @@ impl Shared<'_> {
         report.first_verdict = first_verdict;
         report.problems = problems.iter().map(|p| plain(p)).collect();
         report.failure = failure;
-        save_report(&dir, &mut report);
+        self.save(&dir, &mut report);
         Ok(report)
     }
 
@@ -1201,12 +1217,17 @@ fn target_name(inventory: &Inventory) -> String {
 }
 
 /// Writes the report files, or notes in the report why they could not be written: the verdict
-/// is worth more than its files, so a report that cannot be saved is still returned.
-fn save_report(dir: &Path, report: &mut Report) {
-    if let Err(e) = write_report(dir, report) {
-        report
-            .problems
-            .push(format!("report files: {}", error_chain(&e)));
+/// is worth more than its files, so a report that cannot be saved is still returned. Returns
+/// whether they were written.
+fn save_report(dir: &Path, report: &mut Report) -> bool {
+    match write_report(dir, report) {
+        Ok(()) => true,
+        Err(e) => {
+            report
+                .problems
+                .push(format!("report files: {}", error_chain(&e)));
+            false
+        }
     }
 }
 

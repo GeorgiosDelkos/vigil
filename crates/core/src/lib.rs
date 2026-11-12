@@ -26,6 +26,7 @@ mod package;
 mod paths;
 mod popover;
 mod prompts;
+mod retention;
 mod server;
 mod settings;
 mod settings_view;
