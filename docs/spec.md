@@ -367,10 +367,12 @@ use ssh.
   unseen. A fix prompt without `{{access}}`, where the "Where to work" rules go, is refused.
 - A repository fix whose commands may address another repository is refused before asking
   (decided 2026-11-12). The rule is an allow-list and conservative; commands are split into
-  words and parts as a shell splits them, nothing is expanded. No `GH_*`, `GITHUB_*` or
-  `GIT_*` variable is set, no word holds `$` or a backquote, and a word with spaces (which
-  `sh -c` or `eval` could run) passes the rule itself. `gh`, `git`, `curl`, `wget` and `cd`
-  are found anywhere in a part, so no wrapper or shell keyword hides them. In their parts
+  words and parts as a shell splits them, nothing is expanded. No word names a `GH_*`,
+  `GITHUB_*` or `GIT_*` variable, holds a character the shell expands (`$`, a backquote, a
+  glob or brace character), or is a shell (`sh`, `bash`, `eval`, `source`, ...), and a word
+  with spaces passes the rule itself. Every word naming `gh`, `git`, `curl`, `wget`, `cd` or
+  `pushd` is checked as a call with the words after it, so no wrapper, keyword or argument
+  before it hides one. In those calls
   every GitHub address (`github.com/<owner>/<name>`, `github.com:<owner>/<name>`, any case)
   names this repository with no `..` or `%` after it, and every `api.github.com` address is
   under `/repos/<this repository>` with no `..` or `%`, and not `forks` or `generate`.
@@ -378,11 +380,13 @@ use ssh.
   or `repo edit`, never with `--hostname`, `--org`, `-o` or `--owner`; `gh api` calls one
   path under `repos/<this repository>`; every other subcommand names the repository with
   `--repo` (or `gh repo edit <repo>`), as `gh` otherwise takes it from the folder it runs in.
-  `cd`, and `git -C`, `--git-dir` and `--work-tree`, go only to a relative folder with no
-  `..`. Other programs are not checked: `go get github.com/<module>` names a module, not a
-  repository to change. A fix it refuses wrongly (a package named `gh`, say) is for the user
+  `cd` and `pushd`, and `git -C`, `--git-dir` and `--work-tree`, go only to a relative folder
+  with no `..`. Other programs and interpreters are not checked: `go get github.com/<module>`
+  names a module, not a repository to change, and a script or `python -c` reaching GitHub is
+  the accepted risk of a full-access agent; the rule is defence in depth around what the user
+  reads, not a sandbox. A fix it refuses wrongly (a package named `gh`, say) is for the user
   to run by hand. A settings fix, which needs no pull request, is one whose every command is
-  a `gh` call other than `gh pr`.
+  a single `gh` call, `gh` its first word, other than `gh pr`.
 - A finding key is a 64-bit hash over every target, so two targets could share one (a crafted
   lockfile path in a repository). Looking a key up for a fix or a dismissal fails, naming both
   reports, when the newest report of another target also has it.

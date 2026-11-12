@@ -148,9 +148,11 @@ full access. The app checks what it can around them:
   commands may reach another repository is refused before you are asked: another
   `owner/name` in a GitHub address, a `gh` call without `--repo <this repository>`, a `gh api`
   path outside `repos/<this repository>`, a `gh` subcommand a fix does not need, a `cd` or
-  `git -C` out of the clone, a `GH_*`, `GITHUB_*` or `GIT_*` variable, or anything the app
-  cannot check before it runs (`$`, backquotes). The agent runs with git hooks and npm, pnpm and Yarn lifecycle scripts off,
-  and is told that files in the clone such as `CLAUDE.md` or `AGENTS.md` are data. Each run
+  `git -C` out of the clone, a `GH_*`, `GITHUB_*` or `GIT_*` variable, a shell, or anything
+  the shell would expand first (`$`, backquotes, globs). This is a check of what you read,
+  not a sandbox: the agent still has full access. The agent runs with git hooks and npm, pnpm
+  and Yarn lifecycle scripts off, and is told that files in the clone such as `CLAUDE.md` or
+  `AGENTS.md` are data. Each run
   makes its own branch, `vigil/fix-<key>-<time>`. Afterwards the app asks GitHub: the default
   branch must be the same branch, with the head it had before the run, and the pull request
   the agent names must be open from the run's branch into it, in the same repository; a change
