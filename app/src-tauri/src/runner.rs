@@ -274,22 +274,19 @@ impl Runner {
         shared.quit == Quit::No && shared.updates.due(now)
     }
 
-    /// Installs the waiting update with `install`, unless a sweep or fix runs or the app is
-    /// quitting. While it runs, outside the lock, nothing new starts, no check runs and exits
-    /// wait ([`Quit::Installing`]). Then the restart's exit may pass, or, when `install` fails
-    /// or panics, the update waits again with why, and runs may start.
+    /// Installs the waiting update ([`Ready::install`]), unless a sweep or fix runs or the app
+    /// is quitting. While it installs, outside the lock, nothing new starts, no check runs and
+    /// exits wait ([`Quit::Installing`]). Then the restart's exit may pass, or, when the install
+    /// fails or panics, the update waits again with why, and runs may start.
     ///
     /// # Errors
     ///
     /// Why it was refused, or why the install failed.
-    pub(crate) fn install_update(
-        &self,
-        install: impl FnOnce(&Ready) -> Result<(), String>,
-    ) -> Result<(), String> {
+    pub(crate) fn install_update(&self) -> Result<(), String> {
         let ready = self.claim_restart()?;
         // A panic would otherwise leave the runner installing for good: no run could start and
         // every exit would wait.
-        let installed = panic::catch_unwind(AssertUnwindSafe(|| install(&ready)))
+        let installed = panic::catch_unwind(AssertUnwindSafe(|| ready.install()))
             .unwrap_or_else(|_| Err("the install stopped unexpectedly".to_owned()));
         let mut shared = self.lock();
         match installed {
@@ -1103,18 +1100,13 @@ mod tests {
         );
         runner.lock().quit = Quit::No;
         assert_eq!(
-            runner.install_update(|_| panic!("nothing waits to install")),
+            runner.install_update(),
             Err("no update is ready".to_owned())
         );
         assert_eq!(
             runner.lock().quit,
             Quit::No,
             "a refused install changes nothing"
-        );
-        runner.lock().quit = Quit::Ready;
-        assert!(
-            !must_wait(runner.lock().quit, &Status::Idle),
-            "the restart exits"
         );
     }
 

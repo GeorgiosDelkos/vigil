@@ -115,7 +115,7 @@ fn main() {
             // cancels it and exits once it has ended. A quit that skips this event (logout,
             // `kill`, a crash) is covered by the core's watchdog, which stops the programs.
             // While an update installs, the request is held and dropped (`Quit::Installing`):
-            // the app restarts once the install ends.
+            // the app restarts once the install succeeds, or keeps running if it fails.
             if let RunEvent::ExitRequested { api, .. } = event
                 && runner::must_wait_to_quit(app)
             {

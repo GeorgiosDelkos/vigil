@@ -127,6 +127,21 @@ pub(crate) struct Ready {
     package: Vec<u8>,
 }
 
+impl Ready {
+    /// Installs the package over the running app (the plugin swaps the bundles). Blocks for
+    /// seconds, or for as long as macOS's administrator prompt stays open when the app's folder
+    /// needs it.
+    pub(crate) fn install(&self) -> Result<(), String> {
+        self.update.install(&self.package).map_err(|e| {
+            format!(
+                "cannot install Vigil {}: {}",
+                self.update.version,
+                error_chain(&e)
+            )
+        })
+    }
+}
+
 impl fmt::Debug for Ready {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Ready")
@@ -258,16 +273,7 @@ async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<Ready>> {
     reason = "Tauri hands command arguments over by value"
 )]
 pub(crate) fn restart_to_update(app: AppHandle) -> Result<(), String> {
-    let installed = app.state::<Runner>().install_update(|ready| {
-        ready.update.install(&ready.package).map_err(|e| {
-            format!(
-                "cannot install Vigil {}: {}",
-                ready.update.version,
-                error_chain(&e)
-            )
-        })
-    });
-    if let Err(problem) = installed {
+    if let Err(problem) = app.state::<Runner>().install_update() {
         log(&problem);
         runner::changed(&app);
         return Err(problem);
