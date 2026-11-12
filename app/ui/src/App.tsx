@@ -598,12 +598,9 @@ function TargetFindings(props: {
       .then(setAsked)
       .catch((e: unknown) => props.onError(String(e)));
   };
-  // The keys and `found` pin the run to the list shown: Rust refuses it if anything changed.
+  // The preview's number runs exactly the plan shown, which Rust kept.
   const runFixAll = (shown: FixAllPreview) => {
-    const keys = shown.items.map((item) => item.key);
-    invoke("fix_all", { target: props.line.key, keys, found: shown.found }).catch((e: unknown) =>
-      props.onError(String(e)),
-    );
+    invoke("fix", { preview: shown.preview }).catch((e: unknown) => props.onError(String(e)));
   };
   return (
     <>
@@ -679,17 +676,13 @@ function FixAllConfirm(props: {
                 <Icon name="wrench" />
                 {item.summary}
               </p>
-              {/* The agent is told the steps were confirmed too, so they are shown. */}
-              <Show when={item.steps.length > 0}>
-                <ol class="fix-steps" aria-label={`Steps for ${item.name}`}>
-                  <For each={item.steps}>{(step) => <li>{step}</li>}</For>
-                </ol>
-              </Show>
+              <Steps steps={item.steps} label={`Steps for ${item.name}`} />
               <Commands commands={item.commands} label={`Commands for ${item.name}`} />
             </li>
           )}
         </For>
       </ol>
+      <Notes notes={props.shown.notes} />
       <div class="dacts">
         <button type="button" class="btn primary" disabled={props.busy} onClick={props.onRun}>
           {props.shown.confirm}
@@ -700,6 +693,23 @@ function FixAllConfirm(props: {
       </div>
     </section>
   );
+}
+
+/** A fix's steps, in order; nothing when there are none. The agent is told the steps were
+ * confirmed with the commands, so every confirmation shows them. */
+function Steps(props: { steps: readonly string[]; label: string }) {
+  return (
+    <Show when={props.steps.length > 0}>
+      <ol class="fix-steps" aria-label={props.label}>
+        <For each={props.steps}>{(step) => <li>{step}</li>}</For>
+      </ol>
+    </Show>
+  );
+}
+
+/** What Rust says to read before confirming a fix, one paragraph each. */
+function Notes(props: { notes: readonly string[] }) {
+  return <For each={props.notes}>{(note) => <p class="note">{note}</p>}</For>;
 }
 
 /** Back to the screen before, with its button or Escape. */
@@ -742,12 +752,10 @@ function Detail(props: {
       .then((shown) => setPreview({ key, shown }))
       .catch((e: unknown) => props.onError(String(e)));
   };
-  // The preview's `found` pins the fix to the one shown: Rust refuses it if a sweep changed
-  // the finding since.
+  // The preview's number runs exactly the plan shown, which Rust kept; Rust refuses it if a
+  // sweep or dismissal changed the finding since.
   const runFix = (asked: { key: string; shown: FixPreview }) => {
-    invoke("fix", { key: asked.key, found: asked.shown.found }).catch((e: unknown) =>
-      props.onError(String(e)),
-    );
+    invoke("fix", { preview: asked.shown.preview }).catch((e: unknown) => props.onError(String(e)));
   };
   // Dismissing one of a component's advisories keeps the detail open on the rest; Rust's next
   // overview leaves the dismissed one out. The last one gone, the item is gone, so back.
@@ -817,7 +825,9 @@ function Detail(props: {
                 </p>
                 <Show when={props.item.fix_scope}>{(scope) => <p>{scope()}</p>}</Show>
                 <p class="fixline">{p().shown.summary}</p>
+                <Steps steps={p().shown.steps} label="Steps the fix takes" />
                 <Commands commands={p().shown.commands} label="Commands the fix runs" />
+                <Notes notes={p().shown.notes} />
                 <div class="dacts">
                   <button
                     type="button"
