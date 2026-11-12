@@ -345,7 +345,7 @@ pub(super) fn fetch(
         Ok(time) => time,
         // After a failed delta `cves` holds the cache and the pages that arrived, each newer than
         // its cached copy. The cache is not written, so the next fetch asks for the same window.
-        Err(error) if usable => return Ok(stale(cves, history, error)),
+        Err(error) if window.is_some() && usable => return Ok(stale(cves, history, error)),
         Err(error) => return Err(error),
     };
 

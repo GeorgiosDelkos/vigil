@@ -69,20 +69,18 @@ pub(super) fn fetch(
         } = match record(feeds, &id, queried.modified) {
             Ok(fetched) => fetched,
             Err(error) => {
-                let packages = packages();
                 failures.push(RecordFailure {
                     id,
-                    packages,
+                    packages: packages(),
                     error,
                 });
                 continue;
             }
         };
         if let Some(error) = why {
-            let packages = packages();
             stale.push(RecordFailure {
                 id,
-                packages,
+                packages: packages(),
                 error,
             });
         }

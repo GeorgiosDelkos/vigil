@@ -764,9 +764,9 @@ impl Shared<'_> {
         Ok(report)
     }
 
-    /// The findings of the target's last report with a verdict that this sweep, which found
-    /// `findings`, could not check again ([`lifecycle::carried_over`]); none, with a note, when
-    /// the report it picked cannot be read again whole.
+    /// The findings of the target's newest readable report with a verdict that this sweep,
+    /// which found `findings`, could not check again ([`lifecycle::carried_over`]); none, with a
+    /// note, when the report it picked cannot be read again whole.
     fn carry_over(
         &self,
         dir_name: &str,
