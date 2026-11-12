@@ -154,14 +154,20 @@ fn opencode_sweep_config() -> String {
 /// the policy once at start, and the app writes it again before each run.
 const GEMINI_POLICY: &str = "gemini-policy.toml";
 
-/// Gemini CLI's sweep policy: no shell, web, memory or MCP tools, and no tool call whose
-/// arguments name one of [`CREDENTIAL_PATHS`]. Its file tools reach only its workspace, the
-/// bundle, unless the user's settings add folders (`context.includeDirectories`), hence the
-/// credential rule. Admin tier, so the user's own policies cannot allow them again. Format and
-/// tool names: `docs/reference/policy-engine.md` and `docs/reference/tools.md` of
-/// google-gemini/gemini-cli at v0.68.0 (5a5c718), checked 2026-11-12: `argsPattern` is a regular
-/// expression over the call's arguments as JSON. `save_memory` is from older releases; a name no
-/// tool has matches nothing.
+/// Gemini CLI's sweep policy: no shell, web, memory or MCP tools, no content search or
+/// multi-file read, and no file read, glob or listing whose arguments name one of
+/// [`CREDENTIAL_PATHS`]. Its file tools reach only its workspace, the bundle, unless the user's
+/// settings add folders (`context.includeDirectories`), hence the credential rule. Content search
+/// (`grep_search`, formerly `search_file_content`) and `read_many_files` (which takes globs such
+/// as `.ss[h]`) would get past a rule on the names in their arguments, so they are denied
+/// outright; `read_file` is enough for a sweep. Writes are left out of the credential rule:
+/// `findings.json` may name `~/.ssh/config` in its text. Admin tier, so the user's own policies
+/// cannot allow them again. Format and tool names: `docs/reference/policy-engine.md` and
+/// `docs/reference/tools.md` of google-gemini/gemini-cli at v0.68.0 (5a5c718), checked
+/// 2026-11-12: `argsPattern` is a regular expression over the call's arguments as JSON.
+/// `save_memory` is from older releases; a name no tool has matches nothing. The pattern is
+/// built by escaping only `.`, and sits in a TOML literal string: a test holds every entry to
+/// letters, digits and `._/-` with an optional trailing `*`.
 fn gemini_policy() -> String {
     let names: Vec<String> = CREDENTIAL_PATHS
         .iter()
@@ -172,7 +178,10 @@ fn gemini_policy() -> String {
     format!(
         r#"# Written by Vigil before each sweep; edits are overwritten.
 [[rule]]
-toolName = ["run_shell_command", "web_fetch", "google_web_search", "save_memory"]
+toolName = [
+  "run_shell_command", "web_fetch", "google_web_search", "save_memory",
+  "grep_search", "search_file_content", "read_many_files",
+]
 decision = "deny"
 priority = 999
 
@@ -183,7 +192,7 @@ decision = "deny"
 priority = 999
 
 [[rule]]
-toolName = "*"
+toolName = ["read_file", "glob", "list_directory"]
 argsPattern = '{pattern}'
 decision = "deny"
 priority = 999
@@ -1108,6 +1117,12 @@ mod tests {
         ));
         assert!(inherits(AgentKind::Grok, "XAI_API_KEY"));
         assert!(inherits(AgentKind::Opencode, "ANTHROPIC_API_KEY"));
+        // opencode serves every provider, so its list holds every agent's prefixes.
+        for kind in ALL {
+            for prefix in kind.env_prefixes() {
+                assert!(PROVIDER_ENV_PREFIXES.contains(prefix), "{kind}: {prefix}");
+            }
+        }
         // Cargo sets `CARGO_MANIFEST_DIR` for every test run, and a sweep must not pass it on.
         let at = located(Path::new("/bin/x"));
         let tmp = tempfile::tempdir().unwrap();
@@ -1173,10 +1188,30 @@ mod tests {
         let rules: toml::Table = fs::read_to_string(&policy).unwrap().parse().unwrap();
         let rules = rules["rule"].as_array().unwrap();
         let denied = rules[0]["toolName"].as_array().unwrap();
-        for tool in ["run_shell_command", "web_fetch", "google_web_search"] {
+        for tool in [
+            "run_shell_command",
+            "web_fetch",
+            "google_web_search",
+            "grep_search",
+            "read_many_files",
+        ] {
             assert!(denied.iter().any(|t| t.as_str() == Some(tool)), "{tool}");
         }
         assert_eq!(rules[1]["mcpName"].as_str(), Some("*"));
+        // The credential rule covers reads only: findings.json may name `~/.ssh/config`.
+        let read_tools = rules[2]["toolName"].as_array().unwrap();
+        assert!(read_tools.iter().all(|t| t.as_str() != Some("write_file")));
+        assert!(read_tools.iter().any(|t| t.as_str() == Some("read_file")));
+        // The pattern escapes only `.` and is written into a TOML literal string.
+        let plain = |p: &str| {
+            p.trim_end_matches('*')
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b))
+        };
+        assert!(
+            CREDENTIAL_PATHS.iter().all(|p| plain(p)),
+            "{CREDENTIAL_PATHS:?}"
+        );
         let pattern = rules[2]["argsPattern"].as_str().unwrap();
         assert!(pattern.starts_with(r#"["/](?:\.ssh|\.aws|"#), "{pattern}");
         assert!(pattern.contains(r"|Library/Keychains|"), "{pattern}");

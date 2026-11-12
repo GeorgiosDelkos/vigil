@@ -990,7 +990,7 @@ mod tests {
         let err = read(&path).unwrap_err();
         assert!(err.to_string().contains("byte limit"), "{err}");
         // The limit falls inside the last character: still reported as too large.
-        fs::write(&path, format!("{}\u{e9}", " ".repeat(limit - 1))).unwrap();
+        fs::write(&path, format!("{}\u{e9}", " ".repeat(limit))).unwrap();
         let err = read(&path).unwrap_err();
         assert!(err.to_string().contains("byte limit"), "{err}");
 

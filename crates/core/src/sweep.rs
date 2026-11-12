@@ -897,18 +897,21 @@ impl Shared<'_> {
     }
 }
 
-/// The most problems the retry prompt lists. Arbitrary: enough for the agent to see what to
-/// fix. The prompt is one command-line argument, and macOS allows 1 MiB for all of them
-/// (`getconf ARG_MAX`), which a file at every cap could exceed with every problem listed.
+/// The most problems the retry prompt lists, and the most characters of each. The prompt is one
+/// command-line argument, and macOS allows 1 MiB for all of them (`getconf ARG_MAX`), which a
+/// file at every cap could exceed with every problem listed, and one problem could alone, since
+/// some quote what the agent wrote (a 2 MB component id). Bound: 50 problems of at most 500
+/// characters, each at most 4 bytes, is 100 kB. Arbitrary otherwise: enough to see what to fix.
 const RETRY_PROBLEMS: usize = 50;
+const RETRY_PROBLEM_CHARS: usize = 500;
 
 /// The prompt of the second attempt: the first one's file `previous` (a phrase such as "was
-/// rejected"), and its first [`RETRY_PROBLEMS`] problems.
+/// rejected"), and its first [`RETRY_PROBLEMS`] problems, each cut to [`RETRY_PROBLEM_CHARS`].
 fn retry_prompt(previous: &str, problems: &[String]) -> String {
     let listed: Vec<String> = problems
         .iter()
         .take(RETRY_PROBLEMS)
-        .map(|p| plain(p))
+        .map(|p| plain(p).chars().take(RETRY_PROBLEM_CHARS).collect())
         .collect();
     let more = match problems.len().saturating_sub(RETRY_PROBLEMS) {
         0 => String::new(),
@@ -1622,6 +1625,14 @@ mod tests {
         );
         assert!(!prompt.contains(&format!("p{RETRY_PROBLEMS}")), "{prompt}");
         assert!(prompt.ends_with("\n- and 7 more like these"), "{prompt}");
+
+        let long = vec![format!("component {}", "c".repeat(2_000_000))];
+        let prompt = retry_prompt("was rejected", &long);
+        assert!(
+            prompt.len() < 1000,
+            "one problem is cut: {} bytes",
+            prompt.len()
+        );
     }
 
     #[test]
