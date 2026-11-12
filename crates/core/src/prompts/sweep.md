@@ -21,8 +21,8 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 
 ## Version matches
 
-You cannot run scripts or programs (no Python, no `jq`), and you need none: at most the few
-listing commands named below. Do not write a matcher. Vigil has already compared every
+You cannot run commands, scripts or programs (no shell, no Python, no `jq`), and you need
+none. Do not write a matcher. Vigil has already compared every
 installed version with every advisory's affected versions (SemVer for crates.io, npm, Go and
 GitHub Actions, PEP 440 for PyPI, plain dotted numbers for RubyGems, NVD's CPE ranges), and
 left out the advisories that cannot affect any component. What is left are candidates, and
@@ -44,9 +44,9 @@ components. A version in range is not yet a finding: judge whether the advisory 
 Is the component really the advisory's product (an NVD product name can belong to another
 program)? When `why` says the configuration ANDs other CPEs, is the platform this Mac? Does
 the record limit the issue to a feature, configuration or build that is not in use? Read the
-full record when the index line is not enough. You may read files on this machine; where your
-agent allows them you may also run the listing commands `brew info`, `brew list`, `npm ls` and
-`npm view`, and nothing else. Do not change anything: no installs, upgrades, edits or
+full record when the index line is not enough. You may read files on this machine (credentials
+such as `~/.ssh` and `.env` files are blocked, and you need none of them); run no commands and
+use no web or network tools. Do not change anything: no installs, upgrades, edits or
 deletions. Fixing comes later, and only after the user approves it.
 
 Write `findings.json` in this folder, following `findings.schema.json`:
@@ -61,8 +61,10 @@ Write `findings.json` in this folder, following `findings.schema.json`:
 - `confidence` is `confirmed` when the installed version is in the affected range or you
   verified the issue, `likely` when you believe it is affected but cannot be certain.
 - The `fix` names the safest change that removes the issue, with exact commands. They are
-  shown to the user, never run now. Each command is one line of printable ASCII; describe a
-  path with other characters in `steps` instead.
+  shown to the user, never run now. Each command is one line of printable ASCII with single
+  spaces, at most 300 characters, and one command: no `;`, `|`, `&`, `<`, `>`, backticks or
+  `$(`, except the nvm form below. Describe a path with other characters in `steps` instead.
+  At most 20 steps and 20 commands; write web addresses in ASCII.
 - For a version found in a version manager (`found_in.manager`, `found_in.path`), the fix
   removes that version with the manager: `fnm uninstall 22.22.2`,
   `asdf uninstall nodejs 22.22.2` (the plugin is the folder under `installs/`: `nodejs` or

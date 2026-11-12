@@ -774,12 +774,11 @@ impl Shared<'_> {
                 advisories: known.advisories.len(),
             });
             let log = dir.join(format!("agent-{attempt}.log"));
+            let command = agent
+                .sweep_command(self.located, &bundle, &prompt)
+                .map_err(|e| error_chain(&e))?;
             let status = agent
-                .run(
-                    &agent.sweep_command(self.located, &bundle, &prompt),
-                    &log,
-                    self.sources.cancel,
-                )
+                .run(&command, &log, self.sources.cancel)
                 .map_err(|e| error_chain(&e))?;
             let (problems, previous) = match fs::read_to_string(&findings_path) {
                 Ok(text) => match findings::validate(&text, known) {

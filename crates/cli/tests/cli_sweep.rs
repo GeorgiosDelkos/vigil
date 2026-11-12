@@ -2,7 +2,8 @@
 //!
 //! Every feed request goes to a dead proxy, so the bundle holds the inventory and no
 //! advisories, and the only valid verdict is `{"findings": []}`. The fake agent's behaviour is
-//! chosen by `FAKE_AGENT_MODE`; it counts its runs in `FAKE_AGENT_COUNTER`.
+//! chosen by `CLAUDE_FAKE_MODE`; it counts its runs in `CLAUDE_FAKE_COUNTER`. Both carry Claude
+//! Code's prefix, since a sweep passes on only the variables in its allowlist.
 
 use std::fs;
 use std::io::Write as _;
@@ -17,16 +18,16 @@ const FAKE_AGENT: &str = r#"#!/bin/sh
 echo "path: $PATH"
 # The login shell's PATH is made up; this script needs cat.
 PATH=/usr/bin:/bin
-n=$(cat "$FAKE_AGENT_COUNTER" 2>/dev/null || echo 0)
+n=$(cat "$CLAUDE_FAKE_COUNTER" 2>/dev/null || echo 0)
 n=$((n + 1))
-echo $n > "$FAKE_AGENT_COUNTER"
+echo $n > "$CLAUDE_FAKE_COUNTER"
 test -f PROMPT.md || { echo "no PROMPT.md in $(pwd)" >&2; exit 9; }
 echo "args: $*"
 # A Fix all reports each item on a line of results.jsonl.
 report() {
   printf '{"key": "%s", "outcome": "%s", "summary": "%s"}\n' "$1" "$2" "$3" >> results.jsonl
 }
-case "$FAKE_AGENT_MODE:$n" in
+case "$CLAUDE_FAKE_MODE:$n" in
   ok:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   issue:*)
     if [ -f github/workflows/ci.yml ]; then
@@ -45,7 +46,7 @@ case "$FAKE_AGENT_MODE:$n" in
     echo '{"outcome": "fixed", "summary": "pinned the action",
       "pull_request": "https://github.com/o/r/pull/7"}' > result.json ;;
   crash:*) exit 3 ;;
-  hang:*|second-hangs:2) sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
+  hang:*|second-hangs:2) sleep 60 & echo $! > "$CLAUDE_FAKE_COUNTER.child"; wait ;;
   second-hangs:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   late-crash:*) echo '{"findings": [], "issues": []}' > findings.json; exit 3 ;;
   server-issues:*)
@@ -72,7 +73,7 @@ case "$FAKE_AGENT_MODE:$n" in
   fix-all-hang:*)
     set -- $(grep -o '"key": "[0-9a-f]*"' fixes.json | cut -d'"' -f4)
     report "$1" fixed "stopped redis"
-    sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
+    sleep 60 & echo $! > "$CLAUDE_FAKE_COUNTER.child"; wait ;;
 esac
 "#;
 
@@ -200,8 +201,8 @@ impl Sandbox {
             .env("HOME", self.path())
             .env("PATH", self.bin())
             .env("SHELL", self.path().join("login-shell"))
-            .env("FAKE_AGENT_MODE", mode)
-            .env("FAKE_AGENT_COUNTER", self.path().join("counter"))
+            .env("CLAUDE_FAKE_MODE", mode)
+            .env("CLAUDE_FAKE_COUNTER", self.path().join("counter"))
             // Version managers are read from the sandbox's home only.
             .env_remove("NVM_DIR")
             .env_remove("FNM_DIR")
