@@ -299,6 +299,19 @@ enum Key {
     Dotted(version::Dotted),
 }
 
+impl Key {
+    /// Whether `self`, an installed version, is the version `listed` in a `versions` list: the
+    /// same key, or for PEP 440 a local build of a listed public version
+    /// ([`version::Pep440::is_listed_as`]). SemVer build metadata needs no such rule: it is
+    /// not part of the key.
+    fn is_listed_as(&self, listed: &Self) -> bool {
+        match (self, listed) {
+            (Self::Pep440(installed), Self::Pep440(listed)) => installed.is_listed_as(listed),
+            _ => self == listed,
+        }
+    }
+}
+
 impl Scheme {
     /// The ordering of `ecosystem`'s own versions.
     fn of(ecosystem: Ecosystem) -> Self {
@@ -462,7 +475,8 @@ fn describe(
 }
 
 /// Whether `version` is in an entry's `versions` list: the same text, or the same version in
-/// the ecosystem's ordering (`1.0` and `1.0.0` in PyPI). It is out of range only when it and
+/// the ecosystem's ordering (`1.0` and `1.0.0` in PyPI), which in PyPI includes a local build of a
+/// listed version (`2.0.1+cu118` of `2.0.1`). It is out of range only when it and
 /// every listed version parse, so none can be another spelling of it.
 fn listed(scheme: Scheme, list: &[String], version: &str) -> Match {
     if list.iter().any(|v| v == version) {
@@ -474,7 +488,7 @@ fn listed(scheme: Scheme, list: &[String], version: &str) -> Match {
     let mut unreadable = None;
     for text in list {
         match scheme.parse(text) {
-            Some(key) if key == installed => {
+            Some(key) if installed.is_listed_as(&key) => {
                 return Match::InRange(format!("{version} is listed in versions as {text}"));
             }
             Some(_) => {}
@@ -660,6 +674,20 @@ mod tests {
             in_range("4.2 is listed in versions as 4.2.0"),
             "another spelling of the same PEP 440 version"
         );
+        let torch = json!({"versions": ["2.0.1"]});
+        assert_eq!(
+            judge("pypi:torch", torch.clone(), "2.0.1+cu118"),
+            in_range("2.0.1+cu118 is listed in versions as 2.0.1"),
+            "a local build of a listed public version"
+        );
+        assert!(is_out(&judge("pypi:torch", torch, "2.0.2+cu118")));
+        let local = json!({"versions": ["2.0.1+cu117"]});
+        assert!(
+            is_out(&judge("pypi:torch", local.clone(), "2.0.1+cu118")),
+            "a listed local label names that build only"
+        );
+        assert!(is_out(&judge("pypi:torch", local.clone(), "2.0.1")));
+        assert!(is_in(&judge("pypi:torch", local, "2.0.1+CU117")));
         let odd = json!({"versions": ["4.2.0", "nightly"]});
         assert!(is_unknown(&judge("pypi:django", odd, "4.3")));
         assert!(

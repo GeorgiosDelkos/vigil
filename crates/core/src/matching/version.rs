@@ -63,6 +63,19 @@ enum LocalPart {
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Dotted(Vec<u64>);
 
+impl Pep440 {
+    /// Whether `self`, an installed version, is the version `listed` names. A listed version
+    /// without a local label matches every local build of it, as PEP 440's version matching
+    /// says (<https://peps.python.org/pep-0440/#version-matching>): `2.0.1+cu118` is `2.0.1`.
+    /// A listed version with a label matches that label only.
+    pub(crate) fn is_listed_as(&self, listed: &Self) -> bool {
+        fn public(v: &Pep440) -> (u64, &[u64], &Pre, Option<u64>, bool, u64) {
+            (v.epoch, &v.release, &v.pre, v.post, v.final_dev, v.dev)
+        }
+        public(self) == public(listed) && (listed.local.is_none() || self.local == listed.local)
+    }
+}
+
 /// Parses a SemVer 2.0 version (`1.2.3-rc.1+build`), strictly: no `v`, no leading zeros in
 /// numbers, no empty identifiers. Numbers above `u64::MAX` are not read.
 pub(crate) fn semver(text: &str) -> Option<SemVer> {
@@ -484,6 +497,22 @@ mod tests {
             let expected = key(&a).cmp(&key(&b));
             let actual = compare("semver", &semver_text(&a), &semver_text(&b));
             prop_assert_eq!(actual, Some(expected));
+        }
+
+        /// A listed version matches what PEP 440 calls equal, plus every local build of it when
+        /// it has no local label of its own; nothing else.
+        #[test]
+        fn a_listed_version_matches_its_local_builds(
+            installed in "[0-9]{1,2}(\\.[0-9]){0,2}(rc[0-9])?(\\+[a-z0-9]{1,4})?",
+            listed in "[0-9]{1,2}(\\.[0-9]){0,2}(rc[0-9])?(\\+[a-z0-9]{1,4})?",
+        ) {
+            let (Some(a), Some(b)) = (pep440(&installed), pep440(&listed)) else {
+                return Ok(());
+            };
+            let public = |text: &str| text.split('+').next().map(str::to_owned);
+            let same_public = pep440(&public(&installed).unwrap()) == pep440(&public(&listed).unwrap());
+            let expected = if listed.contains('+') { a == b } else { same_public };
+            prop_assert_eq!(a.is_listed_as(&b), expected);
         }
 
         /// Every scheme is a total order wherever both sides parse: reflexive, antisymmetric
