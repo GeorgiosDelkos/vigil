@@ -146,7 +146,10 @@ More of the design:
   is still in the target's newest report, is not dismissed, and still passes the sweep's text
   checks, and that the target is still configured.
 - **Read-only server collection.** The server script never uses `sudo`. SSH runs in batch
-  mode with strict host key checking, and with agent and port forwarding off.
+  mode with strict host key checking, and with agent, port, tunnel and credential forwarding
+  off. These options are given on ssh's command line, so they override `~/.ssh/config` for
+  the server itself but not for `ProxyJump` hops, which ssh configures from `~/.ssh/config`
+  only. Give each jump host `BatchMode yes` and `StrictHostKeyChecking yes` there.
 - **Stopping cleanly.** Cancelling a sweep or quitting the app stops the agent and every
   process it started, and removes the unfinished target's folder. A fix has no Cancel, since
   stopping halfway could leave a change half made; quitting during one stops it and records

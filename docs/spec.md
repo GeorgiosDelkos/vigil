@@ -294,8 +294,10 @@ instead and the agent only reads the bundle, as for GitHub.
 The app sends one fixed script, `server.sh`, on ssh's stdin and runs it with `sh -s -- <random
 marker> <dirs...>`. It only reads and never uses sudo. ssh runs with `BatchMode=yes` (a prompt
 fails the target), `StrictHostKeyChecking=yes` (the host key must already be in
-`known_hosts`, which a sweep never updates), agent, X11 and port forwarding off, and no
-connection sharing. The marker and the folders travel on stdin, not on the server's process
+`known_hosts`, which a sweep never updates), agent, X11, port, tunnel and Kerberos credential
+forwarding off, a server that stops answering dropped after 30 s, and no connection sharing.
+These are command-line options, so `ProxyJump` hops do not get them; the README asks for
+`BatchMode` and `StrictHostKeyChecking` on each hop in `~/.ssh/config`. The marker and the folders travel on stdin, not on the server's process
 list. The Mac reads at most 256 MiB of the answer and decodes each part on its own.
 
 | Part | Read with | In the bundle as |

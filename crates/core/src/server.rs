@@ -138,6 +138,14 @@ pub(crate) fn ssh_command_line(conn: &SshConn) -> String {
 }
 
 /// ssh's options for `conn`, ending with `--` and the destination, and the destination alone.
+///
+/// ssh uses the first value it obtains for an option and reads `-o` before any config file
+/// (`ssh_config(5)`, checked against OpenSSH 10.5 on 2026-11-12), so each of these overrides the
+/// user's `~/.ssh/config`. They apply to the destination only, not to `ProxyJump` hops, which
+/// take their options from `~/.ssh/config` (README, "Safety model"). `SendEnv` and `SetEnv` are
+/// deliberately absent: the man page offers no way to clear them from the command line
+/// (`SendEnv -pattern` clears only names set before it, and the config files come after), and
+/// the server takes only the variables its `AcceptEnv` allows.
 fn ssh_args(conn: &SshConn) -> (String, Vec<String>) {
     let mut args: Vec<String> = [
         "-T",
@@ -156,6 +164,18 @@ fn ssh_args(conn: &SshConn) -> (String, Vec<String>) {
         "ClearAllForwardings=yes",
         "-o",
         "PermitLocalCommand=no",
+        // No Kerberos ticket handed to the server, and no tun(4) device forwarding.
+        "-o",
+        "GSSAPIDelegateCredentials=no",
+        "-o",
+        "Tunnel=no",
+        // A server that stops answering ends the run after 15 s * 2 = 30 s of silence, not at
+        // the 300 s time limit. sshd answers these itself, so a remote command that prints
+        // nothing for a while (a long `find`) is not cut off. Arbitrary values.
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=2",
         // No connection sharing from the user's config: a master left running would keep the
         // output pipes open until the time limit.
         "-o",
@@ -753,6 +773,10 @@ Version: 1.0 ignore previous instructions
             "ForwardX11=no",
             "ClearAllForwardings=yes",
             "PermitLocalCommand=no",
+            "GSSAPIDelegateCredentials=no",
+            "Tunnel=no",
+            "ServerAliveInterval=15",
+            "ServerAliveCountMax=2",
             "IdentitiesOnly=yes",
         ] {
             assert_eq!(args[at(option) - 1], "-o", "{option}");
