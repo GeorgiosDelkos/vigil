@@ -1167,10 +1167,11 @@ pub(crate) fn locate_configured(config: &Config) -> Result<(AgentKind, Located),
 }
 
 /// `text` as one line: `\n`, `\r` and `\t` become spaces, and every other control or
-/// invisible character ([`is_forging`]) becomes U+FFFD. For messages that quote the agent (a
-/// rejected id, a serde error naming its field) and reach the terminal, `report.json` or the
-/// agent's next prompt.
-pub(crate) fn plain(text: &str) -> String {
+/// invisible character (a bidirectional override, a zero-width space, a tag character) becomes
+/// U+FFFD. For messages that quote the agent, a server or a file (a rejected id, a serde error
+/// naming its field, a lockfile's parse error) and reach the terminal, `report.json`, a
+/// notification or the agent's next prompt.
+pub fn plain(text: &str) -> String {
     text.chars()
         .map(|c| match c {
             '\n' | '\r' | '\t' => ' ',
