@@ -757,6 +757,9 @@ mod tests {
             "swap",
             "rm -f agent.log && /usr/bin/mkfifo agent.log",
         );
+        // So a regression to a blocking open cannot hang this test; the link tests of the
+        // regular-file open catch it instead.
+        paths::release_fifo(&tmp.path().join("agent.log"));
         let status = AgentKind::Claude
             .run(
                 &AgentKind::Claude.fix_command(&located(&swap), tmp.path(), "P"),

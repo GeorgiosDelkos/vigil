@@ -321,6 +321,29 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_that_cannot_be_looked_at_is_not_written_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = DataDir::new(tmp.path());
+        // A file where the prompts folder goes: looking for the copy fails, but not with
+        // NotFound, so nothing may be created in its place.
+        fs::write(data.prompts_dir(), "not a folder").unwrap();
+        let err = ensure_copy(&data, Prompt::Fix).unwrap_err();
+        assert!(matches!(err, SweepError::Read { .. }), "{err:?}");
+        assert_eq!(
+            fs::read_to_string(data.prompts_dir()).unwrap(),
+            "not a folder"
+        );
+
+        fs::remove_file(data.prompts_dir()).unwrap();
+        ensure_copy(&data, Prompt::Fix).unwrap();
+        assert_eq!(
+            read(&data, "fix.md"),
+            Prompt::Fix.default_text(),
+            "a missing copy is made"
+        );
+    }
+
+    #[test]
     fn load_tells_an_edited_copy_from_a_built_in_one() {
         let tmp = tempfile::tempdir().unwrap();
         let data = DataDir::new(tmp.path());

@@ -322,9 +322,10 @@ fn foreign_gh(args: &[String], repo: &str) -> Option<String> {
             "-R" | "--repo" => args.get(i + 1).map_or("", String::as_str),
             _ => match arg.strip_prefix("--repo=") {
                 Some(value) => value,
+                // `-R` alone is the first arm, so a value here is never empty.
                 None => match arg.strip_prefix("-R") {
-                    Some(value) if !value.is_empty() => value,
-                    _ => continue,
+                    Some(value) => value,
+                    None => continue,
                 },
             },
         };
@@ -632,6 +633,8 @@ mod tests {
         ),
         ("printf 'gh repo delete x/y' | . /dev/stdin", "it runs ."),
         ("alias g=gh", "it runs alias"),
+        // The repository as a positional word names it only for `gh repo edit`.
+        ("gh secret set o/r", "without --repo o/r"),
         ("git --namespace x -C / push --force", "outside the clone"),
         ("git --attr-source HEAD -c alias.y=!x y", "can run a shell"),
         ("git --exec-path=./tools push", "can run a shell"),
@@ -975,6 +978,17 @@ mod tests {
         );
         let gh = fake_gh(tmp.path(), &[release, release_head]);
         assert!(Watch::start(&gh, "o/r").is_ok());
+
+        // A head that is not a commit hash is no head to compare.
+        for sha in ["", "not-a-sha"] {
+            let bad = (
+                "repos/o/r/git/ref/heads/main",
+                format!(r#"{{"object": {{"sha": "{sha}"}}}}"#),
+            );
+            let err =
+                Watch::start(&fake_gh(tmp.path(), &[META, (bad.0, &bad.1)]), "o/r").unwrap_err();
+            assert!(err.contains("no head commit"), "{sha:?}: {err}");
+        }
 
         let odd = ("repos/o/r", r#"{"default_branch": "a b"}"#);
         let err = Watch::start(&fake_gh(tmp.path(), &[odd]), "o/r").unwrap_err();

@@ -1879,15 +1879,15 @@ mod tests {
             read(&long, None).unwrap_err().contains("EOF"),
             "read up to the cap only"
         );
+        // A long summary well inside the cap is read whole.
+        let summary = "y".repeat(8 * 1024);
+        let inside = format!(r#"{{"outcome": "fixed", "summary": "{summary}"}}"#);
+        assert_eq!(read(&inside, None).unwrap().summary, summary);
     }
 
     /// Makes a FIFO at `path`, as an agent could in place of a file the app reads.
     fn fifo(path: &Path) {
-        let made = std::process::Command::new("/usr/bin/mkfifo")
-            .arg(path)
-            .status()
-            .unwrap();
-        assert!(made.success());
+        crate::paths::releasing_fifo(path);
     }
 
     #[test]
@@ -2382,6 +2382,25 @@ mod tests {
             Outcome::Partial,
             "an invalid line after a valid one is skipped"
         );
+
+        // Many items' lines, well inside the cap, are all read; a line past it is not.
+        let keys: Vec<FindingKey> = (0..60)
+            .map(|n| FindingKey::new(&[&n.to_string()]))
+            .collect();
+        let lines: String = keys
+            .iter()
+            .map(|k| {
+                let summary = "s".repeat(200);
+                format!(r#"{{"key": "{k}", "outcome": "fixed", "summary": "{summary}"}}"#) + "\n"
+            })
+            .collect();
+        let late = FindingKey::new(&["late"]);
+        let padding = " ".repeat(usize::try_from(RESULTS_LIMIT).unwrap());
+        let tail = format!(r#"{{"key": "{late}", "outcome": "fixed", "summary": "x"}}"#);
+        fs::write(&path, format!("{lines}{padding}\n{tail}\n")).unwrap();
+        let results = read_results(&path);
+        assert_eq!(results.len(), keys.len(), "every line inside the cap");
+        assert!(!results.contains_key(&late), "past the cap");
     }
 
     #[test]

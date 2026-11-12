@@ -850,21 +850,22 @@ pub(crate) fn newest_report(
             let Some(saved) = read_saved(&target)?.filter(|s| s.failure.is_none()) else {
                 continue;
             };
-            let newest_of_target = seen.insert(name);
+            // Once a hit is found, only targets not seen yet get here, and this report is their
+            // newest with a verdict: a second hit is always another target's newest report.
+            seen.insert(name);
             let Some(entry) = saved.entries().find(|e| e.key == key) else {
                 continue;
             };
             let path = target.join("report.json");
             match &found {
                 None => found = Some((path, entry.clone())),
-                Some((first, _)) if newest_of_target => {
+                Some((first, _)) => {
                     return Err(StateError::KeyInTwoTargets {
                         key,
                         first: first.clone(),
                         second: path,
                     });
                 }
-                Some(_) => {}
             }
         }
     }

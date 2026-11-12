@@ -31,6 +31,10 @@ copy_vcs = true
 # reading its tail. The agent has exited by then, so no test can grow it in that gap: both
 # bounds read the same bytes, an equivalent mutant.
 #
+# `replace | with ^ in open_regular` changes `O_NONBLOCK | O_NOFOLLOW` to `^`. The two flags are
+# different single bits (0x4 and 0x100 on macOS, `<sys/fcntl.h>`), so `^` gives the same value as
+# `|`: an equivalent mutant.
+#
 # `FixPlan::target` is a plain accessor whose only caller is the menu-bar app (the place in the
 # fix's headline), and the app's tests are not run against mutants (see `test_package`).
 exclude_re = [
@@ -41,4 +45,5 @@ exclude_re = [
     "FixPlan::target",
     "replace - with \\+ in log_tail$",
     "open_in_browser",
+    "replace \\| with \\^ in open_regular$",
 ]
