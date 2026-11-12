@@ -56,7 +56,12 @@ impl Inventory {
         toolchains::macos(&mut inventory, cancel);
         homebrew::collect(&mut inventory, cancel);
         toolchains::collect(&mut inventory, cancel);
-        version_managers::collect(&mut inventory);
+        // Lists a few known folders on this thread, unbounded: a manager's folder on a mount
+        // that does not answer (`NVM_DIR` on a dead share) would hang it, which is rare enough
+        // to accept, unlike a project folder walk. It starts no listing once cancelled.
+        if !cancel.is_cancelled() {
+            version_managers::collect(&mut inventory);
+        }
         drop_path_duplicates(&mut inventory.components);
         lockfiles::collect(project_dirs, &mut inventory, cancel);
         inventory
@@ -390,17 +395,30 @@ pub enum InventoryError {
         /// How many entries the walk lists in one project folder.
         limit: usize,
     },
-    /// The project folder walk did not finish in time: a folder is not answering, such as a
-    /// network share whose server is gone.
+    /// The project folder walk did not finish in time: a folder under `root` is not answering,
+    /// such as a network share whose server is gone.
     #[error(
-        "the lockfile walk of the project folders did not finish in {} minutes and was \
-         stopped, so their lockfiles are not checked; a folder is not answering (a network \
-         share?)",
+        "the lockfile walk did not finish {} in {} minutes and was stopped, so its lockfiles and \
+         those of the project folders after it are not checked; a folder in it is not answering \
+         (a network share whose server is gone?)",
+        root.display(),
         limit.as_secs() / 60
     )]
     WalkTimedOut {
+        /// The project folder it stopped in.
+        root: PathBuf,
         /// How long the walk may take.
         limit: std::time::Duration,
+    },
+    /// A lockfile is in iCloud only, so it is not read: reading it would download it.
+    #[error(
+        "{} is in iCloud only and was not read, as reading it would download it; download it \
+         in Finder to have it checked",
+        path.display()
+    )]
+    CloudOnly {
+        /// The lockfile.
+        path: PathBuf,
     },
 }
 
@@ -416,11 +434,12 @@ impl InventoryError {
             | Self::Cancelled { .. }
             | Self::WalkTimedOut { .. } => true,
             // Each is about one item, and the next sweep reports it again: a project folder
-            // holds as many entries then.
+            // holds as many entries then, and a lockfile in iCloud stays there.
             Self::NoProduct { .. }
             | Self::OtherRegistry { .. }
             | Self::NpmTree { .. }
-            | Self::TooManyEntries { .. } => false,
+            | Self::TooManyEntries { .. }
+            | Self::CloudOnly { .. } => false,
         }
     }
 

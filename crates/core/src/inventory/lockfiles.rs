@@ -2,11 +2,13 @@
 //! `uv.lock` and `poetry.lock`.
 //!
 //! The walk never follows symlinks and skips vendored, build and hidden folders, so it reads
-//! each project's own lockfile and not the copies dependencies ship. It also skips macOS
-//! packages (apps, Photos libraries), `~/Library` and `~/.Trash`, and other disks and network
-//! shares mounted under a project folder, so a home folder chosen as one raises no privacy
-//! prompt and downloads no cloud-only file. It is bounded: a million entries per project
-//! folder, ten minutes in all, and the sweep's cancel. Only packages from a
+//! each project's own lockfile and not the copies dependencies ship. It also skips folders
+//! Finder hides, macOS packages (apps, Photos libraries), `~/Library`, iCloud files and folders
+//! not downloaded, and other disks and network shares mounted under a project folder. So a
+//! home folder chosen as a project folder does not lead into Mail, Messages or Photos and
+//! downloads nothing; macOS still asks once for `~/Desktop`, `~/Documents` and `~/Downloads`,
+//! which the user chose by choosing the home folder. It is bounded: a million entries per
+//! project folder, ten minutes in all, and the sweep's cancel. Only packages from a
 //! registry are kept: workspace members, local paths and git checkouts have no registry
 //! advisories under their name.
 //!
@@ -54,6 +56,11 @@ const PACKAGES: [&str; 4] = ["app", "bundle", "framework", "photoslibrary"];
 /// it, and so do other folders macOS keeps out of sight.
 const UF_HIDDEN: u32 = 0x8000;
 
+/// The `st_flags` bit of a file or folder whose contents are not on this Mac (`SF_DATALESS` in
+/// `<sys/stat.h>`): iCloud Drive's "Optimize Mac Storage" leaves such placeholders, and
+/// reading one, or listing one that is a folder, downloads it. `stat` does not.
+const SF_DATALESS: u32 = 0x4000_0000;
+
 /// How many entries the walk lists in one project folder. Arbitrary: a folder of projects lists
 /// thousands (about 3,300 under the owner's `~/Documents/Github` on 2026-11-12, with the skipped
 /// folders left out), so a million is far past any project tree. A local disk lists that many in
@@ -70,43 +77,37 @@ const WALK_TIMEOUT: Duration = Duration::from_mins(10);
 const POLL: Duration = Duration::from_millis(200);
 
 /// Walks every folder in `roots` and adds every package in every lockfile found. Stops when
-/// `cancel` is set or after [`WALK_TIMEOUT`], which is then a problem and the walk adds
-/// nothing.
+/// `cancel` is set or after [`WALK_TIMEOUT`], which is then a problem naming the project folder
+/// it stopped in; the folders walked before it still count.
 pub(super) fn collect(roots: &[PathBuf], inventory: &mut Inventory, cancel: &Cancel) {
-    if roots.is_empty() {
-        return;
-    }
-    // A home folder chosen as a project folder must not lead into these: ~/Library holds Mail,
-    // Messages and iCloud Drive, behind privacy prompts, and reading a cloud-only file there
-    // downloads it.
+    // `~/Library` is hidden by Finder's flag, which "Show Library Folder" clears, so it is
+    // named too: it holds Mail, Messages and iCloud Drive, behind privacy prompts. `~/.Trash`
+    // needs no entry, as every dot-named folder is skipped by name.
     let never: Vec<PathBuf> = std::env::home_dir()
         .into_iter()
-        .flat_map(|home| [home.join("Library"), home.join(".Trash")])
+        .map(|home| home.join("Library"))
         .collect();
-    let roots = roots.to_vec();
-    let walked = bounded(cancel, WALK_TIMEOUT, move |stop| {
+    let (walked, stopped) = bounded(cancel, WALK_TIMEOUT, roots, move |root, stop| {
         let bounds = Bounds {
             never: &never,
-            stop: &stop,
+            stop,
             limit: ENTRY_LIMIT,
         };
         let mut found = Inventory::default();
-        for root in &roots {
-            walk(root, &bounds, &mut found);
-        }
+        walk(root, &bounds, &mut found);
         found
     });
-    match walked {
-        Ok(found) => {
-            inventory.components.extend(found.components);
-            inventory.problems.extend(found.problems);
-        }
-        Err(e) => inventory.problems.push(e),
+    for found in walked {
+        inventory.components.extend(found.components);
+        inventory.problems.extend(found.problems);
     }
+    inventory.problems.extend(stopped);
 }
 
-/// Runs `walk` on its own thread and waits for it, until `cancel` is set or `timeout` passes;
-/// either sets the [`Cancel`] `walk` is given, which it checks once per folder.
+/// Runs `walk` on each of `roots` in turn, on its own thread, and returns each finished
+/// result, in order. Stops waiting when `cancel` is set or `timeout` passes, returning why,
+/// naming the root it stopped in; either also sets the [`Cancel`] `walk` is given, which it
+/// checks once per folder.
 ///
 /// On its own thread because a folder on a network share whose server is gone can block a
 /// system call for good, which no check between folders reaches. That thread is then left
@@ -115,45 +116,67 @@ pub(super) fn collect(roots: &[PathBuf], inventory: &mut Inventory, cancel: &Can
 fn bounded(
     cancel: &Cancel,
     timeout: Duration,
-    walk: impl FnOnce(Cancel) -> Inventory + Send + 'static,
-) -> Result<Inventory, InventoryError> {
-    let cancelled = || InventoryError::Cancelled {
-        what: "the lockfile walk of the project folders".to_owned(),
+    roots: &[PathBuf],
+    mut walk: impl FnMut(&Path, &Cancel) -> Inventory + Send + 'static,
+) -> (Vec<Inventory>, Option<InventoryError>) {
+    let mut walked = Vec::new();
+    let cancelled = |root: &Path| InventoryError::Cancelled {
+        what: format!("the lockfile walk of {}", root.display()),
+    };
+    let Some(first) = roots.first() else {
+        return (walked, None);
     };
     if cancel.is_cancelled() {
-        return Err(cancelled());
+        return (walked, Some(cancelled(first)));
     }
     let stop = Cancel::new();
-    // Holds the one result, so the send never blocks; it fails only once the waiter gave up.
-    let (tx, rx) = mpsc::sync_channel(1);
+    // One message per root, so a send never blocks; it fails only once the waiter gave up.
+    let (tx, rx) = mpsc::sync_channel(roots.len());
     let walker = {
-        let stop = stop.clone();
-        thread::spawn(move || drop(tx.send(walk(stop))))
+        let (stop, roots) = (stop.clone(), roots.to_vec());
+        thread::spawn(move || {
+            for root in &roots {
+                if tx.send(walk(root, &stop)).is_err() {
+                    return;
+                }
+            }
+        })
     };
     let deadline = Instant::now() + timeout;
-    loop {
+    while let Some(root) = roots.get(walked.len()) {
         match rx.recv_timeout(POLL) {
-            Ok(found) => return Ok(found),
+            Ok(found) => {
+                walked.push(found);
+                continue;
+            }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => match walker.join() {
                 Err(panic) => panic::resume_unwind(panic),
-                Ok(()) => unreachable!("the walker sends its result before it ends"),
+                Ok(()) => unreachable!("the walker sends a result for every root before it ends"),
             },
         }
         if cancel.is_cancelled() {
             stop.cancel();
-            return Err(cancelled());
+            return (walked, Some(cancelled(root)));
         }
         if Instant::now() >= deadline {
             stop.cancel();
-            return Err(InventoryError::WalkTimedOut { limit: timeout });
+            let root = root.clone();
+            return (
+                walked,
+                Some(InventoryError::WalkTimedOut {
+                    root,
+                    limit: timeout,
+                }),
+            );
         }
     }
+    (walked, None)
 }
 
 /// What bounds a walk besides the folders it skips by name.
 struct Bounds<'a> {
-    /// Folders never entered: `~/Library` and `~/.Trash`.
+    /// Folders never entered: `~/Library`.
     never: &'a [PathBuf],
     /// Set when the walk is to stop; whoever sets it reports why.
     stop: &'a Cancel,
@@ -171,21 +194,25 @@ fn walk(root: &Path, bounds: &Bounds<'_>, inventory: &mut Inventory) {
             return;
         }
     };
-    let mut listed = 0;
+    let mut left = bounds.limit;
     let mut pending = vec![root.to_owned()];
     while let Some(dir) = pending.pop() {
         if bounds.stop.is_cancelled() {
             return;
         }
-        let entries = list(&dir, device, bounds.never, &mut inventory.problems);
-        listed += entries.len();
-        if listed > bounds.limit {
+        let Some(entries) = list(
+            &dir,
+            device,
+            bounds.never,
+            &mut left,
+            &mut inventory.problems,
+        ) else {
             inventory.problems.push(InventoryError::TooManyEntries {
                 root: root.to_owned(),
                 limit: bounds.limit,
             });
             return;
-        }
+        };
         for (path, kind) in entries {
             match kind {
                 Entry::Dir => pending.push(path),
@@ -205,22 +232,25 @@ enum Entry {
 
 /// Returns `dir`'s entries the walk cares about, sorted by name: folders it enters (see
 /// [`entered`]) and regular files. Symlinks, skipped folders and unreadable entries are left
-/// out, the last reported.
+/// out, the last reported in `problems`. Each entry read counts against `left`; `None` once
+/// that runs out, before the rest of `dir` is read.
 fn list(
     dir: &Path,
     device: u64,
     never: &[PathBuf],
+    left: &mut usize,
     problems: &mut Vec<InventoryError>,
-) -> Vec<(PathBuf, Entry)> {
+) -> Option<Vec<(PathBuf, Entry)>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
             problems.push(InventoryError::io(dir, e));
-            return Vec::new();
+            return Some(Vec::new());
         }
     };
     let mut listed = Vec::new();
     for entry in entries {
+        *left = left.checked_sub(1)?;
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
@@ -253,7 +283,7 @@ fn list(
         }
     }
     listed.sort_by(|a, b| a.0.cmp(&b.0));
-    listed
+    Some(listed)
 }
 
 /// Returns whether the walk may enter the folder at `path` by its name: not hidden by a dot,
@@ -268,9 +298,9 @@ fn named_to_enter(path: &Path) -> bool {
 }
 
 /// Returns whether the walk enters a folder with metadata `meta`: not hidden by Finder's flag,
-/// and on `device`, the project folder's.
+/// on this Mac rather than only in iCloud, and on `device`, the project folder's.
 fn entered(meta: &fs::Metadata, device: u64) -> bool {
-    meta.st_flags() & UF_HIDDEN == 0 && meta.st_dev() == device
+    meta.st_flags() & (UF_HIDDEN | SF_DATALESS) == 0 && meta.st_dev() == device
 }
 
 /// Adds the packages of `path` if it is a lockfile this module reads.
@@ -323,9 +353,13 @@ pub(crate) fn parse(
 const LOCKFILE_LIMIT: u64 = 64 * 1024 * 1024;
 
 fn read_lockfile(path: &Path) -> Result<String, InventoryError> {
-    let len = fs::metadata(path)
-        .map_err(|e| InventoryError::io(path, e))?
-        .len();
+    let meta = fs::metadata(path).map_err(|e| InventoryError::io(path, e))?;
+    if meta.st_flags() & SF_DATALESS != 0 {
+        return Err(InventoryError::CloudOnly {
+            path: path.to_owned(),
+        });
+    }
+    let len = meta.len();
     if len > LOCKFILE_LIMIT {
         return Err(parse_error(
             path,
@@ -566,6 +600,7 @@ mod tests {
             root,
             &[
                 "kept",
+                ".Trash",
                 "Library",
                 "nested/Library",
                 "Tool.app",
@@ -656,22 +691,29 @@ mod tests {
         );
     }
 
-    /// A walk blocked as on a network share that does not answer: it signals `started`, then
-    /// waits for `release`, which the test sends only after the waiter gave up.
+    /// A walk that finishes `/fast` at once and blocks in `/stuck`, as on a network share that
+    /// does not answer: there it signals `started` with its stop flag, then waits for
+    /// `release`, which the test sends only after the waiter gave up.
     fn blocked_walk(
         started: mpsc::Sender<Cancel>,
         release: mpsc::Receiver<()>,
-    ) -> impl FnOnce(Cancel) -> Inventory + Send + 'static {
-        move |stop| {
-            started.send(stop).unwrap();
-            // An error means the test ended first, which releases it too.
-            let _released = release.recv();
+    ) -> impl FnMut(&Path, &Cancel) -> Inventory + Send + 'static {
+        move |root, stop| {
+            if root == Path::new("/stuck") {
+                started.send(stop.clone()).unwrap();
+                // An error means the test ended first, which releases it too.
+                let _released = release.recv();
+            }
             Inventory::default()
         }
     }
 
+    fn fast_then_stuck() -> Vec<PathBuf> {
+        vec![PathBuf::from("/fast"), PathBuf::from("/stuck")]
+    }
+
     #[test]
-    fn a_cancel_ends_the_wait_for_a_blocked_walk_and_stops_it() {
+    fn a_cancel_ends_the_wait_for_a_blocked_walk_and_keeps_what_finished() {
         let (started_tx, started) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
         let cancel = Cancel::new();
@@ -684,40 +726,62 @@ mod tests {
             })
         };
         let walk = blocked_walk(started_tx, release_rx);
-        let err = bounded(&cancel, WALK_TIMEOUT, walk).unwrap_err();
-        assert!(matches!(err, InventoryError::Cancelled { .. }), "{err:?}");
+        let (walked, stopped) = bounded(&cancel, WALK_TIMEOUT, &fast_then_stuck(), walk);
+        assert_eq!(walked.len(), 1, "/fast finished");
+        assert!(
+            matches!(&stopped, Some(InventoryError::Cancelled { what }) if what.contains("/stuck")),
+            "{stopped:?}"
+        );
         let stop = canceller.join().unwrap();
         assert!(stop.is_cancelled(), "the walk is told to stop once it can");
         release.send(()).unwrap();
 
-        let err = bounded(&cancel, WALK_TIMEOUT, |_| unreachable!("not started")).unwrap_err();
-        assert!(matches!(err, InventoryError::Cancelled { .. }), "{err:?}");
+        let not_started = |_: &Path, _: &Cancel| -> Inventory { unreachable!("not started") };
+        let (walked, stopped) = bounded(&cancel, WALK_TIMEOUT, &fast_then_stuck(), not_started);
+        assert!(walked.is_empty());
+        assert!(
+            matches!(&stopped, Some(InventoryError::Cancelled { what }) if what.contains("/fast")),
+            "{stopped:?}"
+        );
     }
 
     #[test]
-    fn a_blocked_walk_times_out() {
+    fn a_blocked_walk_times_out_naming_its_folder() {
         let (started_tx, started) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
         let walk = blocked_walk(started_tx, release_rx);
         let limit = Duration::from_millis(50);
-        let err = bounded(&Cancel::new(), limit, walk).unwrap_err();
-        assert!(
-            matches!(err, InventoryError::WalkTimedOut { limit: l } if l == limit),
-            "{err:?}"
-        );
+        let (walked, stopped) = bounded(&Cancel::new(), limit, &fast_then_stuck(), walk);
+        assert_eq!(walked.len(), 1, "/fast finished");
+        let Some(InventoryError::WalkTimedOut { root, limit: l }) = &stopped else {
+            panic!("{stopped:?}")
+        };
+        assert_eq!((root.as_path(), *l), (Path::new("/stuck"), limit));
+        assert!(stopped.unwrap().is_failure());
         let stop: Cancel = started.recv().unwrap();
         assert!(stop.is_cancelled());
         release.send(()).unwrap();
     }
 
     #[test]
-    fn a_finished_walk_is_returned_whole() {
-        let walk = |_| Inventory {
-            not_installed: vec!["x"],
+    fn finished_walks_are_returned_in_order() {
+        let roots = [PathBuf::from("/a"), PathBuf::from("/b")];
+        let walk = |root: &Path, _: &Cancel| Inventory {
+            problems: vec![InventoryError::io(
+                root,
+                std::io::ErrorKind::NotFound.into(),
+            )],
             ..Inventory::default()
         };
-        let found = bounded(&Cancel::new(), WALK_TIMEOUT, walk).unwrap();
-        assert_eq!(found.not_installed, ["x"]);
+        let (walked, stopped) = bounded(&Cancel::new(), WALK_TIMEOUT, &roots, walk);
+        assert!(stopped.is_none());
+        let names: Vec<String> = walked.iter().map(|w| w.problems[0].to_string()).collect();
+        assert_eq!(names, ["cannot read /a", "cannot read /b"]);
+        assert!(
+            bounded(&Cancel::new(), WALK_TIMEOUT, &[], walk)
+                .0
+                .is_empty()
+        );
     }
 
     #[test]
