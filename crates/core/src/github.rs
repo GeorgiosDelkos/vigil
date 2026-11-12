@@ -49,13 +49,16 @@ const WORKFLOW_LIMIT: usize = 8;
 /// kilobytes; the cap keeps one file from filling the agent's context.
 const WORKFLOW_SIZE_LIMIT: usize = 256 * 1024;
 
-/// The most alerts of one kind put in the bundle. Arbitrary, for the same reason. Past it,
-/// `settings.json` says "more than 500" rather than the count, since the pages after the
-/// limit are not fetched.
-const ALERT_LIMIT: usize = ALERT_PAGES * 100;
+/// The most alerts of one kind put in the bundle. Arbitrary, for the same reason. At it,
+/// `settings.json` says "500 or more" rather than the count, since the pages after the limit
+/// are not fetched.
+const ALERT_LIMIT: usize = ALERT_PAGES * ALERTS_PER_PAGE;
 
-/// The most pages of one kind of alert fetched, at 100 alerts a page (GitHub's most).
+/// The most pages of one kind of alert fetched.
 const ALERT_PAGES: usize = 5;
+
+/// Alerts asked for per page: GitHub's most.
+const ALERTS_PER_PAGE: usize = 100;
 
 /// The value of a setting that could not be collected; the reason is a problem in the report.
 const NOT_COLLECTED: &str = "not collected; see the problems in the report";
@@ -115,45 +118,47 @@ impl Repo {
     }
 
     /// Writes `github/<name>-alerts.json` and returns the setting value: the open count (or
-    /// "more than" the limit), or GitHub's refusal.
+    /// "500 or more"), or GitHub's refusal.
     fn alerts(&mut self, gh: &str, name: &str, path: &str) -> Value {
         match alert_pages(gh, path) {
-            Ok((Answer::Ok(Value::Array(mut alerts)), more)) => {
-                for alert in &mut alerts {
-                    // The request asks GitHub to leave the secret out; this is the second guard,
-                    // so a secret never reaches the bundle or the agent's context.
-                    remove_secrets(alert);
-                }
-                // A page longer than asked for would otherwise take the bundle past the limit.
-                let more = more || alerts.len() > ALERT_LIMIT;
-                alerts.truncate(ALERT_LIMIT);
-                let open = if more {
-                    self.problems.push(format!(
-                        "{name} alerts: more than {ALERT_LIMIT} open, only the first \
-                         {ALERT_LIMIT} are in the bundle"
-                    ));
-                    json!(format!("more than {ALERT_LIMIT}"))
-                } else {
-                    json!(alerts.len())
-                };
-                self.files.push((
-                    format!("github/{name}-alerts.json"),
-                    pretty(&Value::Array(alerts)),
-                ));
+            Ok(Alerts::All(alerts)) => {
+                let open = alerts.len();
+                self.alert_file(name, alerts);
                 json!({ "open": open })
             }
-            Ok((Answer::Ok(other), _)) => {
+            Ok(Alerts::First(alerts)) => {
+                self.problems.push(format!(
+                    "{name} alerts: {ALERT_LIMIT} or more open, only the first {ALERT_LIMIT} \
+                     are in the bundle"
+                ));
+                self.alert_file(name, alerts);
+                json!({ "open": format!("{ALERT_LIMIT} or more") })
+            }
+            Ok(Alerts::Other(Answer::Ok(other))) => {
                 let what = kind_of(&other);
                 self.problems
                     .push(format!("{name} alerts: expected a list, got {what}"));
                 json!(NOT_COLLECTED)
             }
-            Ok((Answer::Refused { status, message }, _)) => refused(status, &message),
+            Ok(Alerts::Other(Answer::Refused { status, message })) => refused(status, &message),
             Err(e) => {
                 self.problems.push(format!("{name} alerts: {e}"));
                 json!(NOT_COLLECTED)
             }
         }
+    }
+
+    /// Adds `github/<name>-alerts.json`, every secret value removed.
+    fn alert_file(&mut self, name: &str, mut alerts: Vec<Value>) {
+        for alert in &mut alerts {
+            // The request asks GitHub to leave the secret out; this is the second guard, so a
+            // secret never reaches the bundle or the agent's context.
+            remove_secrets(alert);
+        }
+        self.files.push((
+            format!("github/{name}-alerts.json"),
+            pretty(&Value::Array(alerts)),
+        ));
     }
 
     /// Adds the default branch's workflow files under `github/workflows/`.
@@ -348,18 +353,19 @@ pub(crate) fn collect(gh: &str, repo: &RepoSlug) -> Result<Repo, GitHubError> {
     ));
 
     out.sbom(gh, repo, &base);
+    let page = format!("state=open&per_page={ALERTS_PER_PAGE}");
     for (name, path) in [
-        ("dependabot", "dependabot/alerts?state=open&per_page=100"),
+        ("dependabot", format!("{base}/dependabot/alerts?{page}")),
         (
             "code-scanning",
-            "code-scanning/alerts?state=open&per_page=100",
+            format!("{base}/code-scanning/alerts?{page}"),
         ),
         (
             "secret-scanning",
-            "secret-scanning/alerts?state=open&per_page=100&hide_secret=true",
+            format!("{base}/secret-scanning/alerts?{page}&hide_secret=true"),
         ),
     ] {
-        let value = out.alerts(gh, name, &format!("{base}/{path}"));
+        let value = out.alerts(gh, name, &path);
         settings.insert(format!("{}_alerts", name.replace('-', "_")), value);
     }
     out.workflows(gh, &base);
@@ -491,9 +497,19 @@ fn api(gh: &str, path: &str) -> Result<Answer, GitHubError> {
     answer(path, &output.stdout, &output)
 }
 
-/// Open alerts from `path` (which asks for 100 a page, GitHub's most), at most
-/// [`ALERT_PAGES`] pages of them, and whether GitHub has more past those. A page that is not a
-/// list, or a refusal, is the answer instead.
+/// The open alerts of one kind, as far as they are read.
+#[derive(Debug)]
+enum Alerts {
+    /// Every open alert.
+    All(Vec<Value>),
+    /// The first [`ALERT_LIMIT`]; GitHub may have more.
+    First(Vec<Value>),
+    /// A page that is not a list, or GitHub's refusal.
+    Other(Answer),
+}
+
+/// Open alerts from `path`, which carries its filters as a query (`...?state=open&per_page=100`),
+/// at most [`ALERT_PAGES`] pages of them.
 ///
 /// `gh api --paginate` would fetch every page before the limit applies: a burnt rate limit and a
 /// timed-out request on a repository with thousands of alerts. Each next page is the original
@@ -501,34 +517,45 @@ fn api(gh: &str, path: &str) -> Result<Answer, GitHubError> {
 /// page number (GitHub's REST docs, "List Dependabot alerts for a repository", read
 /// 2026-11-12), and `after=` or `page=` for the others. So the request's own filters,
 /// `hide_secret=true` among them, hold on every page whatever the header's link says.
-fn alert_pages(gh: &str, path: &str) -> Result<(Answer, bool), GitHubError> {
+fn alert_pages(gh: &str, path: &str) -> Result<Alerts, GitHubError> {
+    assert!(
+        path.contains('?'),
+        "alert paths carry their filters as a query: {path}"
+    );
     let mut alerts = Vec::new();
     let mut page = path.to_owned();
     for _ in 0..ALERT_PAGES {
         let output =
             command::run_any_status(gh, &["api", "--include", &page])?.ok_or(GitHubError::NoGh)?;
-        // `--include` puts the status line and headers before the body, ended by an empty
-        // line. Without them (gh failed before any answer) the whole output is the body.
+        // `--include` prints the status line (ending in `\n`), each header (ending in `\r\n`)
+        // and an empty `\r\n` line before the body (checked with gh 2.96 on 2026-11-12).
+        // Without them (gh failed before any answer) the whole output is the body.
         let (head, body) = output
             .stdout
             .split_once("\r\n\r\n")
             .unwrap_or(("", &output.stdout));
-        let next = next_cursor(head, &page)?;
         match answer(&page, body, &output)? {
             Answer::Ok(Value::Array(items)) => alerts.extend(items),
-            other => return Ok((other, false)),
+            other => return Ok(Alerts::Other(other)),
         }
-        let Some(cursor) = next else {
-            return Ok((Answer::Ok(Value::Array(alerts)), false));
+        let Some(cursor) = next_cursor(head, &page)? else {
+            // A page longer than asked for would otherwise take the bundle past the limit.
+            if alerts.len() > ALERT_LIMIT {
+                alerts.truncate(ALERT_LIMIT);
+                return Ok(Alerts::First(alerts));
+            }
+            return Ok(Alerts::All(alerts));
         };
         page = format!("{path}&{cursor}");
     }
-    Ok((Answer::Ok(Value::Array(alerts)), true))
+    alerts.truncate(ALERT_LIMIT);
+    Ok(Alerts::First(alerts))
 }
 
-/// The cursor of the next page, `after=...` or `page=...`, from the `Link` header among
-/// `headers` (`Link: <https://api.github.com/...?per_page=100&after=X>; rel="next", ...`), or
-/// `None` on the last page. A next link without a cursor that can be passed on is an error:
+/// The cursor of the next page from the `Link` header among `headers` (`Link:
+/// <https://api.github.com/...?per_page=100&after=X>; rel="next", ...`), or `None` on the last
+/// page. `after=` wins over `page=`: GitHub's links can carry both, and a cursor endpoint
+/// ignores the page number. A next link without a cursor that can be passed on is an error:
 /// stopping there would report a partial list as complete.
 fn next_cursor(headers: &str, path: &str) -> Result<Option<String>, GitHubError> {
     let link = headers.lines().find_map(|line| {
@@ -538,7 +565,11 @@ fn next_cursor(headers: &str, path: &str) -> Result<Option<String>, GitHubError>
     let next = link.and_then(|link| {
         link.split(',').find_map(|entry| {
             let (url, params) = entry.split_once(';')?;
-            params.contains("rel=\"next\"").then_some(url)
+            // RFC 8288 allows the relation quoted or not.
+            let is_next = params
+                .split(';')
+                .any(|p| matches!(p.trim(), "rel=\"next\"" | "rel=next"));
+            is_next.then_some(url)
         })
     });
     let Some(url) = next else {
@@ -549,13 +580,20 @@ fn next_cursor(headers: &str, path: &str) -> Result<Option<String>, GitHubError>
         .trim_matches(['<', '>'])
         .split_once('?')
         .unwrap_or_default();
-    query
-        .split('&')
-        .find(|pair| pair.starts_with("after=") || pair.starts_with("page="))
+    let named = |name: &str| {
+        query
+            .split('&')
+            .find(|pair| pair.split_once('=').is_some_and(|(key, _)| key == name))
+    };
+    named("after")
+        .or_else(|| named("page"))
         // A cursor is URL-encoded, so this keeps it one argument and one query parameter.
         .filter(|pair| {
-            pair.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"=%-_.~".contains(&b))
+            let (_, value) = pair.split_once('=').unwrap_or_default();
+            !value.is_empty()
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"=%-_.~".contains(&b))
         })
         .map(|pair| Some(pair.to_owned()))
         .ok_or_else(|| GitHubError::Cursor {
@@ -1034,7 +1072,7 @@ esac
         );
         assert_eq!(
             settings["secret_scanning_alerts"],
-            json!({"open": "more than 500"})
+            json!({"open": "500 or more"})
         );
         assert!(
             settings.get("default_branch_protection").is_none(),
@@ -1055,7 +1093,7 @@ esac
             "dependabot alerts: `",
             "code-scanning alerts: `",
             "HTTP 502",
-            "secret-scanning alerts: more than 500 open, only the first 500 are in the bundle",
+            "secret-scanning alerts: 500 or more open, only the first 500 are in the bundle",
             "workflows: 403: Must have admin rights",
             "names no default branch",
             "setting organization_two_factor_requirement: GitHub answered 403",
@@ -1080,7 +1118,7 @@ esac
         // Ten pages of 100 Dependabot alerts: five are read.
         assert_eq!(
             settings["dependabot_alerts"],
-            json!({"open": "more than 500"})
+            json!({"open": "500 or more"})
         );
         let alerts: Value =
             serde_json::from_str(file(&repo, "github/dependabot-alerts.json")).unwrap();
@@ -1093,7 +1131,7 @@ esac
         assert_eq!(numbers, (0..500).collect::<Vec<_>>());
         assert!(
             repo.problems.contains(
-                &"dependabot alerts: more than 500 open, only the first 500 are in the bundle"
+                &"dependabot alerts: 500 or more open, only the first 500 are in the bundle"
                     .to_owned()
             ),
             "{:?}",
@@ -1127,8 +1165,16 @@ esac
         assert_eq!(next_cursor("HTTP/2.0 200 OK\n", "p").unwrap(), None);
         let odd = "Link: <https://x/a?after=a&b>; rel=\"next\"";
         assert_eq!(next(odd).unwrap().as_deref(), Some("after=a"));
+        // As GitHub sends it for issues: the cursor, then a page number it ignores.
+        let both = "Link: <https://x/a?page=2&state=open&after=Y3U%3D>; rel=next";
+        assert_eq!(next(both).unwrap().as_deref(), Some("after=Y3U%3D"));
+        let page = "Link: <https://x/a?per_page=100&page=3>; rel=\"next\"";
+        assert_eq!(next(page).unwrap().as_deref(), Some("page=3"));
+        let lookalike = "Link: <https://x/a?pages=2&page=3>; rel=\"next\"";
+        assert_eq!(next(lookalike).unwrap().as_deref(), Some("page=3"));
         for unusable in [
             "Link: <https://x/a?after=a%20b c>; rel=\"next\"",
+            "Link: <https://x/a?after=&page=2>; rel=\"next\"",
             "Link: <https://x/a?per_page=100>; rel=\"next\"",
             "Link: <https://x/a>; rel=\"next\"",
         ] {

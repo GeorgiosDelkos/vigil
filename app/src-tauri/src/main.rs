@@ -47,7 +47,8 @@ use vigil_core::write_html_report;
 use crate::runner::Runner;
 use crate::runner::Status;
 
-// Without `custom-protocol`, Tauri is in dev mode (tauri-build sets the `dev` cfg from it) and
+// Without `custom-protocol`, Tauri is in dev mode (tauri-build 2.7.4 sets the `dev` cfg from it
+// with `cfg_alias("dev", is_dev())` in its `src/lib.rs`, and declares it for check-cfg) and
 // the window loads the UI from the dev server's URL, http://localhost:5173. In a release build
 // that would hand every command (fix, save, dismiss) to whichever local process binds that
 // port first. Debug builds stay allowed, since `cargo tauri dev` is one.

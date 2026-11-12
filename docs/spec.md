@@ -274,8 +274,9 @@ the user's `gh` login; the agent never calls GitHub and reads only the bundle.
 | Settings | the repository's `security_and_analysis`, `vulnerability-alerts`, the default branch's protection, `rulesets`, `actions/permissions`, `actions/permissions/workflow`, and for an organization owner its 2FA requirement | `github/settings.json`, one key per setting |
 
 Each kind of alert is read 100 a page, following the cursor in GitHub's `Link` header, for at
-most 5 pages: the bundle keeps the first 500, and past them `settings.json` says "more than 500"
-open instead of a count, so a repository with thousands of alerts costs five requests.
+most 5 pages: the bundle keeps the first 500, and when a sixth page is linked `settings.json`
+says "500 or more" open instead of a count, so a repository with thousands of alerts costs five
+requests.
 
 A feature that is off answers with a 403 or 404 and a message ("Dependabot alerts are
 disabled", "no analysis found", "Branch not protected"); that answer is the setting's value in
