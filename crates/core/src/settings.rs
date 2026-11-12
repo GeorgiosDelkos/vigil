@@ -61,9 +61,9 @@ pub enum Setting {
         /// As `owner/name`; spaces around it are dropped.
         repo: String,
     },
-    /// Stops sweeping a repository.
+    /// Stops sweeping a repository, however its case is written.
     RemoveRepo {
-        /// As `owner/name`.
+        /// As `owner/name`; spaces around it are dropped.
         repo: String,
     },
     /// Adds a server reached through an alias from `~/.ssh/config`, named after the alias.
@@ -71,7 +71,7 @@ pub enum Setting {
         /// The ssh alias.
         ssh: String,
     },
-    /// Removes the server with this name.
+    /// Removes the server with this name, ignoring case as the config's unique names do.
     RemoveServer {
         /// Its name.
         name: String,
@@ -192,6 +192,7 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), No
             });
         }
         Setting::RemoveRepo { repo } => {
+            let repo = repo.trim();
             let repos = array(table(doc, "github")?, "github.repos")?;
             repos.retain(|v| v.as_str().is_none_or(|e| !e.eq_ignore_ascii_case(repo)));
         }
@@ -204,7 +205,11 @@ fn apply(doc: &mut DocumentMut, setting: &Setting, home: &Path) -> Result<(), No
         Setting::Model { agent, model } => set_model(doc, *agent, model.as_deref())?,
         Setting::RemoveServer { name } => {
             let servers = servers(doc)?;
-            servers.retain(|t| t.get("name").and_then(Item::as_str) != Some(name));
+            servers.retain(|t| {
+                t.get("name")
+                    .and_then(Item::as_str)
+                    .is_none_or(|n| !n.eq_ignore_ascii_case(name))
+            });
             if servers.is_empty() {
                 doc.remove("servers");
             }
@@ -532,7 +537,7 @@ mod tests {
         let config = save(
             &data_dir,
             Setting::RemoveServer {
-                name: "web".to_owned(),
+                name: "WEB".to_owned(),
             },
         )
         .unwrap();
@@ -626,7 +631,7 @@ mod tests {
         let config = save(
             &data_dir,
             Setting::RemoveRepo {
-                repo: "O/r".to_owned(),
+                repo: " O/r ".to_owned(),
             },
         )
         .unwrap();
