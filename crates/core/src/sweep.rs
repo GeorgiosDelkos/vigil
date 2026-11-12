@@ -441,13 +441,13 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
                 if group.len() == 1 {
                     return group[0].title.clone();
                 }
-                plain(&format!(
+                format!(
                     "{} {}, {}: {} advisories",
                     group_name(installed),
                     installed.version,
                     installed.found_in,
                     group.len()
-                ))
+                )
             });
         let issues = report
             .issues

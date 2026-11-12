@@ -384,7 +384,7 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
     // folders linked to the same file are not kept apart.
     let name = target
         .file_name()
-        .expect("a canonical file path has a name");
+        .expect("the config path and a link's target both name a file");
     let partial = dir.join(format!(".{}.partial", name.display()));
     let partial_err = |source| SaveSettingError::Write {
         path: partial.clone(),
@@ -409,7 +409,9 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
         .map_or(Ok(()), |permissions| file.set_permissions(permissions))
         .and_then(|()| file.write_all(text.as_bytes()))
         .and_then(|()| file.sync_data())
-        .and_then(|()| fs::rename(&partial, &target))
+        .inspect_err(|_| drop(fs::remove_file(&partial)))
+        .map_err(partial_err)?;
+    fs::rename(&partial, &target)
         .inspect_err(|_| drop(fs::remove_file(&partial)))
         // The rename is durable only once the folder's entry is. If this sync fails, the error
         // reports a failed write though the new config is in place; saving again is harmless,
@@ -863,6 +865,36 @@ mod tests {
             config.is_file(),
             "a regular config.toml, not the planted link"
         );
+    }
+
+    /// A symlinked config's partial file sits beside the link's target, named after it.
+    #[test]
+    fn a_planted_partial_file_beside_a_linked_config_is_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        fs::create_dir_all(data_dir.config_file().parent().unwrap()).unwrap();
+        let dotfiles = tmp.path().join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        let real = dotfiles.join("vigil.toml");
+        fs::write(&real, "").unwrap();
+        std::os::unix::fs::symlink(&real, data_dir.config_file()).unwrap();
+        let victim = tmp.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        let partial = dotfiles.join(".vigil.toml.partial");
+        std::os::unix::fs::symlink(&victim, &partial).unwrap();
+
+        save(&data_dir, repo_added("o/r")).unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        assert!(fs::read_to_string(&real).unwrap().contains("o/r"));
+
+        // A partial name that cannot be cleared is reported as itself.
+        fs::create_dir_all(partial.join("x")).unwrap();
+        let err = save(&data_dir, repo_added("o/s")).unwrap_err();
+        let SaveSettingError::Write { path, .. } = &err else {
+            panic!("{err:?}")
+        };
+        assert!(path.ends_with(".vigil.toml.partial"), "{err}");
     }
 
     #[test]
