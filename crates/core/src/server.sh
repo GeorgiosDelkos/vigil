@@ -4,11 +4,16 @@
 # lockfiles are read. Neither is on the remote command line, so other users of the server cannot
 # see the marker in `ps`.
 #
-# It only reads: it never uses sudo, writes no file and opens no connection. Each part of the
-# answer is printed as a "<marker> begin <part>" line, the part's output, an empty line and a
-# "<marker> end <exit status>" line. The marker is random per run, so no file's content can end a
-# part early. Standard error is dropped for the whole script: the exit status says whether a part
-# was read, and error text from the server would only reach the user's terminal.
+# It only reads: it never uses sudo, and writes no file. Its one connection is `docker`'s to the
+# daemon the server's docker is set up for (DOCKER_HOST or the current context), which may be
+# on another host. It is not pinned to /var/run/docker.sock, since rootless docker listens
+# elsewhere, and `ps` and `images` only read.
+#
+# Each part of the answer is printed as a "<marker> begin <part>" line, the part's output, an
+# empty line and a "<marker> end <exit status>" line. The marker is random per run, so no file's
+# content can end a part early. Standard error is dropped for the whole script: the exit status
+# says whether a part was read, and error text from the server would only reach the user's
+# terminal.
 
 # shellcheck disable=SC2154 # marker is set by the app's first line
 exec 2>/dev/null
