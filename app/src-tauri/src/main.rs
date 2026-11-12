@@ -390,7 +390,7 @@ fn open_config(runner: State<'_, Runner>) -> Result<(), String> {
     if !path.exists() {
         runner.data_dir().init().map_err(|e| e.to_string())?;
     }
-    let status = Command::new("open")
+    let status = Command::new("/usr/bin/open")
         .arg("-t")
         .arg(&path)
         .status()
