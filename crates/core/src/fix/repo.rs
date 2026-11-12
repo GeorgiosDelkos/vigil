@@ -48,7 +48,7 @@ pub(super) const ENV: [(&str, &str); 5] = [
 /// - no word holds a character the shell expands (`$`, a backquote, `*`, `?`, `[`, `{`, `}`,
 ///   but a lone `{` or `}` is a group), as its expansion cannot be checked;
 /// - no word is a shell or runs the words it reads (`sh`, `bash`, `eval`, `source`, `xargs`,
-///   `parallel`, `alias`, and `.` where a command starts), which could run text no rule here
+///   `parallel`, `alias`, and a `.` with a word after it), which could run text no rule here
 ///   can read, such as `printf ... | sh`; a word with spaces in it passes these rules itself;
 /// - every word that names a checked program (`gh`, `git`, `curl`, `wget`, `cd`, `pushd`) is
 ///   checked as a call of it with the words after it, so no wrapper or argument before it
@@ -62,7 +62,8 @@ pub(super) const ENV: [(&str, &str); 5] = [
 ///   otherwise takes the repository from the folder it runs in, and names no other
 ///   `owner/name`;
 /// - `cd` and `pushd`, and `git`'s `-C`, `--git-dir` and `--work-tree`, go only to a relative
-///   folder with no `..`: the agent works in the clone.
+///   folder with no `..`: the agent works in the clone. `git` takes no `-c` or `--config-env`
+///   before its subcommand, which can make it run a shell.
 ///
 /// Unchecked: other programs and interpreters. `go get github.com/<module>` names a module, not
 /// a repository to change; a script in the clone, one the command writes and then runs
@@ -83,32 +84,12 @@ pub(super) fn foreign_command(command: &str, repo: &str) -> Option<String> {
     if let Some(word) = words().find(|w| is_shell(w)) {
         return Some(format!("it runs {word}, whose input cannot be checked"));
     }
-    // `.` is `source` only where a command starts, which is after any of the words that can
-    // lead one; elsewhere it is a folder (`git add .`).
-    let leads = |w: &String| {
-        w.contains('=')
-            || matches!(
-                w.as_str(),
-                "{" | "!"
-                    | "if"
-                    | "then"
-                    | "elif"
-                    | "else"
-                    | "do"
-                    | "while"
-                    | "until"
-                    | "time"
-                    | "command"
-                    | "builtin"
-                    | "exec"
-                    | "nohup"
-                    | "sudo"
-                    | "env"
-            )
-    };
+    // `.` reads commands from the file named after it; a `.` with no word after it is a
+    // folder (`git add .`). Refusing every `. <word>` also refuses `cp -r . ../x`, left to the
+    // user to run by hand, and needs no list of what may come before a command.
     if parts
         .iter()
-        .any(|part| part.iter().find(|w| !leads(w)).is_some_and(|w| w == "."))
+        .any(|part| part.iter().rev().skip(1).any(|w| w == "."))
     {
         return Some("it runs ., whose input cannot be checked".to_owned());
     }
@@ -208,23 +189,35 @@ fn outside_clone(target: &str) -> bool {
         || target.split('/').any(|segment| segment == "..")
 }
 
-/// Why the `git` call with `args` may work outside the clone: `-C`, `--git-dir` and
-/// `--work-tree` must name a folder inside it ([`outside_clone`]).
+/// Why the `git` call with `args` may work outside the clone or run a shell. Only git's own
+/// options are read, the ones before the subcommand, so `git switch -c b` and `git log -C`
+/// pass: `-C`, `--git-dir` and `--work-tree` must name a folder inside the clone
+/// ([`outside_clone`]), and `-c` and `--config-env` are refused, as configuration can make git
+/// run a shell (`alias.x=!...`, `core.sshCommand`, `credential.helper=!...`).
 fn foreign_git(args: &[String]) -> Option<String> {
-    args.iter().enumerate().find_map(|(i, arg)| {
-        // Configuration on the command line can make git run a shell (`alias.x=!...`,
-        // `core.sshCommand`, `credential.helper=!...`), and a fix does not need it.
+    let mut words = args.iter();
+    while let Some(arg) = words.next() {
+        if !arg.starts_with('-') {
+            return None;
+        }
         if matches!(arg.as_str(), "-c" | "--config-env") || arg.starts_with("--config-env=") {
             return Some(format!("it runs git with {arg}, which can run a shell"));
         }
         let value = match arg.as_str() {
-            "-C" | "--git-dir" | "--work-tree" => args.get(i + 1).map_or("", String::as_str),
-            _ => arg
+            "-C" | "--git-dir" | "--work-tree" => words.next().map_or("", String::as_str),
+            _ => match arg
                 .strip_prefix("--git-dir=")
-                .or_else(|| arg.strip_prefix("--work-tree="))?,
+                .or_else(|| arg.strip_prefix("--work-tree="))
+            {
+                Some(value) => value,
+                None => continue,
+            },
         };
-        outside_clone(value).then(|| format!("it runs git in {value:?}, outside the clone"))
-    })
+        if outside_clone(value) {
+            return Some(format!("it runs git in {value:?}, outside the clone"));
+        }
+    }
+    None
 }
 
 /// Why the GitHub addresses in `word` may not be `repo`'s.
@@ -603,6 +596,7 @@ mod tests {
             "git clone git@github.com:O/R.git",
             "cd repo && npm install lodash@4.17.21",
             "cd repo && git add . && git commit -m 'Pin lodash'",
+            "git switch -c vigil-fix && git log -C -1",
             "curl https://api.github.com/repos/o/r/hooks",
             "go get github.com/gin-gonic/gin@v1.9.1",
             "pip install 'requests>=2.32'",
@@ -810,6 +804,25 @@ mod tests {
             let why = foreign_command(&command, "o/r");
             proptest::prop_assert!(
                 why.as_deref().is_some_and(|why| why.contains("gh repo, which")),
+                "{}: {:?}", command, why
+            );
+        }
+
+        /// Whatever comes before it, a `.` that sources a file is refused.
+        #[test]
+        fn no_prefix_hides_a_sourced_file(
+            prefix in proptest::collection::vec(
+                proptest::sample::select(vec![
+                    "{", "!", "if", "command", "-p", "time", "2>/dev/null", "<", "/dev/stdin",
+                    "coproc", "A=b", "builtin",
+                ]),
+                0..6,
+            )
+        ) {
+            let command = format!("printf x | {} . /dev/stdin", prefix.join(" "));
+            let why = foreign_command(&command, "o/r");
+            proptest::prop_assert!(
+                why.as_deref().is_some_and(|why| why.contains("it runs .")),
                 "{}: {:?}", command, why
             );
         }
