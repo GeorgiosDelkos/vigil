@@ -693,7 +693,9 @@ mod tests {
 
     /// A walk that finishes `/fast` at once and blocks in `/stuck`, as on a network share that
     /// does not answer: there it signals `started` with its stop flag, then waits for
-    /// `release`, which the test sends only after the waiter gave up.
+    /// `release`, which the test sends only after the waiter gave up. It gives up by itself
+    /// after [`SELF_RELEASE`], so a waiter that never gives up (a broken deadline) gets its
+    /// result and fails the test's assertions instead of hanging it.
     fn blocked_walk(
         started: mpsc::Sender<Cancel>,
         release: mpsc::Receiver<()>,
@@ -701,12 +703,16 @@ mod tests {
         move |root, stop| {
             if root == Path::new("/stuck") {
                 started.send(stop.clone()).unwrap();
-                // An error means the test ended first, which releases it too.
-                let _released = release.recv();
+                // Released, timed out, or the test ended first: each ends the block.
+                let _released = release.recv_timeout(SELF_RELEASE);
             }
             Inventory::default()
         }
     }
+
+    /// How long [`blocked_walk`] blocks at most. Arbitrary: far longer than the waits the
+    /// tests expect (one poll, or a 50 ms limit), short enough to fail a test quickly.
+    const SELF_RELEASE: Duration = Duration::from_secs(2);
 
     fn fast_then_stuck() -> Vec<PathBuf> {
         vec![PathBuf::from("/fast"), PathBuf::from("/stuck")]
