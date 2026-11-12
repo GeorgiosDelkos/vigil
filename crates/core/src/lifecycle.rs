@@ -327,7 +327,8 @@ pub(crate) fn first_seen(
 /// folders are not the ones it listed (a sweep folder created, or one emptied and removed). A
 /// scan that ends with neither is whole: the report is written before anything is removed,
 /// and the new report's sweep folder was listed, so its target folder was read before the
-/// report and every older one before its removal.
+/// report and every older one before its removal. After [`SCANS`] scans the last answer is
+/// returned as it is.
 pub(crate) fn newest_verdict(
     sweeps: &Path,
     dir_name: &str,
@@ -341,9 +342,10 @@ fn newest_verdict_read_by(
     dir_name: &str,
     read: &mut dyn FnMut(&Path) -> Result<Option<Saved>, StateError>,
 ) -> Result<Option<(PathBuf, Saved)>, StateError> {
-    loop {
+    let mut found = None;
+    for _ in 0..SCANS {
+        found = None;
         let mut unreported = Vec::new();
-        let mut found = None;
         let listed = newest_first(sweeps)?;
         for sweep in &listed {
             let dir = sweep.join(dir_name);
@@ -357,10 +359,16 @@ fn newest_verdict_read_by(
             }
         }
         if !reported_since(&unreported) && newest_first(sweeps)? == listed {
-            return Ok(found);
+            break;
         }
     }
+    Ok(found)
 }
+
+/// How many times a lock-free scan of the reports is taken at most. Arbitrary: a scan is taken
+/// again only when a sweep ended during the one before, which takes a sweep per scan; past
+/// three, something else is changing the folders, and the last answer is as good as any.
+const SCANS: usize = 3;
 
 /// Whether any of the target folders a scan read without a report has one now.
 fn reported_since(unreported: &[PathBuf]) -> bool {
@@ -879,10 +887,11 @@ fn newest_report_read_by(
     key: FindingKey,
     read: &mut dyn FnMut(&Path) -> Result<Option<Saved>, StateError>,
 ) -> Result<Option<(PathBuf, SavedEntry)>, StateError> {
-    loop {
+    let mut found = None;
+    for _ in 0..SCANS {
         let listed = newest_first(sweeps)?;
         let mut unreported = Vec::new();
-        let found = 'scan: {
+        found = 'scan: {
             for sweep in &listed {
                 for target in folders(sweep)? {
                     let Some(saved) = read(&target)? else {
@@ -898,9 +907,10 @@ fn newest_report_read_by(
             None
         };
         if !reported_since(&unreported) && newest_first(sweeps)? == listed {
-            return Ok(found);
+            break;
         }
     }
+    Ok(found)
 }
 
 /// Error from reading or changing the lifecycle state.
@@ -1076,6 +1086,42 @@ mod tests {
             .unwrap()
             .expect("the new sweep folder is listed on the second scan");
         assert_eq!(path, new.join("report.json"));
+
+        // The same for a finding's report.
+        fs::remove_dir_all(sweeps.join("20261102T000000Z")).unwrap();
+        save(
+            sweeps,
+            "20261101T000000Z/mac",
+            &report(at, None, &[key], at),
+        );
+        let old = sweeps.join("20261101T000000Z/mac");
+        let new_report = report("2026-11-02T00:00:00Z", None, &[key], at);
+        let mut read = racing_reader(old, new.clone(), new_report);
+        let (path, _) = newest_report_read_by(sweeps, key, &mut read)
+            .unwrap()
+            .expect("the new sweep folder is listed on the second scan");
+        assert_eq!(path, new.join("report.json"));
+    }
+
+    /// A scan of folders that keep changing ends after a few takes, with the last answer.
+    #[test]
+    fn scans_of_ever_changing_folders_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path();
+        let at = "2026-11-01T00:00:00Z";
+        save(sweeps, "20261101T000000Z/mac", &report(at, None, &[], at));
+        let mut scans = 0;
+        // Each scan adds a sweep folder, so no scan sees the folders it listed.
+        let mut read = |dir: &Path| {
+            scans += 1;
+            fs::create_dir_all(sweeps.join(format!("20261101T000000Z-{}", scans + 1))).unwrap();
+            read_saved(dir)
+        };
+        let found = newest_verdict_read_by(sweeps, "mac", &mut read).unwrap();
+        assert!(found.is_some());
+        let found = newest_report_read_by(sweeps, FindingKey(9), &mut read).unwrap();
+        assert!(found.is_none());
+        assert!(scans < 100, "{scans} reads");
     }
 
     #[test]

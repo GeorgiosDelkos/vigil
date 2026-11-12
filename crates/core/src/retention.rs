@@ -261,4 +261,51 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn an_older_sweep_without_the_target_is_passed_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path();
+        report(sweeps, "20261101T000000Z", "github-o--r", true);
+        report(sweeps, "20261102T000000Z", "mac", true);
+        let new = report(sweeps, "20261103T000000Z", "mac", true);
+
+        remove_older(sweeps, &new).unwrap();
+        assert_eq!(
+            left(sweeps),
+            ["20261101T000000Z/github-o--r", "20261103T000000Z/mac"]
+        );
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_checked_or_removed_is_an_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path().join("sweeps");
+        let set_mode = |path: &Path, mode| {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        };
+
+        // The target's place in an older sweep cannot be looked at: nothing is guessed.
+        report(&sweeps, "20261101T000000Z", "mac", true);
+        let new = report(&sweeps, "20261102T000000Z", "mac", true);
+        let locked = sweeps.join("20261101T000000Z");
+        set_mode(&locked, 0o000);
+        let err = remove_older(&sweeps, &new);
+        set_mode(&locked, 0o755);
+        assert!(
+            matches!(&err, Err(StateError::Write { path, .. }) if path.starts_with(&locked)),
+            "{err:?}"
+        );
+
+        // The emptied sweep folder cannot be removed: only "not empty" is no error.
+        set_mode(&sweeps, 0o500);
+        let err = remove_older(&sweeps, &new);
+        set_mode(&sweeps, 0o755);
+        assert!(
+            matches!(&err, Err(StateError::Write { path, .. }) if *path == locked),
+            "{err:?}"
+        );
+    }
 }

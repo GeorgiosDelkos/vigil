@@ -106,13 +106,8 @@ impl DataDir {
                 mode: mode & 0o777,
             });
         }
-        match fs::set_permissions(root, fs::Permissions::from_mode(mode & 0o700)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
-                Err(DataDirError::NotOwned { path: root.clone() })
-            }
-            Err(e) => Err(io_err(e)),
-        }
+        fs::set_permissions(root, fs::Permissions::from_mode(mode & 0o700))
+            .map_err(|e| chmod_error(root, e))
     }
 
     /// Creates the data directory (see [`DataDir::ensure_private`]) and writes the default
@@ -174,6 +169,22 @@ pub enum InitError {
         #[source]
         source: io::Error,
     },
+}
+
+/// What a failed chmod of the data folder `root` means. Only the owner may change a folder's
+/// mode, so a refusal (`EPERM`) means another user owns it; anything else (a read-only
+/// volume's `EROFS`) is reported as it is.
+fn chmod_error(root: &Path, error: io::Error) -> DataDirError {
+    if error.kind() == io::ErrorKind::PermissionDenied {
+        DataDirError::NotOwned {
+            path: root.to_owned(),
+        }
+    } else {
+        DataDirError::Io {
+            path: root.to_owned(),
+            source: error,
+        }
+    }
 }
 
 /// Error from [`DataDir::ensure_private`].
@@ -302,6 +313,24 @@ mod tests {
         fs::set_permissions(&old, fs::Permissions::from_mode(0o555)).unwrap();
         DataDir::new(&old).ensure_private().unwrap();
         assert_eq!(mode(&old), 0o500);
+    }
+
+    /// A read-only volume refuses the chmod too (GitHub's runners return `EROFS` for `/usr`),
+    /// which says nothing about the owner. No folder gives that on every Mac, so the mapping
+    /// is checked on the errors themselves.
+    #[test]
+    fn only_a_refused_chmod_means_another_owner() {
+        let root = Path::new("/data");
+        let refused = io::Error::from(io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            chmod_error(root, refused),
+            DataDirError::NotOwned { .. }
+        ));
+        let read_only = io::Error::from(io::ErrorKind::ReadOnlyFilesystem);
+        assert!(matches!(
+            chmod_error(root, read_only),
+            DataDirError::Io { source, .. } if source.kind() == io::ErrorKind::ReadOnlyFilesystem
+        ));
     }
 
     #[test]
