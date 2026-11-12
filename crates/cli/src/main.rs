@@ -172,6 +172,7 @@ fn main() -> anyhow::Result<()> {
         Some(dir) => DataDir::new(dir),
         None => DataDir::for_home(&home()?),
     };
+    data_dir.ensure_private()?;
 
     match cli.command {
         Command::Init => {

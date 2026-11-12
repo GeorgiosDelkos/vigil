@@ -68,6 +68,7 @@ use crate::matching::Match;
 use crate::matching::OsvRecord;
 use crate::paths;
 use crate::paths::DataDir;
+use crate::paths::DataDirError;
 use crate::prompts;
 use crate::prompts::Prompt;
 use crate::server;
@@ -309,8 +310,9 @@ pub struct ReportIssue {
 /// # Errors
 ///
 /// Fails before anything runs when `targets` names no configured target, and before any agent
-/// runs when no agent is configured or found, another sweep is running, or the sweep folder
-/// cannot be written; and stops when a prompt or bundle cannot be
+/// runs when no agent is configured or found, the data folder is not private to this user (see
+/// [`DataDir::ensure_private`]), another sweep is running, or the sweep folder cannot be
+/// written; and stops when a prompt or bundle cannot be
 /// read or written; [`SweepError::Cancelled`] when cancelled. Failures of one target (a
 /// repository that cannot be read, the agent, its findings, the report files) are recorded in
 /// that target's report instead.
@@ -333,6 +335,9 @@ pub fn sweep(
         Targets::Only(only) => only == target,
     };
     let (agent, located) = locate_configured(config)?;
+    // Before anything is written or deleted: the inventory and agent logs are private, and
+    // the folder is checked before the sweep deletes older sweeps in it.
+    data_dir.ensure_private()?;
     let sweeps = data_dir.sweeps_dir();
     let _lock = Lock::acquire(&sweeps)?;
     let mut notes = Vec::new();
@@ -1550,6 +1555,9 @@ pub enum SweepError {
     /// The bundle could not be written.
     #[error(transparent)]
     Bundle(#[from] BundleError),
+    /// The data folder could not be made private.
+    #[error(transparent)]
+    DataDir(#[from] DataDirError),
     /// A sweep file could not be read.
     #[error("cannot read {}", path.display())]
     Read {

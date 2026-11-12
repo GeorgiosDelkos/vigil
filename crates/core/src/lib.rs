@@ -115,6 +115,7 @@ pub use crate::package::Ecosystem;
 pub use crate::package::Package;
 pub use crate::package::ParsePackageError;
 pub use crate::paths::DataDir;
+pub use crate::paths::DataDirError;
 pub use crate::paths::InitError;
 pub use crate::popover::Listed;
 pub use crate::popover::PopoverView;
