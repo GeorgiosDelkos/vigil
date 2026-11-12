@@ -75,8 +75,9 @@ impl Prompt {
     }
 
     /// The [`fnv1a`] hash of every version of the built-in prompt in the git history, the
-    /// current one included, in no particular order. Tests check that the list holds exactly
-    /// those versions and the current one.
+    /// current one included, in no particular order. Tests check that the list holds every one
+    /// of those versions and the current one. It may also hold versions from pull-request
+    /// branches that a squash merge left out of main's history.
     fn shipped(self) -> &'static [u64] {
         match self {
             Self::Mac => &[
@@ -87,7 +88,7 @@ impl Prompt {
                 0x43e3_14c9_7f99_636c,
                 0x6700_b7d7_68f8_b586,
                 0x6fb4_8641_0926_923e,
-                0xd7b9_24a3_0c7b_42b5,
+                0xd7b9_24a3_0c7b_42b5, // On #57's branch only; its squash merge left it out.
                 0x40f6_3d88_cb2d_afb9,
             ],
             Self::GitHub => &[
@@ -95,7 +96,7 @@ impl Prompt {
                 0xd32b_864c_dff2_7518,
                 0x63b2_93e7_5d62_bfc3,
                 0xddaa_01c1_7a2a_02d4,
-                0x461e_5ecd_ab4c_3f4c,
+                0x461e_5ecd_ab4c_3f4c, // On #57's branch only; its squash merge left it out.
                 0x5587_5ec1_ca59_bdce,
             ],
             Self::Server => &[
@@ -103,7 +104,7 @@ impl Prompt {
                 0xaa44_bd87_ef56_8a55,
                 0x495c_677b_2b0e_eafc,
                 0xafea_94d5_e019_3384,
-                0x7204_4cf2_d0b2_ddbe,
+                0x7204_4cf2_d0b2_ddbe, // On #57's branch only; its squash merge left it out.
                 0x9723_54ab_1f75_134c,
             ],
             Self::Fix => &[0x77ef_cded_9b10_794c, 0x55ae_3d08_e3e0_8813],
@@ -219,8 +220,9 @@ mod tests {
     }
 
     /// Every version of `kind`'s built-in prompt in the git history, newest first. Commits on
-    /// merged branches count too (`--full-history`): a build from a pull request's branch may
-    /// have copied one. Renames are not followed; no prompt has been renamed.
+    /// branches merged with a merge commit count too (`--full-history`): a build from such a
+    /// branch may have copied one. A squash merge leaves its branch's commits out of this
+    /// history. Renames are not followed; no prompt has been renamed.
     fn versions_in_git(kind: Prompt) -> Vec<Vec<u8>> {
         let git = |args: &[&str]| {
             let out = Command::new("git")
@@ -385,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_is_every_version_in_git() {
+    fn every_version_in_git_is_listed() {
         for kind in Prompt::ALL {
             let in_git: BTreeSet<u64> = versions_in_git(kind).iter().map(|v| fnv1a(v)).collect();
             let listed: BTreeSet<u64> = kind.shipped().iter().copied().collect();
@@ -394,15 +396,11 @@ mod tests {
                 kind.shipped().len(),
                 "{kind:?} lists a hash twice"
             );
-            // The current version may not be committed yet; another test checks it is listed.
-            let current = fnv1a(kind.default_text().as_bytes());
-            for hash in listed.iter().filter(|&&h| h != current) {
-                assert!(
-                    in_git.contains(hash),
-                    "{hash:#x} in Prompt::shipped for {} matches no version in git",
-                    kind.file_name()
-                );
-            }
+            // A listed hash with no version in this history is allowed. Pull requests are
+            // squash-merged, so a branch that changed a prompt twice must list both versions
+            // while its own history holds them, and main then holds only the last one. An extra
+            // hash only lets a copy from that branch's build be updated; a missing one would
+            // keep a shipped version from being updated, so that direction is the one checked.
             for hash in &in_git {
                 assert!(
                     listed.contains(hash),
