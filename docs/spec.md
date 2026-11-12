@@ -82,8 +82,8 @@ Core modules (one concept each):
 ```
 
 Permissions (decided 2026-11-12): the data folder is created with mode 0700, and
-`DataDir::ensure_private`, which the CLI runs before every command and `sweep` before it writes
-or deletes anything, refuses a root that is a symlink, is writable by group or others, or
+`DataDir::ensure_private`, which the app runs at start, the CLI before every command and `sweep`
+before it writes or deletes anything, refuses a root that is a symlink, is writable by group or others, or
 belongs to another user (only the owner may change a folder's mode, so dropping the group and
 other bits doubles as the ownership check). An existing 0755 root is tightened to 0700. What is
 inside is created by Vigil and stays unreadable to other users through the root; its parent
@@ -97,13 +97,15 @@ except that newest verdict, and then each of those sweep folders left empty. It 
 `sweeps/.lock`, removes only real folders named after the target (a symlink in that place, and
 its sweep folder, stay; nothing inside is followed), and leaves sweeps named newer than the
 current one (a clock set back) alone. A cancelled sweep writes no report for the target it
-stopped in, so nothing of that target goes; a target removed from the config keeps its newest
-sweep; a report that cannot be read stops the removal before anything goes. Nothing older is
-needed: changes, first-seen times and fix confirmation read the newest report with a verdict,
-and the confirmed fixes listed for 30 days come from `state/fixes.jsonl`, which keeps each
-fix's title, summary and pull request. Readers that hold no lock (the app's views, a fix's
-plan) take their scan again when a target folder they read without a report has one by the
-end, since the removal can fall between their two reads. A key only an older report had now
+stopped in, so nothing of that target goes; a target removed from the config is never swept
+again, so it keeps the folders it has (its newest only if it was swept since retention came in,
+every earlier one otherwise) until the user deletes them; a report that cannot be read stops
+the removal before anything goes. Nothing older is needed: changes, first-seen times and fix
+confirmation read the newest report with a verdict, and the confirmed fixes listed for 30
+days come from `state/fixes.jsonl`, which keeps each fix's title, summary and pull request.
+Readers that hold no lock (the app's views, a fix's plan) take their scan again when a target
+folder they read without a report has one by the end, or the sweep folders changed, since the
+removal can fall between their two reads. A key only an older report had now
 gets "no report has finding X: a newer sweep no longer finds it" instead of "a sweep at T no
 longer found X".
 
@@ -224,18 +226,23 @@ The folder walk skips `node_modules`, `target`, `.git`, `vendor`, `.venv`, `dist
 every hidden folder, follows no symlinks, and only reads lockfiles: it never runs project code.
 
 Bounds of the walk (decided 2026-11-12), so a home folder chosen as a project folder (config
-accepts `~`) raises no privacy prompt, downloads no cloud-only file, and cannot hold the sweeps
-lock for good:
+accepts `~`) does not lead into Mail, Messages or Photos, downloads no cloud-only file, and
+cannot hold the sweeps lock for good. macOS still asks once for `~/Desktop`, `~/Documents` and
+`~/Downloads`, which choosing the home folder chose:
 
-- It skips folders Finder hides (`UF_HIDDEN`, which `~/Library` has), macOS packages (`*.app`,
-  `*.bundle`, `*.framework`, `*.photoslibrary`), and `~/Library` and `~/.Trash` by path.
+- It skips folders Finder hides (`UF_HIDDEN`, which `~/Library` has until "Show Library
+  Folder"), macOS packages (`*.app`, `*.bundle`, `*.framework`, `*.photoslibrary`), and
+  `~/Library` by path; `~/.Trash` goes with every dot-named folder. Folders and lockfiles in
+  iCloud only (`SF_DATALESS`) are not listed or read, since that downloads them; such a
+  lockfile is a note.
 - It stays on the project folder's device: a disk or network share mounted under it is not
   entered.
 - It lists at most a million entries per project folder, then stops there with a note (not a
   failed source: the same folders stop there again).
 - It runs on its own thread, checked every 200 ms: the sweep's cancel or ten minutes in all
-  stops it, and its result is dropped. A system call that never returns (a stale SMB or NFS
-  mount) leaves that thread blocked, and the sweep goes on without it.
+  stops it. The project folders walked before then count; the one it stopped in is named in
+  the problem, and those after it are not walked. A system call that never returns (a stale
+  SMB or NFS mount) leaves that thread blocked, and the sweep goes on without it.
 - The cancel also stops the running inventory command and starts no more; a cancelled
   inventory makes no report. `gh` and `ssh` collection is not cancellable yet: the sweep
   checks the cancel before each repository and server, and each command has its time limit.

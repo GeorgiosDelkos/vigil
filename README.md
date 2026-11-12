@@ -235,8 +235,9 @@ dirs = ["/srv/app"]
 ```
 
 The lockfile walk skips hidden, vendored and build folders, macOS packages (apps, Photos
-libraries), `~/Library`, the Trash, and disks or network shares mounted under a project
-folder; it stops after a million entries in one project folder or ten minutes in all.
+libraries), `~/Library`, iCloud files not downloaded, and disks or network shares mounted
+under a project folder; it stops after a million entries in one project folder or ten minutes
+in all.
 
 The data folder is open to your user alone (mode 0700): a sweep or command refuses one that
 other users can write to or that belongs to another user. It also holds:
