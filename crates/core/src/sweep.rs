@@ -780,7 +780,7 @@ impl Shared<'_> {
             let status = agent
                 .run(&command, &log, self.sources.cancel)
                 .map_err(|e| error_chain(&e))?;
-            let (problems, previous) = match fs::read_to_string(&findings_path) {
+            let (problems, previous) = match findings::read(&findings_path) {
                 Ok(text) => match findings::validate(&text, known) {
                     Ok(valid) => return Ok(valid),
                     Err(problems) => (problems, "was rejected and moved to findings.rejected.json"),
