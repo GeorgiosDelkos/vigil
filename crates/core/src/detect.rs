@@ -48,16 +48,11 @@ const TOOLS: [(&str, &str); 10] = [
 ];
 
 /// Folders people keep projects in, relative to the home folder. Arbitrary: the common names
-/// on macOS; a folder that does not exist is not suggested.
-const PROJECT_FOLDERS: [&str; 7] = [
-    "code",
-    "Code",
-    "Projects",
-    "Developer",
-    "src",
-    "Documents/Github",
-    "Documents/GitHub",
-];
+/// on macOS; a folder that does not exist is not suggested. None is inside `~/Documents`:
+/// detection runs as the app starts, and looking there raises macOS's Documents privacy prompt
+/// before the user has chosen anything. A project folder there is one the user picks, and
+/// macOS asks when Vigil first reads it.
+const PROJECT_FOLDERS: [&str; 5] = ["code", "Code", "Projects", "Developer", "src"];
 
 /// How many of the user's repositories `gh repo list` returns. Arbitrary: enough to pick from
 /// without a long wait.
