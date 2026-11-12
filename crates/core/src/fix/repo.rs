@@ -47,9 +47,9 @@ pub(super) const ENV: [(&str, &str); 5] = [
 ///   `printf -v` set one without `=`;
 /// - no word holds a character the shell expands (`$`, a backquote, `*`, `?`, `[`, `{`, `}`,
 ///   but a lone `{` or `}` is a group), as its expansion cannot be checked;
-/// - no word is a shell (`sh`, `bash`, `zsh`, `eval`, `source`, ...), which could run text no
-///   rule here can read, such as `printf ... | sh`; a word with spaces in it passes these
-///   rules itself;
+/// - no word is a shell or runs the words it reads (`sh`, `bash`, `eval`, `source`, `xargs`,
+///   `parallel`, `alias`, and `.` where a command starts), which could run text no rule here
+///   can read, such as `printf ... | sh`; a word with spaces in it passes these rules itself;
 /// - every word that names a checked program (`gh`, `git`, `curl`, `wget`, `cd`, `pushd`) is
 ///   checked as a call of it with the words after it, so no wrapper or argument before it
 ///   hides the real call. In those calls every GitHub address (`github.com/<owner>/<name>`,
@@ -65,8 +65,9 @@ pub(super) const ENV: [(&str, &str); 5] = [
 ///   folder with no `..`: the agent works in the clone.
 ///
 /// Unchecked: other programs and interpreters. `go get github.com/<module>` names a module, not
-/// a repository to change; a script in the clone, or `python -c`, can reach GitHub another way,
-/// the accepted risk of a full-access agent. A checked program's name counts as a call even as
+/// a repository to change; a script in the clone, one the command writes and then runs
+/// (`printf ... > f; ./f`), or `python -c` can reach GitHub another way, the accepted risk of a
+/// full-access agent. A checked program's name counts as a call even as
 /// an argument (`npm install gh`), which refuses such a fix wrongly. Owner and name compare
 /// case-insensitively, as GitHub does.
 pub(super) fn foreign_command(command: &str, repo: &str) -> Option<String> {
@@ -81,6 +82,13 @@ pub(super) fn foreign_command(command: &str, repo: &str) -> Option<String> {
     }
     if let Some(word) = words().find(|w| is_shell(w)) {
         return Some(format!("it runs {word}, whose input cannot be checked"));
+    }
+    // `.` is `source` only where a command starts; elsewhere it is a folder (`git add .`).
+    if parts
+        .iter()
+        .any(|part| part.first().is_some_and(|w| w == "."))
+    {
+        return Some("it runs ., whose input cannot be checked".to_owned());
     }
     words()
         .filter(|w| w.contains(char::is_whitespace))
@@ -110,15 +118,33 @@ fn expands(word: &str) -> bool {
 }
 
 /// Whether `word` runs a shell or makes one read more commands.
+/// `xargs` and `parallel` run the words they read as a command, and `alias` makes a new name
+/// for one.
 fn is_shell(word: &str) -> bool {
-    let name = word
-        .rsplit('/')
-        .next()
-        .expect("rsplit yields at least one piece");
     matches!(
-        name,
-        "sh" | "bash" | "zsh" | "dash" | "ksh" | "fish" | "csh" | "tcsh" | "eval" | "source"
+        file_name(word),
+        "sh" | "bash"
+            | "zsh"
+            | "dash"
+            | "ksh"
+            | "ash"
+            | "mksh"
+            | "fish"
+            | "csh"
+            | "tcsh"
+            | "eval"
+            | "source"
+            | "xargs"
+            | "parallel"
+            | "alias"
     )
+}
+
+/// The file name of the program `word` names: what follows its last `/`.
+fn file_name(word: &str) -> &str {
+    word.rsplit('/')
+        .next()
+        .expect("rsplit yields at least one piece")
 }
 
 /// The programs this rule checks, each found by its file name.
@@ -129,10 +155,7 @@ const CHECKED: [&str; 6] = ["gh", "git", "curl", "wget", "cd", "pushd"];
 /// cannot hide the call after it.
 fn checked_calls(part: &[String]) -> impl Iterator<Item = (&str, &[String])> {
     part.iter().enumerate().filter_map(|(at, word)| {
-        let name = word
-            .rsplit('/')
-            .next()
-            .expect("rsplit yields at least one piece");
+        let name = file_name(word);
         CHECKED.contains(&name).then(|| (name, &part[at + 1..]))
     })
 }
@@ -182,6 +205,8 @@ fn foreign_address(word: &str, repo: &str) -> Option<String> {
     lower.match_indices("github.com").find_map(|(at, _)| {
         let rest = &lower[at + "github.com".len()..];
         let api = lower[..at].ends_with("api.");
+        // A fully qualified host (`github.com.`) reaches the same server.
+        let rest = rest.strip_prefix('.').unwrap_or(rest);
         let path = rest.strip_prefix(['/', ':'])?;
         if api {
             return under_repo(path, repo)
@@ -205,8 +230,10 @@ fn foreign_address(word: &str, repo: &str) -> Option<String> {
 }
 
 /// Checks that the API `path` is under `repos/<repo>`, with a leading `/` allowed, holds no
-/// `..` segment or `%` escape that could move it elsewhere, and is not `forks` or `generate`,
-/// which make another repository; the error names the path.
+/// `..` segment or `%` escape that could move it elsewhere, and is not `forks`, `generate` or
+/// `transfer`, which make another repository or give this one away; the error names the path.
+/// The `?` of a query is handled as a second guard: [`foreign_command`] already refuses every
+/// word with `?`, as the shell could glob it.
 fn under_repo(path: &str, repo: &str) -> Result<(), String> {
     let path = path.strip_prefix('/').unwrap_or(path);
     let prefix = format!("repos/{repo}");
@@ -216,13 +243,18 @@ fn under_repo(path: &str, repo: &str) -> Result<(), String> {
         && matches!(path.as_bytes().get(prefix.len()), None | Some(b'/' | b'?'));
     let segments = || path.split(['/', '?']);
     let moves = path.contains('%') || segments().any(|s| s == ".." || s == ".");
-    let creates = segments()
-        .nth(3)
-        .is_some_and(|s| s.eq_ignore_ascii_case("forks") || s.eq_ignore_ascii_case("generate"));
+    // `transfer` moves the repository to another owner; the others make a new one.
+    let creates = segments().nth(3).is_some_and(|s| {
+        ["forks", "generate", "transfer"]
+            .iter()
+            .any(|c| s.eq_ignore_ascii_case(c))
+    });
     if !under || moves {
         Err(format!("{path}, not under {prefix}"))
     } else if creates {
-        Err(format!("{path}, which makes another repository"))
+        Err(format!(
+            "{path}, which makes another repository or moves this one"
+        ))
     } else {
         Ok(())
     }
@@ -472,12 +504,13 @@ fn default_branch_of(gh: &str, repo: &str) -> Result<String, String> {
 /// other than `gh pr` (`gh api`, `gh secret`, `gh workflow disable`, ...), which opens no pull
 /// request. A fix without commands is done by its steps, on files. Strict, as a wrong yes lets
 /// a change to files pass without its pull request: the command's first word must be `gh`, so
-/// `python fix.py gh secret ...` or `sudo gh ...` count as changing files.
+/// `python fix.py gh secret ...`, `sudo gh ...` or a `./gh` in the clone count as changing
+/// files.
 pub(super) fn settings_only(commands: &[String]) -> bool {
     !commands.is_empty()
         && commands.iter().all(|command| {
             matches!(shell_parts(command).as_slice(), [part]
-                if part.first().is_some_and(|w| w.rsplit('/').next() == Some("gh"))
+                if part.first().is_some_and(|w| w == "gh")
                     && part.get(1).is_some_and(|sub| sub != "pr"))
         })
 }
@@ -541,6 +574,7 @@ mod tests {
             "git clone https://github.com/o/r.git && npm install lodash@4.17.21",
             "git clone git@github.com:O/R.git",
             "cd repo && npm install lodash@4.17.21",
+            "cd repo && git add . && git commit -m 'Pin lodash'",
             "curl https://api.github.com/repos/o/r/hooks",
             "go get github.com/gin-gonic/gin@v1.9.1",
             "pip install 'requests>=2.32'",
@@ -551,6 +585,21 @@ mod tests {
 
     /// Commands that may reach another repository, each with a part of why it is refused.
     const REFUSED: &[(&str, &str)] = &[
+        ("git push https://github.com./x/y.git", "github.com/x/y"),
+        (
+            "curl https://api.github.com./repos/x/y",
+            "the API at repos/x/y",
+        ),
+        (
+            "printf 'g%s repo delete x/y --yes' h | xargs env",
+            "it runs xargs",
+        ),
+        ("printf 'gh repo delete x/y' | . /dev/stdin", "it runs ."),
+        ("alias g=gh", "it runs alias"),
+        (
+            "gh api -X POST repos/o/r/transfer -f new_owner=x",
+            "moves this one",
+        ),
         (
             "gh api repos/o/other/hooks",
             "repos/o/other/hooks, not under",
@@ -655,7 +704,7 @@ mod tests {
             "makes another repository",
         ),
         ("gh extension install x/y", "gh extension, which"),
-        ("gh alias set z 'api orgs/acme/members'", "gh alias, which"),
+        ("gh alias set z 'api orgs/acme/members'", "it runs alias"),
         ("gh auth token", "gh auth, which"),
     ];
 
@@ -682,6 +731,10 @@ mod tests {
             "only a command that is gh itself"
         );
         assert!(!fix(&["python fix.py gh secret set T -R o/r"]));
+        assert!(
+            !fix(&["./gh secret set T -R o/r"]),
+            "a gh in the clone is a script"
+        );
         assert!(fix(&[
             "gh secret delete T -R o/r",
             "gh workflow disable ci.yml -R o/r"
@@ -702,14 +755,18 @@ mod tests {
         fn no_prefix_hides_a_checked_program(
             prefix in proptest::collection::vec(
                 proptest::sample::select(vec![
-                    "sudo", "-u", "root", "env", "-i", "time", "nohup", "{", "!", "if", "then",
-                    "exec", "command", "nice", "-n", "5", "xargs", "A=b", "git", "cd", "pushd",
+                    "sudo", "root", "env", "time", "nohup", "{", "!", "if", "then", "exec",
+                    "command", "nice", "5", "A=b", "git", "cd", "pushd", "curl",
                 ]),
                 0..6,
             )
         ) {
             let command = format!("{} gh repo delete x/y --yes", prefix.join(" "));
-            proptest::prop_assert!(foreign_command(&command, "o/r").is_some(), "{}", command);
+            let why = foreign_command(&command, "o/r");
+            proptest::prop_assert!(
+                why.as_deref().is_some_and(|why| why.contains("gh repo, which")),
+                "{}: {:?}", command, why
+            );
         }
     }
 
