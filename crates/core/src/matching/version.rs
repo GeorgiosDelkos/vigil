@@ -69,8 +69,18 @@ impl Pep440 {
     /// says (<https://peps.python.org/pep-0440/#version-matching>): `2.0.1+cu118` is `2.0.1`.
     /// A listed version with a label matches that label only.
     pub(crate) fn is_listed_as(&self, listed: &Self) -> bool {
+        // Every field but `local`, named, so a field added later cannot be left out here.
         fn public(v: &Pep440) -> (u64, &[u64], &Pre, Option<u64>, bool, u64) {
-            (v.epoch, &v.release, &v.pre, v.post, v.final_dev, v.dev)
+            let Pep440 {
+                epoch,
+                release,
+                pre,
+                post,
+                final_dev,
+                dev,
+                local: _,
+            } = v;
+            (*epoch, release, pre, *post, *final_dev, *dev)
         }
         public(self) == public(listed) && (listed.local.is_none() || self.local == listed.local)
     }

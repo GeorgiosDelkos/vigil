@@ -120,16 +120,20 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   its findings show as resolved, confirmed pending fixes, and left a green icon and "All
   clear"): each report has `unchecked`, a typed record of the sources that failed for its
   target: the KEV catalog, OSV (the id query, or records that could not be fetched and had no
-  cached copy), and the NVD products with nothing fetched and nothing cached. A finding of the
+  cached copy), and the NVD products with nothing fetched and nothing cached in the last week. A finding of the
   target's last report with a verdict that this sweep did not find, and that a failed source
-  could have produced (an OSV finding when OSV or one of its records failed, an NVD finding
-  when its product failed), goes into the new report's `carried` as that report saved it, with
-  `carried_from`, the start of the last sweep that checked it. It stays open, is neither
+  could have produced (an OSV finding when OSV failed or a record its package's query returned
+  did, an NVD finding when its product failed, an OS package's finding when the KEV catalog
+  failed, since without it a crowded query is not thinned and the agent judges another set),
+  goes into the new report's `carried` as that report saved it, with `carried_from`, the start
+  of the last sweep that checked it. It stays open, is neither
   resolved nor new, and its fix is not confirmed until a sweep that checks it; a fix planned
   from any report since `carried_from` is still "fix reported". A target whose newest report
   has anything `unchecked` is never clear (see "UI"). A report saved before these fields reads
   as fully checked with nothing carried. A source served from its cache, because it could not
-  be asked again, is a note in the report, not a failure.
+  be asked again, is a note in the report, not a failure. Accepted downside: a build from
+  before these fields ignores `carried`, so after a downgrade a carried finding reads as
+  resolved and its fix as confirmed.
 - Reading: one report or state file that cannot be read is a problem of the targets it
   touches, never of all of them (decided 2026-11-12, after one broken `report.json` blanked
   the popover and greyed a red icon). A target whose newest report cannot be read shows the
@@ -650,7 +654,9 @@ not an OSV ecosystem, so formulae go through NVD.
   unreachable one: an empty catalog would mark nothing exploited (decided 2026-11-12).
 - A failed request uses what is cached (decided 2026-11-12): an OSV record or a product's NVD
   CVEs that cannot be fetched again come from the cache, and the report notes it; only with
-  nothing cached does the source count as failed for the target (see "Lifecycle"). After NVD
+  nothing cached does the source count as failed for the target (see "Lifecycle"). A product's
+  NVD cache older than a week does not stand in, so an NVD blocked for weeks shows as not
+  checked rather than as clear. After NVD
   answers 403 or 429, its rate limit, it is not asked again in that sweep; asking again would
   only extend the refusal. Pacing is per process, so `vigil advisories` takes the sweeps lock
   before it asks NVD, and fails while a sweep runs rather than doubling the rate.

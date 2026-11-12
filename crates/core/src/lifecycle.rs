@@ -324,39 +324,31 @@ pub(crate) fn first_seen(
 /// a source that could have produced it failed in that sweep ([`Unchecked::covers`]). The new
 /// report keeps it as the last one saved it, so it stays open and its fix unconfirmed until a
 /// sweep checks it. Without this, a sweep with OSV offline read as every OSV finding resolved.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
 pub struct CarriedFinding {
     /// Its key.
+    #[serde(skip)]
     pub(crate) key: FindingKey,
     /// How bad the last check found it.
+    #[serde(skip)]
     pub(crate) severity: Severity,
     /// One line naming it.
+    #[serde(skip)]
     pub(crate) title: String,
     /// When the last sweep that checked it started; it has been carried since.
+    #[serde(skip)]
     pub(crate) carried_from: Timestamp,
     /// The user's dismissal, while it holds.
+    #[serde(skip)]
     pub(crate) dismissed: Option<Dismissal>,
-    /// The entry as the last report saved it. `carried_from` and `dismissed` above replace
-    /// its own when it is written.
+    /// The entry as the last report saved it, with `carried_from` and `dismissed` set to the
+    /// fields above: what is written.
     entry: serde_json::Map<String, serde_json::Value>,
 }
 
-impl Serialize for CarriedFinding {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let value = |v: serde_json::Result<serde_json::Value>| v.map_err(serde::ser::Error::custom);
-        let mut entry = self.entry.clone();
-        let carried_from = value(serde_json::to_value(self.carried_from))?;
-        entry.insert("carried_from".to_owned(), carried_from);
-        entry.insert(
-            "dismissed".to_owned(),
-            value(serde_json::to_value(&self.dismissed))?,
-        );
-        entry.serialize(serializer)
-    }
-}
-
 /// A report's findings and carried findings with all their fields, for [`carried_over`].
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct Entries {
     findings: Vec<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
@@ -377,7 +369,9 @@ pub(crate) fn carried_over(
     if unchecked.is_empty() {
         return Ok(Vec::new());
     }
-    let Some((path, last)) = newest_verdict(sweeps, dir_name)? else {
+    // Past an unreadable report, as the popover reads: the findings it shows are those that
+    // must not be lost. That report's error is the sweep's note on its changes.
+    let (Some((path, last)), _) = newest_readable_verdict(sweeps, dir_name) else {
         return Ok(Vec::new());
     };
     // Read again whole: `Saved` keeps only what the lifecycle uses, and a carried finding is
@@ -392,22 +386,30 @@ pub(crate) fn carried_over(
     })?;
     let entries: Entries = serde_json::from_str(&text).map_err(invalid)?;
     let mut carried = Vec::new();
-    for entry in entries.findings.into_iter().chain(entries.carried) {
+    for mut entry in entries.findings.into_iter().chain(entries.carried) {
         let saved =
             SavedEntry::deserialize(&serde_json::Value::Object(entry.clone())).map_err(invalid)?;
         let lookup = saved
             .installed
             .as_ref()
             .map_or(&serde_json::Value::Null, |i| &i.lookup);
-        if found.contains(&saved.key) || !unchecked.covers(lookup, &saved.advisories) {
+        if found.contains(&saved.key) || !unchecked.covers(lookup) {
             continue;
         }
+        let carried_from = saved.carried_from.unwrap_or(last.started);
+        let dismissed = dismissals.get(saved.key, saved.modified).cloned();
+        let carried_value = serde_json::to_value(carried_from).map_err(invalid)?;
+        entry.insert("carried_from".to_owned(), carried_value);
+        entry.insert(
+            "dismissed".to_owned(),
+            serde_json::to_value(&dismissed).map_err(invalid)?,
+        );
         carried.push(CarriedFinding {
             key: saved.key,
             severity: saved.severity,
             title: saved.title,
-            carried_from: saved.carried_from.unwrap_or(last.started),
-            dismissed: dismissals.get(saved.key, saved.modified).cloned(),
+            carried_from,
+            dismissed,
             entry,
         });
     }
@@ -433,15 +435,21 @@ pub(crate) fn newest_verdict(
 
 /// Like [`newest_verdict`], except that a report that cannot be read is passed over for the
 /// next one, and the first such error is returned beside what was found.
-fn newest_readable_verdict(sweeps: &Path, dir_name: &str) -> (Option<Saved>, Option<StateError>) {
+fn newest_readable_verdict(
+    sweeps: &Path,
+    dir_name: &str,
+) -> (Option<(PathBuf, Saved)>, Option<StateError>) {
     let sweeps = match newest_first(sweeps) {
         Ok(sweeps) => sweeps,
         Err(e) => return (None, Some(e)),
     };
     let mut first_error = None;
     for sweep in sweeps {
-        match read_saved(&sweep.join(dir_name)) {
-            Ok(Some(saved)) if saved.failure.is_none() => return (Some(saved), first_error),
+        let dir = sweep.join(dir_name);
+        match read_saved(&dir) {
+            Ok(Some(saved)) if saved.failure.is_none() => {
+                return (Some((dir.join("report.json"), saved)), first_error);
+            }
             Ok(_) => {}
             Err(e) => {
                 first_error.get_or_insert(e);
@@ -577,7 +585,7 @@ pub fn latest(data_dir: &DataDir, config: &Config) -> Vec<Latest> {
         .into_iter()
         .map(|(target, dir_name)| {
             let (saved, error) = newest_readable_verdict(&state.sweeps, &dir_name);
-            let mut latest = state.latest_from(target, saved);
+            let mut latest = state.latest_from(target, saved.map(|(_, saved)| saved));
             let error = error.map(|e| sweep::plain(&sweep::error_chain(&e)));
             let all: Vec<String> = problems.iter().cloned().chain(error).collect();
             latest.problem = (!all.is_empty()).then(|| all.join("; "));
@@ -720,8 +728,13 @@ fn fix_state(
         return None;
     }
     let found = run.found?;
+    // Planned from a newer report than this one, which is shown because that one cannot be
+    // read: nothing is known of the fix here.
+    if found > report {
+        return None;
+    }
     let unchecked_since = carried_from.unwrap_or(report);
-    Some(if (unchecked_since..=report).contains(&found) {
+    Some(if found >= unchecked_since {
         FixState::Reported {
             at: run.finished,
             summary: sweep::plain(&run.summary),
@@ -736,7 +749,7 @@ fn fix_state(
 /// started at `report` and holds the keys in `found`, is a later sweep than the one the fix was
 /// planned from and no longer has the finding.
 fn confirmed(run: &fix::Run, found: &BTreeSet<FindingKey>, report: Timestamp) -> bool {
-    run.succeeded() && run.found.is_some_and(|f| f != report) && !found.contains(&run.key)
+    run.succeeded() && run.found.is_some_and(|f| f < report) && !found.contains(&run.key)
 }
 
 /// `entry` as shown. Every text is a plain line: it holds agent text and names from the
@@ -1766,6 +1779,27 @@ mod tests {
             latest_of(&data_dir, "mac", "mac").is_err(),
             "Fix all refuses"
         );
+
+        // A fix planned from the report that cannot be read says nothing about the older one.
+        history(
+            &data_dir,
+            &[run(FindingKey(1), "2026-11-05T13:00:00Z", "fixed", Some(0))],
+        );
+        let mac = &latest(&data_dir, &config)[0];
+        assert!(
+            mac.open[0].fix_state.is_none(),
+            "{:?}",
+            mac.open[0].fix_state
+        );
+        assert!(mac.fixed.is_empty());
+        // A degraded sweep carries what the newest readable report has.
+        let nvd_down = Unchecked {
+            nvd: ["curl".to_owned()].into(),
+            ..Unchecked::default()
+        };
+        let none = Dismissals::default();
+        let carried = carried_over(&sweeps, "mac", &nvd_down, &BTreeSet::new(), &none).unwrap();
+        assert_eq!(carried.len(), 1, "past the unreadable report");
 
         // Dismissals that cannot be read dismiss nothing, on every target, which says so.
         let state = data_dir.state_dir();

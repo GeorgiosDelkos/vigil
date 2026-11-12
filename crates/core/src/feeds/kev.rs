@@ -52,7 +52,7 @@ pub(super) fn fetch(feeds: &Feeds) -> Result<Kev, FeedError> {
     }
     if catalog.vulnerabilities.len() < MIN_ENTRIES {
         return Err(unexpected(
-            "the catalog lists fewer than 1000 vulnerabilities, far fewer than CISA's",
+            "the catalog lists far fewer vulnerabilities than CISA's",
         ));
     }
     let mut cves = HashSet::with_capacity(catalog.vulnerabilities.len());
@@ -178,12 +178,12 @@ mod tests {
         };
         assert_eq!(
             unexpected(&json!({"catalogVersion": "1", "vulnerabilities": []})),
-            "the catalog lists fewer than 1000 vulnerabilities, far fewer than CISA's",
+            "the catalog lists far fewer vulnerabilities than CISA's",
             "an empty catalog"
         );
         let mut short = catalog(&[]);
         short["vulnerabilities"].as_array_mut().unwrap().pop();
-        assert!(unexpected(&short).contains("fewer than 1000"), "one short");
+        assert!(unexpected(&short).contains("far fewer"), "one short");
 
         let mut versionless = catalog(&[]);
         versionless["catalogVersion"] = json!(" ");

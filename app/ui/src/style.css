@@ -1333,10 +1333,11 @@ ol.steps {
   color: var(--l3);
   user-select: text;
 }
-/* A fix the agent reported reads green, as fixed, until the next sweep confirms it. */
+/* A target not fully checked reads amber, the colour of its banner. */
 .trow .unchecked {
   color: var(--medium);
 }
+/* A fix the agent reported reads green, as fixed, until the next sweep confirms it. */
 .fixed-row .confirming,
 .trow .confirming {
   font-size: var(--text-12);

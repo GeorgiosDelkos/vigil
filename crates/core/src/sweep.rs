@@ -1170,8 +1170,14 @@ fn fetch_osv(
             crowded.kept,
         ));
     }
-    let unchecked = (!osv.failures.is_empty())
-        .then(|| OsvUnchecked::Records(osv.failures.iter().map(|f| f.id.clone()).collect()));
+    // As `ecosystem:name`, the form `Unchecked::covers` reads back from a saved lookup.
+    let unchecked = (!osv.failures.is_empty()).then(|| {
+        let packages = (osv.failures.iter())
+            .flat_map(|f| &f.packages)
+            .map(|p| format!("{}:{}", p.ecosystem.osv_name(), p.name))
+            .collect();
+        OsvUnchecked::Packages(packages)
+    });
     let mut fetched = Vec::with_capacity(osv.advisories.len());
     for OsvAdvisory { advisory, queries } in osv.advisories {
         let record = OsvRecord::parse(&advisory.record);
@@ -1213,12 +1219,12 @@ fn fetch_nvd(
         let cves = match sources.feeds.nvd(product, sources.history) {
             Ok(cves) => cves,
             Err(e) => {
-                gaps.failed(name, &e, problems);
+                gaps.fail(name, &e, problems);
                 continue;
             }
         };
         match &cves.stale {
-            Some(e) => gaps.stale(name, e),
+            Some(e) => gaps.use_cache(name, e),
             // No CVEs can mean a clean product or a name NVD does not know; tell them apart.
             None if cves.advisories.is_empty() => match sources.feeds.nvd_product_known(product) {
                 Ok(true) => {}
@@ -1248,19 +1254,18 @@ fn fetch_nvd(
 /// What NVD could not answer for a target's products.
 #[derive(Debug, Default)]
 struct NvdGaps<'a> {
-    /// Products with nothing fetched and nothing cached.
+    /// Products with nothing fetched and nothing cached in the last week.
     failed: BTreeSet<String>,
     /// Those of them not asked because NVD refused an earlier request, noted together.
     refused: Vec<&'a str>,
-    /// Products whose cached CVEs were used, and the first one's reason.
-    stale: Vec<&'a str>,
-    stale_reason: Option<String>,
+    /// The first reason a cached copy was used, and every product it was used for.
+    stale: Option<(String, Vec<&'a str>)>,
     /// Products NVD's CPE dictionary does not know.
     unknown: Vec<&'a str>,
 }
 
 impl<'a> NvdGaps<'a> {
-    fn failed(&mut self, name: &'a str, error: &FeedError, problems: &mut Vec<String>) {
+    fn fail(&mut self, name: &'a str, error: &FeedError, problems: &mut Vec<String>) {
         self.failed.insert(name.to_owned());
         if matches!(error, FeedError::NvdRefused { .. }) {
             self.refused.push(name);
@@ -1269,23 +1274,25 @@ impl<'a> NvdGaps<'a> {
         }
     }
 
-    fn stale(&mut self, name: &'a str, error: &FeedError) {
-        self.stale.push(name);
-        self.stale_reason.get_or_insert_with(|| error_chain(error));
+    fn use_cache(&mut self, name: &'a str, error: &FeedError) {
+        let (_, names) = self
+            .stale
+            .get_or_insert_with(|| (error_chain(error), Vec::new()));
+        names.push(name);
     }
 
     fn note(&self, problems: &mut Vec<String>) {
         if !self.refused.is_empty() {
             problems.push(format!(
                 "NVD refused a request (its rate limit), so it was not asked about {}, which \
-                 had nothing cached; an NVD API key raises the limit",
+                 had nothing recent cached; add an NVD API key, or check the one set",
                 self.refused.join(", ")
             ));
         }
-        if let Some(reason) = &self.stale_reason {
+        if let Some((reason, names)) = &self.stale {
             problems.push(format!(
                 "NVD could not be asked about {}, so their cached CVEs were used: {reason}",
-                self.stale.join(", ")
+                names.join(", ")
             ));
         }
         if !self.unknown.is_empty() {
@@ -2039,7 +2046,7 @@ mod tests {
         assert_eq!(
             problems[2],
             "NVD refused a request (its rate limit), so it was not asked about openssl, zlib, \
-             which had nothing cached; an NVD API key raises the limit"
+             which had nothing recent cached; add an NVD API key, or check the one set"
         );
     }
 

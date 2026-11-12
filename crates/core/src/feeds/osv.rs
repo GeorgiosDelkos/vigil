@@ -68,12 +68,22 @@ pub(super) fn fetch(
         } = match record(feeds, &id, queried.modified) {
             Ok(fetched) => fetched,
             Err(error) => {
-                failures.push(RecordFailure { id, error });
+                let packages = queried.queries.iter().map(|q| q.package.clone()).collect();
+                failures.push(RecordFailure {
+                    id,
+                    packages,
+                    error,
+                });
                 continue;
             }
         };
         if let Some(error) = why {
-            stale.push(RecordFailure { id, error });
+            let packages = queried.queries.iter().map(|q| q.package.clone()).collect();
+            stale.push(RecordFailure {
+                id,
+                packages,
+                error,
+            });
         }
         if in_window(header.published, Some(header.modified), history) {
             let mut aliases = header.aliases;
@@ -906,13 +916,19 @@ mod tests {
             "2026-01-01T00:00:00Z".parse().ok()
         );
         assert!(osv.failures.is_empty(), "{:?}", osv.failures);
+        let [stale] = &osv.stale[..] else {
+            panic!("{:?}", osv.stale)
+        };
+        assert_eq!(stale.id, "A-1");
+        assert_eq!(
+            stale.packages,
+            [pkg("npm:a").package],
+            "the query that returned it"
+        );
         assert!(
-            matches!(
-                &osv.stale[..],
-                [RecordFailure { id, error: FeedError::Status { status: 503, .. } }] if id == "A-1"
-            ),
+            matches!(stale.error, FeedError::Status { status: 503, .. }),
             "{:?}",
-            osv.stale
+            stale.error
         );
 
         let empty = tempfile::tempdir().unwrap();

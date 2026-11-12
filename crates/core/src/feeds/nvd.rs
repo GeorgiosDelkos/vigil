@@ -50,6 +50,12 @@ const MAX_DELTA: SignedDuration = SignedDuration::from_hours(24 * WINDOW_DAYS);
 /// Two hours is arbitrary: CVEs change over days, and a sweep a day apart still asks.
 const FRESH: SignedDuration = SignedDuration::from_hours(2);
 
+/// How old a product's cached CVEs may be and still stand in for NVD when it cannot be asked.
+/// Past this the product counts as not checked, so a target is never all clear on CVEs weeks
+/// out of date (NVD blocked by a firewall, say). A week is arbitrary: long enough to ride out an
+/// outage, short enough that the gap shows.
+const STALE_LIMIT: SignedDuration = SignedDuration::from_hours(24 * 7);
+
 /// How long a product NVD's CPE dictionary does not know is not asked for CVEs. Shorter than
 /// [`UNKNOWN_PRODUCT_RECHECK`] on purpose: NVD tends to add a product's CPE name when it
 /// analyses the product's first CVE, which is the one CVE that matters most, so the skip ends
@@ -325,21 +331,22 @@ pub(super) fn fetch(
     let window = cached
         .as_ref()
         .and_then(|c| delta_window(c.fetched_at, now));
+    // Only a cache recent enough stands in for NVD when it cannot be asked (see `STALE_LIMIT`).
+    let usable = cached
+        .as_ref()
+        .is_some_and(|c| within(c.fetched_at, now, STALE_LIMIT));
     // A delta adds to the cached CVEs; a full fetch starts afresh, so CVEs that no longer name
-    // the product go, and keeps a cache too old for a delta only to fall back on.
-    let (mut cves, fallback) = match (cached, window) {
-        (Some(c), Some(_)) => (c.cves, None),
-        (cached, _) => (BTreeMap::new(), cached.map(|c| c.cves)),
+    // the product go.
+    let mut cves = match (cached, window) {
+        (Some(c), Some(_)) => c.cves,
+        _ => BTreeMap::new(),
     };
     let first_page_time = match request_all(feeds, product, window, &mut cves) {
         Ok(time) => time,
         // After a failed delta `cves` holds the cache and the pages that arrived, each newer than
         // its cached copy. The cache is not written, so the next fetch asks for the same window.
-        Err(error) if window.is_some() => return Ok(stale(cves, history, error)),
-        Err(error) => match fallback {
-            Some(cves) => return Ok(stale(cves, history, error)),
-            None => return Err(error),
-        },
+        Err(error) if window.is_some() && usable => return Ok(stale(cves, history, error)),
+        Err(error) => return Err(error),
     };
 
     // The next delta starts where this fetch's coverage ends. A delta covers up to `to` on
@@ -1270,17 +1277,30 @@ mod tests {
             "the next fetch asks again"
         );
 
-        // A cache too old for a delta is still better than nothing.
+        // A cache over a week old does not stand in: the product is not checked.
+        let week = SignedDuration::from_hours(24 * 7);
+        for (name, age) in [("zlib", week * 2), ("git", week * 30)] {
+            cached(&cache, name, &["CVE-2"], age, true);
+            let err = feeds.nvd(&product(name), History::All).unwrap_err();
+            assert!(
+                matches!(err, FeedError::Status { status: 503, .. }),
+                "{name}: {err:?}"
+            );
+        }
         cached(
             &cache,
             "zlib",
             &["CVE-2"],
-            SignedDuration::from_hours(24 * 200),
+            week - SignedDuration::from_mins(1),
             true,
         );
-        let full = feeds.nvd(&product("zlib"), History::All).unwrap();
-        assert_eq!(ids(&full), ["CVE-2"]);
-        assert!(full.stale.is_some());
+        assert!(
+            feeds
+                .nvd(&product("zlib"), History::All)
+                .unwrap()
+                .stale
+                .is_some()
+        );
 
         // Nothing cached: the error.
         let err = feeds.nvd(&product("openssl"), History::All).unwrap_err();

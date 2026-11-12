@@ -33,8 +33,8 @@ pub struct Unchecked {
     /// What of OSV failed, if anything.
     #[serde(default)]
     pub osv: Option<OsvUnchecked>,
-    /// The NVD products whose CVEs could not be fetched and had none cached, as their lookups
-    /// name them (`openssl`, `github:cli`).
+    /// The NVD products whose CVEs could not be fetched and had none cached in the last week, as
+    /// their lookups name them (`openssl`, `github:cli`).
     #[serde(default)]
     pub nvd: BTreeSet<String>,
 }
@@ -45,8 +45,10 @@ pub struct Unchecked {
 pub enum OsvUnchecked {
     /// The id query failed, so no OSV advisory was fetched.
     All,
-    /// These records could not be fetched and had no cached copy.
-    Records(BTreeSet<String>),
+    /// Records returned for these packages could not be fetched and had no cached copy, so
+    /// some of their advisories are missing. Packages as `ecosystem:name` (`npm:lodash`), not
+    /// record ids: a finding may name a record by an alias only.
+    Packages(BTreeSet<String>),
 }
 
 impl Unchecked {
@@ -64,9 +66,9 @@ impl Unchecked {
         }
         match &self.osv {
             Some(OsvUnchecked::All) => parts.push("OSV".to_owned()),
-            Some(OsvUnchecked::Records(ids)) => parts.push(match ids.len() {
-                1 => "1 OSV advisory".to_owned(),
-                n => format!("{n} OSV advisories"),
+            Some(OsvUnchecked::Packages(packages)) => parts.push(match packages.len() {
+                1 => "OSV for 1 package".to_owned(),
+                n => format!("OSV for {n} packages"),
             }),
             None => {}
         }
@@ -79,15 +81,32 @@ impl Unchecked {
     }
 
     /// Whether a source that failed could have produced a finding of the component looked up
-    /// as `lookup` (as a report saves it: `{"package": ...}` or `{"product": "openssl"}`) about
-    /// `advisories`. A failed KEV catalog drops no advisory, so it covers nothing.
-    pub(crate) fn covers(&self, lookup: &Value, advisories: &[String]) -> bool {
-        if lookup.get("package").is_some() {
-            return match &self.osv {
-                Some(OsvUnchecked::All) => true,
-                Some(OsvUnchecked::Records(ids)) => advisories.iter().any(|a| ids.contains(a)),
-                None => false,
+    /// as `lookup`, as a report saves it: `{"package": {"ecosystem": "npm", "name": "lodash"}}`
+    /// or `{"product": "openssl"}`.
+    ///
+    /// A failed KEV catalog covers the findings of OS packages: a query of one that matches
+    /// over 200 advisories (the kernel) keeps only those in the catalog, so without it the
+    /// agent judges another, far larger set, and last sweep's findings may not be among what it
+    /// lists. OSV names an OS release with a colon (`Debian:12`, `Ubuntu:24.04:LTS`), a
+    /// language ecosystem never (`npm`, `crates.io`).
+    pub(crate) fn covers(&self, lookup: &Value) -> bool {
+        if let Some(package) = lookup.get("package") {
+            let field = |name| {
+                package
+                    .get(name)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
             };
+            let (ecosystem, name) = (field("ecosystem"), field("name"));
+            let thinned = self.kev && ecosystem.contains(':');
+            return thinned
+                || match &self.osv {
+                    Some(OsvUnchecked::All) => true,
+                    Some(OsvUnchecked::Packages(packages)) => {
+                        packages.contains(&format!("{ecosystem}:{name}"))
+                    }
+                    None => false,
+                };
         }
         lookup
             .get("product")
@@ -102,8 +121,8 @@ mod tests {
 
     use super::*;
 
-    fn ids(ids: &[&str]) -> BTreeSet<String> {
-        ids.iter().map(|id| (*id).to_owned()).collect()
+    fn names(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|n| (*n).to_owned()).collect()
     }
 
     #[test]
@@ -113,18 +132,18 @@ mod tests {
         let all = Unchecked {
             kev: true,
             osv: Some(OsvUnchecked::All),
-            nvd: ids(&["openssl", "curl", "github:cli"]),
+            nvd: names(&["openssl", "curl", "github:cli"]),
         };
         assert!(!all.is_empty());
         assert_eq!(all.describe().unwrap(), "CISA KEV, OSV, NVD for 3 products");
         let some = Unchecked {
-            osv: Some(OsvUnchecked::Records(ids(&["GHSA-1"]))),
-            nvd: ids(&["curl"]),
+            osv: Some(OsvUnchecked::Packages(names(&["npm:lodash"]))),
+            nvd: names(&["curl"]),
             ..Unchecked::default()
         };
         assert_eq!(
             some.describe().unwrap(),
-            "1 OSV advisory, NVD for 1 product"
+            "OSV for 1 package, NVD for 1 product"
         );
         let kev = Unchecked {
             kev: true,
@@ -138,41 +157,43 @@ mod tests {
 
     #[test]
     fn covers_the_findings_a_failed_source_could_have_produced() {
-        let package = json!({"package": {"ecosystem": "npm", "name": "lodash"}});
+        let lodash = json!({"package": {"ecosystem": "npm", "name": "lodash"}});
+        let kernel = json!({"package": {"ecosystem": "Debian:12", "name": "linux"}});
         let curl = json!({"product": "curl"});
-        let ghsa = ["GHSA-1".to_owned()];
 
         let osv_down = Unchecked {
             osv: Some(OsvUnchecked::All),
             ..Unchecked::default()
         };
-        assert!(osv_down.covers(&package, &ghsa));
-        assert!(!osv_down.covers(&curl, &[]), "NVD was checked");
+        assert!(osv_down.covers(&lodash) && osv_down.covers(&kernel));
+        assert!(!osv_down.covers(&curl), "NVD was checked");
 
-        let one_record = Unchecked {
-            osv: Some(OsvUnchecked::Records(ids(&["GHSA-1"]))),
+        let one_package = Unchecked {
+            osv: Some(OsvUnchecked::Packages(names(&["npm:lodash"]))),
             ..Unchecked::default()
         };
-        assert!(one_record.covers(&package, &ghsa));
-        assert!(!one_record.covers(&package, &["GHSA-2".to_owned()]));
+        assert!(one_package.covers(&lodash));
+        let other = json!({"package": {"ecosystem": "npm", "name": "left-pad"}});
+        assert!(!one_package.covers(&other));
 
         let nvd = Unchecked {
-            nvd: ids(&["curl"]),
+            nvd: names(&["curl"]),
             ..Unchecked::default()
         };
-        assert!(nvd.covers(&curl, &[]));
-        assert!(!nvd.covers(&json!({"product": "openssl"}), &[]));
-        assert!(!nvd.covers(&package, &ghsa));
+        assert!(nvd.covers(&curl));
+        assert!(!nvd.covers(&json!({"product": "openssl"})));
+        assert!(!nvd.covers(&lodash));
 
+        // Without the catalog only OS packages, whose crowded queries it thins, are covered.
         let kev = Unchecked {
             kev: true,
             ..Unchecked::default()
         };
-        assert!(!kev.covers(&package, &ghsa) && !kev.covers(&curl, &[]));
-        assert!(
-            !osv_down.covers(&Value::Null, &ghsa),
-            "an entry without a lookup"
-        );
+        assert!(kev.covers(&kernel));
+        let ubuntu = json!({"package": {"ecosystem": "Ubuntu:24.04:LTS", "name": "linux"}});
+        assert!(kev.covers(&ubuntu));
+        assert!(!kev.covers(&lodash) && !kev.covers(&curl));
+        assert!(!osv_down.covers(&Value::Null), "an entry without a lookup");
     }
 
     #[test]
@@ -181,13 +202,13 @@ mod tests {
         assert!(old.is_empty());
         let saved = Unchecked {
             kev: false,
-            osv: Some(OsvUnchecked::Records(ids(&["GHSA-1"]))),
-            nvd: ids(&["curl"]),
+            osv: Some(OsvUnchecked::Packages(names(&["npm:lodash"]))),
+            nvd: names(&["curl"]),
         };
         let json = serde_json::to_value(&saved).unwrap();
         assert_eq!(
             json,
-            json!({"kev": false, "osv": {"records": ["GHSA-1"]}, "nvd": ["curl"]})
+            json!({"kev": false, "osv": {"packages": ["npm:lodash"]}, "nvd": ["curl"]})
         );
         assert_eq!(serde_json::from_value::<Unchecked>(json).unwrap(), saved);
     }

@@ -78,8 +78,8 @@ pub struct PopoverView {
     /// Whether a sweep ran, nothing is open, no reported fix waits for the next sweep, and no
     /// target has a [`TargetLine::warning`].
     pub all_clear: bool,
-    /// One line naming each target with a [`TargetLine::warning`], and the warning: "Not fully
-    /// checked: Mac (NVD for 3 products)". `None` when no target has one.
+    /// Each target with a [`TargetLine::warning`], as its label and the warning, joined by "; ":
+    /// "This Mac: NVD for 3 products not checked". `None` when no target has one.
     pub warning: Option<String>,
     /// How many targets there are: "1 target", "3 targets".
     pub target_count: String,

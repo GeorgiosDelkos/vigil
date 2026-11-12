@@ -39,7 +39,8 @@ use crate::popover::popover_view;
 ///
 /// # Errors
 ///
-/// Fails when [`latest`] cannot read the state, or when the file cannot be written.
+/// Fails when the file cannot be written. What [`latest`] cannot read shows as each target's
+/// warning in the page instead.
 pub fn write_html_report(data_dir: &DataDir, config: &Config) -> Result<PathBuf, StateError> {
     let html = render(latest(data_dir, config), Timestamp::now());
     let path = data_dir.report_html_file();

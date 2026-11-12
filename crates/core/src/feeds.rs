@@ -142,9 +142,10 @@ impl Feeds {
     /// request.
     ///
     /// When NVD cannot be asked (a network error, an answer that does not decode, or a refusal
-    /// earlier through this `Feeds`), the cached CVEs are returned with the reason in
-    /// [`NvdCves::stale`]. NVD answers 403 or 429 when its rate limit is exceeded, and is not
-    /// asked again through this `Feeds` after that; an API key raises the limit.
+    /// earlier through this `Feeds`), CVEs cached in the last week are returned with the reason
+    /// in [`NvdCves::stale`]; an older cache is not. NVD answers 403 or 429 when its rate limit
+    /// is exceeded, and is not asked again through this `Feeds` after that; an API key raises
+    /// the limit.
     ///
     /// # Errors
     ///
@@ -198,6 +199,8 @@ pub struct OsvAdvisories {
 pub struct RecordFailure {
     /// The advisory's id.
     pub id: String,
+    /// The packages whose query returned it.
+    pub packages: Vec<Package>,
     /// Why.
     pub error: FeedError,
 }
@@ -391,7 +394,7 @@ pub enum FeedError {
     /// asked again.
     #[error(
         "NVD refused an earlier request ({status}, its rate limit), so it was not asked again \
-         in this sweep; an NVD API key raises the limit"
+         in this sweep; add an NVD API key, or check the one set"
     )]
     NvdRefused {
         /// The status of the refusal, 403 or 429.

@@ -208,7 +208,7 @@ function figuresText(target: TargetLine): string {
     return "not swept yet";
   }
   if (target.open === 0) {
-    return target.to_confirm ?? "clear";
+    return target.to_confirm ?? (target.warning === null ? "clear" : "not fully checked");
   }
   const parts = mix(target).map((m) => `${m.count} ${m.severity}`);
   return `${target.open} open: ${parts.join(", ")}`;
@@ -218,7 +218,8 @@ function figuresText(target: TargetLine): string {
 function rowStatus(target: TargetLine): string {
   const figures = figuresText(target);
   const checked = target.checked === null ? figures : `${figures}, ${target.checked}`;
-  return target.warning === null ? checked : `${checked}, not fully checked`;
+  const said = target.warning === null || checked.includes("not fully checked");
+  return said ? checked : `${checked}, not fully checked`;
 }
 
 /** One row per target, every row the same shape: the name, what was checked, a count for each

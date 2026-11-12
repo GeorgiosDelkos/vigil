@@ -543,7 +543,8 @@ describe("the popover", () => {
     const mac = targetRow(/^This Mac/);
     expect(mac.sub).toBe("12 components checked · not fully checked");
     expect(mac.clear).toBe(false);
-    expect(screen.getByRole("button", { name: /not fully checked$/ })).toBeTruthy();
+    const orbitRow = screen.getByRole("button", { name: /^This Mac, not fully checked, 12 / });
+    expect(orbitRow.getAttribute("aria-label")).not.toContain("clear");
 
     fireEvent.click(screen.getByTitle("Show details"));
     expect(await screen.findByText("Not fully checked", { selector: "h1" })).toBeTruthy();
@@ -551,6 +552,18 @@ describe("the popover", () => {
     fireEvent.click(screen.getByRole("tab", { name: /Targets/ }));
     expect(listTarget("This Mac").textContent).toContain("not fully checked");
     expect(listTarget("This Mac").querySelector(".open svg")).toBeNull();
+
+    // With something open the row still says it was not fully checked.
+    cleanup();
+    shown = {
+      ...shown,
+      items: two().items,
+      targets: shown.targets.map((t) => ({ ...t, open: 2 })),
+    };
+    answer();
+    await openList();
+    fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
+    expect(listTarget("This Mac").textContent).toContain("not fully checked");
   });
 
   it("shows all clear once a sweep found nothing", async () => {
