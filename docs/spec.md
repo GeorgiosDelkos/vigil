@@ -736,7 +736,8 @@ not an OSV ecosystem, so formulae go through NVD.
   Petch), code and counts included: IBM's unmodified web fonts, bundled in `app/ui/src/fonts`
   so the app and the report look the same offline. The licence ships beside them in the build
   (`app/ui/public/fonts/OFL.txt`), and the report's font CSS opens with the copyright notice.
-- Plugins: notification, autostart, positioner (versions looked up at implementation time).
+- Plugins: notification, autostart, positioner (versions looked up at implementation time),
+  and the updater ("Updates" below).
 - Scheduler: in-app interval timer; skip if a sweep is running; run once on wake if overdue.
 
 Built in step 9a (2026-11-06):
@@ -900,6 +901,58 @@ with all the details", dark, not white):
 - Every text is HTML-escaped: it holds agent text and names from the target. Advisory ids
   link only to NVD (CVE ids) or OSV.dev (other ids), and only when the id has a strict
   shape; anything else, the agent's pull request URLs included, is plain text.
+
+### Updates (decided 2026-11-12)
+
+The owner's decisions, and why:
+
+- **Mechanism: Tauri's official updater plugin** (`tauri-plugin-updater` 2), with its mandatory
+  minisign signature check. The public key is `plugins.updater.pubkey` in `tauri.conf.json`;
+  the private key and its password live only in the GitHub Environment `release`. The endpoint
+  is `https://github.com/GeorgiosDelkos/vigil/releases/latest/download/latest.json`, HTTPS only.
+  `requireSignedVersion` is on: the signature must also name the version `latest.json`
+  announces, so an older signed release cannot be passed off as a newer one (nothing was
+  released before, so no old signature lacks the version).
+- **When:** at launch and every 12 hours while the app runs, measured on the wall clock (the
+  check thread wakes every 10 minutes), so time asleep counts. A failed check waits for the
+  next one.
+- **Download in the background, install on the user's click.** A newer version is downloaded
+  and verified at once, then waits in memory. The popover shows "Update ready: Vigil x.y.z" with
+  Restart to update, and one notification says so. The click installs it (the plugin replaces
+  the bundle on disk) and restarts. It never installs or restarts while a sweep or fix runs: the
+  button waits, and Rust refuses it under the runner's lock in the same step that checks its
+  status, then marks the app as quitting so nothing new starts during the install. An install
+  that fails keeps the update waiting.
+- **Failures are quiet.** Offline, GitHub down or a bad signature leave one line under Settings
+  ("the last update check failed: ...") and one on stderr. They never set the runner's failed
+  status, so no banner, no tray change, and never a held-up sweep.
+- **State:** `update::Updates` lives in the runner's shared state (`Runner`), like the status,
+  not in a global: last check time, last problem, the waiting package.
+- **Only installed releases check.** A debug build, `cargo tauri dev`, and a release binary
+  run from `target/` never check: the plugin installs over the executable's folder unless it
+  is a bundle's `Contents/MacOS`, so the app checks only when it runs from `<name>.app`. An app
+  bundle built from source with `cargo tauri build` does check, and is offered official
+  releases. No on/off switch (simplicity); Settings shows the version and the last check.
+- **The webview has no updater permission.** Checking, downloading and installing run in Rust;
+  the UI calls only the app's `restart_to_update` command. `updater:default` is not in the
+  capabilities.
+- **Versioning:** one version, `[workspace.package] version` in the root `Cargo.toml`, which
+  every crate inherits. `tauri.conf.json` has no `version`, so Tauri takes the app crate's.
+- **Releases** (`.github/workflows/release.yml`): pushing a tag `v*` runs one macOS job in the
+  `release` environment (the owner approves each run). It fails unless the tag is `v` plus the
+  Cargo version, builds a universal app (Apple Silicon and Intel in one binary, so one download
+  and one `latest.json` entry serve every Mac) with `tauri-apps/tauri-action` and the CLI from
+  `app/ui`'s lockfile, signs it with the owner's Developer ID and notarizes it (Tauri's Apple
+  variables), notarizes and staples the `.dmg`, and signs the updater package with the updater
+  key. It then checks the signature, team, hardened runtime, notarization and staple of the app
+  and of the app inside the updater package, both architectures, and the updater signature with
+  the committed public key and the signed version (`examples/verify_update.rs`, using
+  `minisign-verify` as the plugin does), and only then publishes the draft release. A
+  workflow_dispatch run is a dry run with no release. The pattern follows
+  ourovoros-io/oikonomia's release workflow.
+- **Local builds need no key:** the updater artifacts and the `.dmg` are added by
+  `tauri.release.conf.json`, which only the workflow passes, so `cargo tauri build` keeps
+  working without `TAURI_SIGNING_PRIVATE_KEY`.
 
 ### CLI
 
