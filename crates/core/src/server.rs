@@ -1437,6 +1437,33 @@ Version: 1
         assert_eq!(files, ["server/system.json"]);
     }
 
+    /// A part of exactly its limit is kept whole and not noted; one byte more is cut.
+    #[test]
+    fn a_part_at_its_limit_is_kept_and_one_byte_over_is_cut() {
+        fn part(text: &str) -> Part<'_> {
+            Part {
+                name: "listening",
+                text,
+                status: 0,
+            }
+        }
+        // 16 bytes a line, so 1 MiB of lines ends on a line boundary.
+        let line = "tcp 0.0.0.0:220\n";
+        assert_eq!(line.len(), 16);
+        let at_limit = line.repeat((1 << 20) / 16);
+        assert_eq!(at_limit.len(), 1 << 20);
+
+        let mut cut = Vec::new();
+        let kept = capped(&part(&at_limit), PartKind::Output, &mut cut);
+        assert_eq!(kept.text.len(), 1 << 20);
+        assert!(cut.is_empty(), "{cut:?}");
+
+        let over = format!("{at_limit}x");
+        let kept = capped(&part(&over), PartKind::Output, &mut cut);
+        assert_eq!(kept.text, at_limit, "the partial last line is dropped");
+        assert_eq!(cut.len(), 1, "{cut:?}");
+    }
+
     /// A server cannot fill the bundle: each part is cut at its limit, on a line or package
     /// boundary, and the cut is noted.
     #[test]
