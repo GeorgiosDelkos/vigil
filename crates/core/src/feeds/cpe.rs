@@ -309,7 +309,7 @@ fn same_version(named: &str, installed: &str) -> Option<bool> {
         let same = match (named.get(i), installed.get(i)) {
             // Digits against letters at the same place (`1.8.0update401` against `1.8.0_401`)
             // are two ways of writing that cannot be told apart.
-            (Some(a), Some(b)) => a.compare(b)? == Ordering::Equal,
+            (Some(a), Some(b)) => a.same(b)?,
             (Some(r), None) | (None, Some(r)) => zero(r),
             (None, None) => unreachable!("i is below the longer length"),
         };
@@ -326,7 +326,11 @@ fn is_prefix(short: &str, long: &str) -> bool {
     let (Some(short), Some(long)) = (runs(short), runs(long)) else {
         return false;
     };
-    short.len() <= long.len() && short.iter().zip(&long).all(|(s, l)| s.same_as(l))
+    short.len() <= long.len()
+        && short
+            .iter()
+            .zip(&long)
+            .all(|(s, l)| s.same(l) == Some(true))
 }
 
 /// The fields of a CPE 2.3 formatted string this module reads:
@@ -389,13 +393,15 @@ fn unescape(field: &str) -> Cow<'_, str> {
 /// Compares two version strings, or returns `None` when they do not compare cleanly.
 ///
 /// Each version is read as runs of digits and runs of letters, split at `.`, `-`, `_` and `+`:
-/// `1.0.2k` is `1 0 2 k` and `1.0.0rc10` is `1 0 0 rc 10`. Digit runs compare as numbers and
-/// letter runs alphabetically (`alpha` < `beta` < `rc`). Where one side has ended, a missing
-/// run counts as `0`, so `1.2` equals `1.2.0` and is before `1.2.0.1`. The result is `None`
-/// when, at the first difference, one side has digits and the other letters (`r3222` against
-/// `0.164`), when the side that goes on has letters (`1.0.2k` against `1.0.2`) or a run after
-/// `-` or `+` (`1.2.3-1` is a revision after `1.2.3` or a pre-release before it), and for an
-/// empty version or any other character.
+/// `1.0.2k` is `1 0 2 k` and `1.0.0rc10` is `1 0 0 rc 10`. Digit runs compare as numbers,
+/// and letter runs only as the release stages [`stage`] knows (`dev` < `alpha` < `rc` < `ga`).
+/// Where one side has ended, a missing run counts as `0`, so `1.2` equals `1.2.0` and is before
+/// `1.2.0.1`. The result is `None` when, at the first difference, one side has digits and the
+/// other letters (`r3222` against `0.164`), the letters differ and one is no known stage
+/// (`1.0.RC1` against `1.0.GA` is `rc` before `ga`, but `1.0.2k` against `1.0.2l` is unknown:
+/// vendors order such letters their own way), when the side that goes on has letters (`1.0.2k`
+/// against `1.0.2`) or a run after `-` or `+` (`1.2.3-1` is a revision after `1.2.3` or a
+/// pre-release before it), and for an empty version or any other character.
 fn compare(a: &str, b: &str) -> Option<Ordering> {
     let (a, b) = (runs(a)?, runs(b)?);
     for i in 0..a.len().max(b.len()) {
@@ -422,11 +428,27 @@ struct Run {
 }
 
 impl Run {
+    /// The order of two runs: digits as numbers, the same letters as equal, and other letters
+    /// only when both are release stages ([`stage`]). Alphabetical order was wrong for words
+    /// (`rc` after `ga`, `dev` after `a`), and a wrong order can put a vulnerable version out
+    /// of range.
     fn compare(&self, other: &Self) -> Option<Ordering> {
         match (self.digits, other.digits) {
             (true, true) => Some(compare_digits(&self.text, &other.text)),
-            (false, false) => Some(self.text.cmp(&other.text)),
+            (false, false) if self.text == other.text => Some(Ordering::Equal),
+            (false, false) => Some(stage(&self.text)?.cmp(&stage(&other.text)?)),
             _ => None,
+        }
+    }
+
+    /// Whether two runs are the same, which unlike their order is known for any two words:
+    /// `w` is not `v`, whichever comes first. `None` for digits against letters.
+    fn same(&self, other: &Self) -> Option<bool> {
+        match (self.digits, other.digits) {
+            (false, false) if self.text != other.text => {
+                Some(stage(&self.text).is_some_and(|s| Some(s) == stage(&other.text)))
+            }
+            _ => self.compare(other).map(Ordering::is_eq),
         }
     }
 
@@ -434,9 +456,24 @@ impl Run {
     fn compare_with_nothing(&self) -> Option<Ordering> {
         (self.digits && !self.qualifier).then(|| compare_digits(&self.text, "0"))
     }
+}
 
-    fn same_as(&self, other: &Self) -> bool {
-        self.compare(other) == Some(Ordering::Equal)
+/// Where a lowercased letter run stands among the release stages that vendors spell alike, from
+/// a development build to the release; `None` for any other word. Spellings of one stage share
+/// a rank: `a` and `alpha`, `c`, `cr` (candidate release) and `rc`, `ga`, `final` and `release`.
+/// The order is PEP 440's for `dev`, `a`, `b` and `rc`, and Maven's for `alpha`, `beta`,
+/// `cr` and `rc`, and `ga`, `final` and `release`; `pre` and `preview`, which neither defines,
+/// sit between beta and candidate, where vendors use them. Any word not listed (`k`, `update`,
+/// `patch`) makes a comparison unknown.
+fn stage(text: &str) -> Option<u8> {
+    match text {
+        "dev" => Some(0),
+        "a" | "alpha" => Some(1),
+        "b" | "beta" => Some(2),
+        "pre" | "preview" => Some(3),
+        "c" | "cr" | "rc" => Some(4),
+        "ga" | "final" | "release" => Some(5),
+        _ => None,
     }
 }
 
@@ -526,6 +563,15 @@ mod tests {
             ("1.2", "1.2.0", Some(Equal)),
             ("1.2.0.1", "1.2", Some(Greater)),
             ("1.0.2a", "1.0.2b", Some(Less)),
+            ("1.0.RC1", "1.0.GA", Some(Less)),
+            ("2.0.0dev1", "2.0.0a1", Some(Less)),
+            ("1.0-alpha", "1.0-a", Some(Equal)),
+            ("1.0.final", "1.0.ga", Some(Equal)),
+            ("1.0.2k", "1.0.2l", None),
+            ("1.0.update", "1.0.ga", None),
+            ("1.0.2k", "1.0.2k", Some(Equal)),
+            ("1.0-beta", "1.0-pre", Some(Less)),
+            ("1.0-preview", "1.0-rc", Some(Less)),
             ("3.0.0-beta1", "3.0.0-rc1", Some(Less)),
             ("1.0.0rc2", "1.0.0rc10", Some(Less)),
             ("3.12.0rc2", "3.12.0rc10", Some(Less)),
@@ -542,6 +588,28 @@ mod tests {
         for (a, b, expected) in cases {
             assert_eq!(compare(a, b), expected, "{a} against {b}");
         }
+    }
+
+    /// Sameness is known for any two words, unlike their order.
+    #[test]
+    fn versions_are_the_same_by_number_word_and_stage() {
+        let cases = [
+            ("1.1.1w", "1.1.1w", Some(true)),
+            ("1.1.1w", "1.1.1v", Some(false)),
+            ("1.0alpha1", "1.0a1", Some(true)),
+            ("1.0a1", "1.0b1", Some(false)),
+            ("1.0.final", "1.0.GA", Some(true)),
+            ("1.2", "1.2.0", Some(true)),
+            ("1.8.0update401", "1.8.0_401", None),
+        ];
+        for (named, installed, expected) in cases {
+            assert_eq!(
+                same_version(named, installed),
+                expected,
+                "{named} and {installed}"
+            );
+        }
+        assert!(is_prefix("1.1.1", "1.1.1w") && !is_prefix("1.1.1v", "1.1.1w"));
     }
 
     #[test]
@@ -584,13 +652,32 @@ mod tests {
             "versionEndExcluding": "1.0.2zh",
         })]);
         assert!(
-            !letters.may_affect(&product("openssl"), "1.0.2zi"),
-            "past the end, though `1.0.2zi` does not compare with the start `1.0.2`"
+            letters.may_affect(&product("openssl"), "1.0.2zi"),
+            "letters that are no release stage have no known order, so kept"
         );
         assert!(
             letters.may_affect(&product("openssl"), "1.0.2zg"),
             "unclear, so kept"
         );
+
+        // Alphabetically `rc` is after `ga` and `dev` after `a`, which put these out of range.
+        let before_ga = record(&[json!({
+            "vulnerable": true,
+            "criteria": "cpe:2.3:a:jboss:jboss:*:*:*:*:*:*:*:*",
+            "versionEndExcluding": "1.0.GA",
+        })]);
+        assert!(before_ga.may_affect(&product("jboss"), "1.0.RC1"));
+        assert!(
+            !before_ga.may_affect(&product("jboss"), "1.0.final"),
+            "the same stage"
+        );
+        let before_alpha = record(&[json!({
+            "vulnerable": true,
+            "criteria": "cpe:2.3:a:x:x:*:*:*:*:*:*:*:*",
+            "versionEndExcluding": "2.0.0a1",
+        })]);
+        assert!(before_alpha.may_affect(&product("x"), "2.0.0dev1"));
+        assert!(!before_alpha.may_affect(&product("x"), "2.0.0b1"));
 
         let every_beta = record(&[vulnerable("cpe:2.3:a:openssl:openssl:*:beta:*:*:*:*:*:*")]);
         assert!(every_beta.may_affect(&product("openssl"), "9.9"));
@@ -945,6 +1032,29 @@ mod tests {
                 v
             };
             prop_assert_eq!(compare(&text(&a), &text(&b)), Some(pad(&a).cmp(&pad(&b))));
+        }
+
+        /// Two different words that are not both release stages never order versions, so no
+        /// bound written with one puts a version written with the other out of range.
+        #[test]
+        fn unknown_letters_never_put_a_version_out_of_range(
+            installed in "[a-z]{1,8}",
+            bound in "[a-z]{1,8}",
+            number in 0_u8..10,
+        ) {
+            prop_assume!(
+                installed != bound && (stage(&installed).is_none() || stage(&bound).is_none())
+            );
+            let (installed, bound) = (format!("1.0.{installed}{number}"), format!("1.0.{bound}"));
+            prop_assert_eq!(compare(&installed, &bound), None);
+            for limit in ["versionEndExcluding", "versionEndIncluding", "versionStartIncluding"] {
+                let matches = record(&[json!({
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:x:x:*:*:*:*:*:*:*:*",
+                    limit: bound,
+                })]);
+                prop_assert!(matches.may_affect(&product("x"), &installed), "{limit} {bound}");
+            }
         }
 
         /// A range with one upper bound keeps exactly the versions not cleanly at or above it.

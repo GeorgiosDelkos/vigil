@@ -1076,7 +1076,8 @@ fn findings_list_what_is_open_and_one_target_can_be_swept() {
     );
     assert!(
         listed.contains(&format!(
-            "): 1 open\n  medium   {key}  file github/workflows/ci.yml\n           fix: s\n"
+            "): 1 open\n  not fully checked: CISA KEV, OSV\n  medium   {key}  file \
+             github/workflows/ci.yml\n           fix: s\n"
         )),
         "{listed}"
     );

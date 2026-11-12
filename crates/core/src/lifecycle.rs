@@ -1,5 +1,6 @@
 //! What carries over from one sweep to the next: finding keys, dismissals, what changed
-//! since the target's last sweep, and which reported fixes a later sweep confirmed
+//! since the target's last sweep, the findings a degraded sweep could not check again
+//! ([`CarriedFinding`], see `unchecked`), and which reported fixes a later sweep confirmed
 //! (`state/fixes.jsonl`).
 //!
 //! A [`FindingKey`] names one finding or issue across sweeps, so a dismissal and the
@@ -32,6 +33,7 @@ use crate::fix;
 use crate::inventory::FoundIn;
 use crate::paths::DataDir;
 use crate::sweep;
+use crate::unchecked::Unchecked;
 
 /// The stable id of a finding or issue: 16 hex digits, the same in every sweep that finds it.
 ///
@@ -318,6 +320,103 @@ pub(crate) fn first_seen(
         .collect())
 }
 
+/// A finding of a target's last report that a sweep did not find again and could not have:
+/// a source that could have produced it failed in that sweep ([`Unchecked::covers`]). The new
+/// report keeps it as the last one saved it, so it stays open and its fix unconfirmed until a
+/// sweep checks it. Without this, a sweep with OSV offline read as every OSV finding resolved.
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct CarriedFinding {
+    /// Its key.
+    #[serde(skip)]
+    pub(crate) key: FindingKey,
+    /// How bad the last check found it.
+    #[serde(skip)]
+    pub(crate) severity: Severity,
+    /// One line naming it.
+    #[serde(skip)]
+    pub(crate) title: String,
+    /// When the last sweep that checked it started; it has been carried since.
+    #[serde(skip)]
+    pub(crate) carried_from: Timestamp,
+    /// The user's dismissal, while it holds.
+    #[serde(skip)]
+    pub(crate) dismissed: Option<Dismissal>,
+    /// The entry as the last report saved it, with `carried_from` and `dismissed` set to the
+    /// fields above: what is written.
+    entry: serde_json::Map<String, serde_json::Value>,
+}
+
+/// A report's findings and carried findings with all their fields, for [`carried_over`].
+#[derive(Debug, Deserialize)]
+struct Entries {
+    findings: Vec<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    carried: Vec<serde_json::Map<String, serde_json::Value>>,
+}
+
+/// The findings of the target's newest readable report with a verdict in `<sweep>/<dir_name>`
+/// that are not in `found`, this sweep's findings, and that a source failed in `unchecked`
+/// could have produced, each with its dismissal in `dismissals`. Unreadable reports are passed
+/// over; the sweep notes their error with its changes. A finding carried before keeps the time
+/// it was first carried from.
+pub(crate) fn carried_over(
+    sweeps: &Path,
+    dir_name: &str,
+    unchecked: &Unchecked,
+    found: &BTreeSet<FindingKey>,
+    dismissals: &Dismissals,
+) -> Result<Vec<CarriedFinding>, StateError> {
+    if unchecked.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Past an unreadable report, as the popover reads: the findings it shows are those that
+    // must not be lost. That report's error is the sweep's note on its changes.
+    let (Some((path, last)), _) = newest_readable_verdict(sweeps, dir_name) else {
+        return Ok(Vec::new());
+    };
+    // Read again whole: `Saved` keeps only what the lifecycle uses, and a carried finding is
+    // written back with every field it had.
+    let invalid = |e: serde_json::Error| StateError::Read {
+        path: path.clone(),
+        source: io::Error::new(io::ErrorKind::InvalidData, e),
+    };
+    let text = fs::read_to_string(&path).map_err(|source| StateError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let entries: Entries = serde_json::from_str(&text).map_err(invalid)?;
+    let mut carried = Vec::new();
+    for mut entry in entries.findings.into_iter().chain(entries.carried) {
+        let saved =
+            SavedEntry::deserialize(&serde_json::Value::Object(entry.clone())).map_err(invalid)?;
+        let lookup = saved
+            .installed
+            .as_ref()
+            .map_or(&serde_json::Value::Null, |i| &i.lookup);
+        if found.contains(&saved.key) || !unchecked.covers(lookup) {
+            continue;
+        }
+        let carried_from = saved.carried_from.unwrap_or(last.started);
+        let dismissed = dismissals.get(saved.key, saved.modified).cloned();
+        let carried_value = serde_json::to_value(carried_from).map_err(invalid)?;
+        entry.insert("carried_from".to_owned(), carried_value);
+        entry.insert(
+            "dismissed".to_owned(),
+            serde_json::to_value(&dismissed).map_err(invalid)?,
+        );
+        carried.push(CarriedFinding {
+            key: saved.key,
+            severity: saved.severity,
+            title: saved.title,
+            carried_from,
+            dismissed,
+            entry,
+        });
+    }
+    Ok(carried)
+}
+
 /// The newest `<sweep>/<dir_name>/report.json` with a verdict, with its contents.
 pub(crate) fn newest_verdict(
     sweeps: &Path,
@@ -333,6 +432,32 @@ pub(crate) fn newest_verdict(
         }
     }
     Ok(None)
+}
+
+/// Like [`newest_verdict`], except that a report that cannot be read is passed over for the
+/// next one, and the first such error is returned beside what was found.
+fn newest_readable_verdict(
+    sweeps: &Path,
+    dir_name: &str,
+) -> (Option<(PathBuf, Saved)>, Option<StateError>) {
+    let sweeps = match newest_first(sweeps) {
+        Ok(sweeps) => sweeps,
+        Err(e) => return (None, Some(e)),
+    };
+    let mut first_error = None;
+    for sweep in sweeps {
+        let dir = sweep.join(dir_name);
+        match read_saved(&dir) {
+            Ok(Some(saved)) if saved.failure.is_none() => {
+                return (Some((dir.join("report.json"), saved)), first_error);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                first_error.get_or_insert(e);
+            }
+        }
+    }
+    (None, first_error)
 }
 
 /// A target's open findings and issues, as its newest report with a verdict has them.
@@ -352,6 +477,11 @@ pub struct Latest {
     pub fixed: Vec<Fixed>,
     /// How many are dismissed.
     pub dismissed: usize,
+    /// The sources that failed in that sweep: while any did, the target is not clear.
+    pub unchecked: Unchecked,
+    /// What could not be read for the target, so what it shows may be incomplete: its newest
+    /// report (an older one shows instead), the dismissals, or the fix history.
+    pub problem: Option<String>,
 }
 
 /// A fix a later sweep confirmed: the finding it fixed is gone.
@@ -445,25 +575,37 @@ pub struct Open {
 /// Titles and fix summaries are shown as plain lines: they hold agent text and names from the
 /// target.
 ///
-/// # Errors
-///
-/// Fails when a sweep folder, a report, the dismissals or `state/fixes.jsonl` cannot be read.
-pub fn latest(data_dir: &DataDir, config: &Config) -> Result<Vec<Latest>, StateError> {
-    let state = State::load(data_dir)?;
+/// Never fails as a whole: what cannot be read is [`Latest::problem`] of the targets it
+/// touches, so one broken file neither blanks the other targets nor hides their findings. A
+/// target whose newest report cannot be read shows the newest one that can. Dismissals that
+/// cannot be read dismiss nothing, and a fix history that cannot be read reports no fix: both
+/// show more as open, never less.
+pub fn latest(data_dir: &DataDir, config: &Config) -> Vec<Latest> {
+    let (state, problems) = State::load_or_empty(data_dir);
     sweep::configured_targets(config)
         .into_iter()
-        .map(|(target, dir_name)| state.latest(target, &dir_name))
+        .map(|(target, dir_name)| {
+            let (saved, error) = newest_readable_verdict(&state.sweeps, &dir_name);
+            let mut latest = state.latest_from(target, saved.map(|(_, saved)| saved));
+            let error = error.map(|e| sweep::plain(&sweep::error_chain(&e)));
+            let all: Vec<String> = problems.iter().cloned().chain(error).collect();
+            latest.problem = (!all.is_empty()).then(|| all.join("; "));
+            latest
+        })
         .collect()
 }
 
 /// The [`Latest`] of one target, `target` as configured (`mac`, `server:name`), whose sweep
-/// folders are named `dir_name`. Reads the same files [`latest`] reads.
+/// folders are named `dir_name`. Reads the same files [`latest`] reads, but fails when any of
+/// them cannot be read: Fix all acts on this, and must not act on a guess.
 pub(crate) fn latest_of(
     data_dir: &DataDir,
     target: &str,
     dir_name: &str,
 ) -> Result<Latest, StateError> {
-    State::load(data_dir)?.latest(target.to_owned(), dir_name)
+    let state = State::load(data_dir)?;
+    let saved = newest_verdict(&state.sweeps, dir_name)?.map(|(_, saved)| saved);
+    Ok(state.latest_from(target.to_owned(), saved))
 }
 
 /// What [`latest`] reads once for every target: the dismissals and the fix history.
@@ -478,27 +620,53 @@ struct State {
 
 impl State {
     fn load(data_dir: &DataDir) -> Result<Self, StateError> {
-        Ok(Self {
-            sweeps: data_dir.sweeps_dir(),
-            dismissals: Dismissals::load(data_dir)?,
-            last: fix::runs(data_dir)?
-                .into_iter()
-                .map(|r| (r.key, r))
-                .collect(),
-            since: Timestamp::now() - jiff::SignedDuration::from_hours(24 * CONFIRMED_DAYS),
-        })
+        Ok(Self::of(
+            data_dir,
+            Dismissals::load(data_dir)?,
+            fix::runs(data_dir)?,
+        ))
     }
 
-    fn latest(&self, target: String, dir_name: &str) -> Result<Latest, StateError> {
-        let Some((_, saved)) = newest_verdict(&self.sweeps, dir_name)? else {
-            return Ok(Latest {
+    /// The state, with no dismissals or no fix history in place of a file that cannot be
+    /// read, and a problem for each.
+    fn load_or_empty(data_dir: &DataDir) -> (Self, Vec<String>) {
+        let mut problems = Vec::new();
+        let mut note = |what: &str, e: &StateError| {
+            problems.push(sweep::plain(&format!("{what}: {}", sweep::error_chain(e))));
+        };
+        let dismissals = Dismissals::load(data_dir).unwrap_or_else(|e| {
+            note("dismissals, so dismissed findings show", &e);
+            Dismissals::default()
+        });
+        let runs = fix::runs(data_dir).unwrap_or_else(|e| {
+            note("the fix history, so no fix shows as reported", &e);
+            Vec::new()
+        });
+        (Self::of(data_dir, dismissals, runs), problems)
+    }
+
+    fn of(data_dir: &DataDir, dismissals: Dismissals, runs: Vec<fix::Run>) -> Self {
+        Self {
+            sweeps: data_dir.sweeps_dir(),
+            dismissals,
+            last: runs.into_iter().map(|r| (r.key, r)).collect(),
+            since: Timestamp::now() - jiff::SignedDuration::from_hours(24 * CONFIRMED_DAYS),
+        }
+    }
+
+    /// The [`Latest`] of `target` from `saved`, its newest report with a verdict, if any.
+    fn latest_from(&self, target: String, saved: Option<Saved>) -> Latest {
+        let Some(saved) = saved else {
+            return Latest {
                 target,
                 swept: None,
                 components: 0,
                 open: Vec::new(),
                 fixed: Vec::new(),
                 dismissed: 0,
-            });
+                unchecked: Unchecked::default(),
+                problem: None,
+            };
         };
         let (dismissed, kept): (Vec<_>, Vec<_>) = saved
             .entries()
@@ -510,7 +678,7 @@ impl State {
                 let state = self
                     .last
                     .get(&e.key)
-                    .and_then(|run| fix_state(run, saved.started));
+                    .and_then(|run| fix_state(run, saved.started, e.carried_from));
                 open_entry(&target, e, new(e.key), state)
             })
             .collect();
@@ -530,27 +698,44 @@ impl State {
             })
             .collect();
         fixed.sort_by_key(|f| std::cmp::Reverse(f.fixed_at));
-        Ok(Latest {
+        Latest {
             target,
             swept: Some(saved.started),
             components: saved.components,
             open,
             fixed,
             dismissed: dismissed.len(),
-        })
+            unchecked: saved.unchecked,
+            problem: None,
+        }
     }
 }
 
 /// What `run`, the last fix run of an open finding in the report that started at `report`,
-/// says about it. Decided by which report the run was planned from, never by comparing
-/// clocks: a fix of this report is reported and awaits the next sweep, and a successful fix of
-/// an earlier report means a later sweep still found the finding.
-fn fix_state(run: &fix::Run, report: Timestamp) -> Option<FixState> {
+/// says about it. Decided by which report the run was planned from, never by comparing the
+/// run's clock with a report's: a fix of a report no sweep has checked the finding since is
+/// reported and awaits the next sweep, and a successful fix of an earlier report means a later
+/// sweep still found the finding.
+///
+/// No sweep has checked a finding since `report`, or for one carried over since `carried_from`
+/// (the start of the last sweep that checked it): a fix planned from that report or any later
+/// one is still to be confirmed. Report start times order sweeps, as their folder names do.
+fn fix_state(
+    run: &fix::Run,
+    report: Timestamp,
+    carried_from: Option<Timestamp>,
+) -> Option<FixState> {
     if !run.succeeded() {
         return None;
     }
     let found = run.found?;
-    Some(if found == report {
+    // Planned from a newer report than this one, which is shown because that one cannot be
+    // read: nothing is known of the fix here.
+    if found > report {
+        return None;
+    }
+    let unchecked_since = carried_from.unwrap_or(report);
+    Some(if found >= unchecked_since {
         FixState::Reported {
             at: run.finished,
             summary: sweep::plain(&run.summary),
@@ -565,7 +750,7 @@ fn fix_state(run: &fix::Run, report: Timestamp) -> Option<FixState> {
 /// started at `report` and holds the keys in `found`, is a later sweep than the one the fix was
 /// planned from and no longer has the finding.
 fn confirmed(run: &fix::Run, found: &BTreeSet<FindingKey>, report: Timestamp) -> bool {
-    run.succeeded() && run.found.is_some_and(|f| f != report) && !found.contains(&run.key)
+    run.succeeded() && run.found.is_some_and(|f| f < report) && !found.contains(&run.key)
 }
 
 /// `entry` as shown. Every text is a plain line: it holds agent text and names from the
@@ -613,8 +798,13 @@ pub(crate) struct Saved {
     #[serde(default)]
     components: usize,
     findings: Vec<SavedEntry>,
+    /// Absent, like `unchecked`, in a report saved before sweeps carried findings over.
+    #[serde(default)]
+    carried: Vec<SavedEntry>,
     issues: Vec<SavedEntry>,
     changes: Option<SavedChanges>,
+    #[serde(default)]
+    unchecked: Unchecked,
 }
 
 #[derive(Debug, Deserialize)]
@@ -654,6 +844,10 @@ pub(crate) struct SavedEntry {
     /// Only whether it is there matters.
     #[serde(default)]
     dismissed: Option<IgnoredAny>,
+    /// When the last sweep that checked it started, for a finding carried over since; `None`
+    /// for one this report checked.
+    #[serde(default)]
+    carried_from: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -733,7 +927,10 @@ impl SavedEntry {
 
 impl Saved {
     fn entries(&self) -> impl Iterator<Item = &SavedEntry> {
-        self.findings.iter().chain(&self.issues)
+        self.findings
+            .iter()
+            .chain(&self.carried)
+            .chain(&self.issues)
     }
 }
 
@@ -886,6 +1083,7 @@ pub enum StateError {
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
+    use serde_json::Value;
     use serde_json::json;
 
     use super::*;
@@ -1154,7 +1352,7 @@ mod tests {
         save(&sweeps, "20261106T000000Z/mac", &failed);
         dismiss(&data_dir, hidden, "accepted").unwrap();
 
-        let all = latest(&data_dir, &config).unwrap();
+        let all = latest(&data_dir, &config);
         assert_eq!(all.len(), 2, "every configured target, in sweep order");
         let mac = &all[0];
         assert_eq!(mac.target, "mac");
@@ -1228,7 +1426,7 @@ mod tests {
         save(&data_dir.sweeps_dir(), "20261105T000000Z/mac", &report);
         dismiss(&data_dir, FindingKey(3), "not used").unwrap();
 
-        let mac = latest(&data_dir, &config).unwrap().remove(0);
+        let mac = latest(&data_dir, &config).remove(0);
         let component = |key: u64| {
             let open = mac.open.iter().find(|o| o.key == FindingKey(key));
             open.map(|o| o.component.as_ref().map(|c| (c.key, c.name.as_str())))
@@ -1313,7 +1511,7 @@ mod tests {
         });
         save(&data_dir.sweeps_dir(), "20261105T000000Z/mac", &report);
 
-        let all = latest(&data_dir, &config).unwrap();
+        let all = latest(&data_dir, &config);
         let [finding, issue] = &all[0].open[..] else {
             panic!("one finding and one issue: {:?}", all[0].open);
         };
@@ -1386,7 +1584,7 @@ mod tests {
             ],
         );
 
-        let mac = &latest(&data_dir, &config).unwrap()[0];
+        let mac = &latest(&data_dir, &config)[0];
         assert_eq!(
             mac.open.len(),
             5,
@@ -1410,7 +1608,7 @@ mod tests {
             "20261105T130000Z/mac",
             &report(second, None, &rest, modified),
         );
-        let mac = &latest(&data_dir, &config).unwrap()[0];
+        let mac = &latest(&data_dir, &config)[0];
         let confirmed: Vec<(FindingKey, &str)> = mac
             .fixed
             .iter()
@@ -1419,6 +1617,218 @@ mod tests {
         assert_eq!(confirmed, [(fixed, "curl \u{fffd}[2J is old")]);
         assert_eq!(mac.fixed[0].summary, "upgraded it", "one line");
         assert!(mac.open.iter().all(|o| o.fix_state.is_none()));
+    }
+
+    /// A report of `findings` (key, lookup), each high, with `extra` fields merged in.
+    fn report_of(started: &str, findings: &[(FindingKey, Value)], extra: &Value) -> Value {
+        let findings: Vec<Value> = findings
+            .iter()
+            .map(|(key, lookup)| {
+                let installed =
+                    json!({"version": "1", "lookup": lookup, "found_in": {"kind": "mac_os"}});
+                json!({"key": key, "severity": "high", "title": format!("finding {key}"),
+                    "advisories": [format!("GHSA-{key}")], "explanation": "kept as saved",
+                    "installed": installed})
+            })
+            .collect();
+        let mut report = json!({"started": started, "target": "mac", "failure": null,
+            "findings": findings, "issues": []});
+        for (field, value) in extra.as_object().unwrap() {
+            report[field] = value.clone();
+        }
+        report
+    }
+
+    #[test]
+    fn a_finding_a_failed_source_could_have_produced_is_carried_until_a_sweep_checks_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let sweeps = data_dir.sweeps_dir();
+        let [package, curl, openssl] = [1, 2, 3].map(FindingKey);
+        let lodash = json!({"package": {"ecosystem": "npm", "name": "lodash"}});
+        let all = [
+            (package, lodash.clone()),
+            (curl, json!({"product": "curl"})),
+            (openssl, json!({"product": "openssl"})),
+        ];
+        let first = "2026-11-05T10:00:00Z";
+        save(
+            &sweeps,
+            "20261105T100000Z/mac",
+            &report_of(first, &all, &json!({})),
+        );
+        history(&data_dir, &[run(curl, first, "fixed", Some(0))]);
+
+        // NVD failed for curl; the agent found the OSV finding again and not openssl's.
+        let nvd_down = Unchecked {
+            nvd: ["curl".to_owned()].into(),
+            ..Unchecked::default()
+        };
+        let found = BTreeSet::from([package]);
+        let none = Dismissals::default();
+        let carried = carried_over(&sweeps, "mac", &nvd_down, &found, &none).unwrap();
+        let [c] = &carried[..] else {
+            panic!("{carried:?}")
+        };
+        assert_eq!((c.key, c.severity), (curl, Severity::High));
+        assert_eq!(c.carried_from, first.parse::<Timestamp>().unwrap());
+        let written = serde_json::to_value(c).unwrap();
+        assert_eq!(
+            written["explanation"], "kept as saved",
+            "every field it had"
+        );
+        assert_eq!(written["carried_from"], first);
+        assert!(written["dismissed"].is_null());
+        assert!(
+            carried_over(&sweeps, "mac", &Unchecked::default(), &found, &none)
+                .unwrap()
+                .is_empty(),
+            "a sweep that checked everything carries nothing"
+        );
+
+        // The degraded sweep's report: curl stays open, its fix still to be confirmed.
+        let second = "2026-11-05T13:00:00Z";
+        let degraded = json!({"carried": [written], "unchecked": nvd_down});
+        let found_again = [(package, lodash.clone())];
+        save(
+            &sweeps,
+            "20261105T130000Z/mac",
+            &report_of(second, &found_again, &degraded),
+        );
+        let mac = &latest(&data_dir, &config)[0];
+        let open: Vec<FindingKey> = mac.open.iter().map(|o| o.key).collect();
+        assert_eq!(
+            open,
+            [package, curl],
+            "openssl resolved: NVD answered for it"
+        );
+        let curl_open = mac.open.iter().find(|o| o.key == curl).unwrap();
+        assert!(
+            matches!(curl_open.fix_state, Some(FixState::Reported { .. })),
+            "no sweep checked it since the fix: {:?}",
+            curl_open.fix_state
+        );
+        assert!(
+            mac.fixed.is_empty(),
+            "not confirmed by a sweep that could not check it"
+        );
+        assert_eq!(mac.unchecked, nvd_down);
+        let active = BTreeSet::from([package, curl]);
+        let changes = Changes::since_last(&sweeps, "mac", &active, &active)
+            .unwrap()
+            .unwrap();
+        assert!(changes.resolved.is_empty() && changes.new.is_empty());
+
+        // Carried again: from the sweep that last checked it, not the one that carried it.
+        let again = carried_over(&sweeps, "mac", &nvd_down, &found, &none).unwrap();
+        assert_eq!(again[0].carried_from, first.parse::<Timestamp>().unwrap());
+
+        // A sweep that checks it and no longer finds it confirms the fix.
+        let third = "2026-11-05T16:00:00Z";
+        save(
+            &sweeps,
+            "20261105T160000Z/mac",
+            &report_of(third, &found_again, &json!({})),
+        );
+        let mac = &latest(&data_dir, &config)[0];
+        assert_eq!(mac.fixed.len(), 1);
+        assert_eq!(mac.fixed[0].key, curl);
+    }
+
+    #[test]
+    fn an_unreadable_file_is_a_problem_of_its_targets_not_of_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "[github]\nrepos = [\"o/r\"]\n").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let sweeps = data_dir.sweeps_dir();
+        let lookup = json!({"product": "curl"});
+        let first = "2026-11-05T10:00:00Z";
+        let critical = (FindingKey(1), lookup);
+        let mut older = report_of(first, &[critical], &json!({}));
+        older["findings"][0]["severity"] = json!("critical");
+        save(&sweeps, "20261105T100000Z/mac", &older);
+        save(
+            &sweeps,
+            "20261105T100000Z/github-o--r",
+            &report(first, None, &[FindingKey(2)], "2026-11-01T00:00:00Z"),
+        );
+        let broken = sweeps.join("20261105T130000Z/mac");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join("report.json"), "{\"started\": ").unwrap();
+
+        let [mac, repo] = &latest(&data_dir, &config)[..] else {
+            panic!("two targets")
+        };
+        assert_eq!(
+            mac.swept,
+            first.parse().ok(),
+            "the newest report that reads"
+        );
+        assert_eq!(mac.open[0].severity, Severity::Critical, "still shown");
+        assert!(
+            mac.problem.as_deref().unwrap().contains("report.json"),
+            "{:?}",
+            mac.problem
+        );
+        assert!(repo.problem.is_none() && repo.open.len() == 1);
+        assert!(
+            latest_of(&data_dir, "mac", "mac").is_err(),
+            "Fix all refuses"
+        );
+
+        // A fix planned from the report that cannot be read says nothing about the older one.
+        history(
+            &data_dir,
+            &[run(FindingKey(1), "2026-11-05T13:00:00Z", "fixed", Some(0))],
+        );
+        let mac = &latest(&data_dir, &config)[0];
+        assert!(
+            mac.open[0].fix_state.is_none(),
+            "{:?}",
+            mac.open[0].fix_state
+        );
+        assert!(mac.fixed.is_empty());
+        // A degraded sweep carries what the newest readable report has.
+        let nvd_down = Unchecked {
+            nvd: ["curl".to_owned()].into(),
+            ..Unchecked::default()
+        };
+        let none = Dismissals::default();
+        let carried = carried_over(&sweeps, "mac", &nvd_down, &BTreeSet::new(), &none).unwrap();
+        assert_eq!(carried.len(), 1, "past the unreadable report");
+
+        // Dismissals that cannot be read dismiss nothing, on every target, which says so.
+        let state = data_dir.state_dir();
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join(DISMISSALS), "not json").unwrap();
+        let all = latest(&data_dir, &config);
+        assert!(all[1].problem.as_deref().unwrap().starts_with("dismissals"));
+        assert_eq!(all[1].open.len(), 1);
+        assert!(
+            all[0].problem.as_deref().unwrap().contains("; "),
+            "both problems"
+        );
+    }
+
+    /// Only a later sweep confirms a fix: one planned from the newest report itself is not
+    /// confirmed by that report, whatever it holds.
+    #[test]
+    fn a_fix_of_the_newest_report_is_not_confirmed_by_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let started = "2026-11-05T10:00:00Z";
+        let report = report(started, None, &[FindingKey(1)], "2026-11-01T00:00:00Z");
+        save(&data_dir.sweeps_dir(), "20261105T100000Z/mac", &report);
+        history(&data_dir, &[run(FindingKey(2), started, "fixed", Some(0))]);
+        assert!(latest(&data_dir, &config)[0].fixed.is_empty());
     }
 
     #[test]
@@ -1443,7 +1853,7 @@ mod tests {
             &report(second, None, &[key], modified),
         );
         history(&data_dir, &[run(key, first, "fixed", Some(0))]);
-        let all = latest(&data_dir, &config).unwrap();
+        let all = latest(&data_dir, &config);
         assert!(matches!(
             all[0].open[0].fix_state,
             Some(FixState::NotHeld { .. })
