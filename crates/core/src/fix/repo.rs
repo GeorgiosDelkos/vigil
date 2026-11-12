@@ -62,8 +62,8 @@ pub(super) const ENV: [(&str, &str); 5] = [
 ///   otherwise takes the repository from the folder it runs in, and names no other
 ///   `owner/name`;
 /// - `cd` and `pushd`, and `git`'s `-C`, `--git-dir` and `--work-tree`, go only to a relative
-///   folder with no `..`: the agent works in the clone. `git` takes no `-c` or `--config-env`
-///   before its subcommand, which can make it run a shell.
+///   folder with no `..`: the agent works in the clone. `git` takes no `-c`, `--config-env` or
+///   `--exec-path=<dir>` before its subcommand, which can make it run a shell.
 ///
 /// Unchecked: other programs and interpreters. `go get github.com/<module>` names a module, not
 /// a repository to change; a script in the clone, one the command writes and then runs
@@ -192,16 +192,19 @@ fn outside_clone(target: &str) -> bool {
 /// Why the `git` call with `args` may work outside the clone or run a shell. Only git's own
 /// options are read, the ones before the subcommand, so `git switch -c b` and `git log -C`
 /// pass: `-C`, `--git-dir` and `--work-tree` must name a folder inside the clone
-/// ([`outside_clone`]), and `-c` and `--config-env` are refused, as configuration can make git
-/// run a shell (`alias.x=!...`, `core.sshCommand`, `credential.helper=!...`).
+/// ([`outside_clone`]), and `-c`, `--config-env` and `--exec-path=<dir>` are refused, as
+/// configuration or another program folder can make git run a shell (`alias.x=!...`,
+/// `core.sshCommand`, `credential.helper=!...`). Options that take the next word as their value
+/// skip it, so it is not read as the subcommand.
 fn foreign_git(args: &[String]) -> Option<String> {
     let mut words = args.iter();
     while let Some(arg) = words.next() {
         if !arg.starts_with('-') {
             return None;
         }
-        // `--exec-path` names where git finds the programs its subcommands run.
-        let runs = matches!(arg.as_str(), "-c" | "--config-env" | "--exec-path")
+        // `--exec-path=<dir>` names where git finds the programs its subcommands run; bare
+        // `--exec-path` only prints that folder.
+        let runs = matches!(arg.as_str(), "-c" | "--config-env")
             || arg.starts_with("--config-env=")
             || arg.starts_with("--exec-path=");
         if runs {
@@ -209,9 +212,10 @@ fn foreign_git(args: &[String]) -> Option<String> {
         }
         let value = match arg.as_str() {
             "-C" | "--git-dir" | "--work-tree" => words.next().map_or("", String::as_str),
-            // git reads the next word as these options' value, not as the subcommand (git.c,
-            // `handle_options`, git 2.40 and later).
-            "--namespace" | "--attr-source" | "--super-prefix" | "--list-cmds" => {
+            // git reads the next word as these options' value, not as the subcommand (checked
+            // with git 2.56: `git --namespace x version` and `git --attr-source HEAD version`
+            // both run `version`).
+            "--namespace" | "--attr-source" => {
                 words.next();
                 continue;
             }
