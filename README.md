@@ -132,7 +132,10 @@ acts on what it reads. Vigil is built around that.
 
 | | Sweeps | Fixes |
 |---|---|---|
-| **Agent permissions** | Restricted through each agent's own controls (see [Supported agents](#supported-agents)): reading is allowed, writing is limited to the bundle folder, and shell commands to a few listing commands or none | Full access, and only after you confirm that specific fix |
+| **Agent permissions** | Restricted through each agent's own controls (see [Supported agents](#supported-agents)): reading is allowed except credential files (Codex cannot deny them, but has no network), writing is limited to the bundle folder, and there is no shell (Codex: only inside its sandbox), web, MCP or subagent tool | Full access, and only after you confirm that specific fix |
+| **Network** | No path out of the sweep run itself, apart from its own model provider. What the agent writes in `findings.json` is shown to you, and reaches a fix run only after you confirm that fix | As the agent needs |
+| **Your agent settings** | Not applied where they could grant more: Claude Code loads none of your settings files, Codex not your `config.toml`, opencode not your plugins, Grok not Claude Code's or Cursor's hooks, MCP servers and skills, Gemini CLI no extensions | Applied |
+| **Environment** | Only what a login needs and the agent's own variables (`ANTHROPIC_*` for Claude Code, `OPENAI_*` for Codex, ...); an SSH agent socket or another provider's token is removed | Inherited |
 | **What the agent is given** | The bundle the app collected. The app, not the agent, reads GitHub and your servers | The confirmed fix, not the sweep's evidence, which came from untrusted text |
 | **Where it is told to act** | Its bundle folder | This Mac; for a repository, a clone, a branch and a pull request; for a server, one SSH host |
 
@@ -287,11 +290,23 @@ numbers only for a server's OS packages, where the distribution's own version ru
 
 | Agent | CLI | Sweeps | Fixes |
 |---|---|---|---|
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | Writes only `findings.json`; shell limited to `brew info`, `brew list`, `npm ls`, `npm view` | Full access after confirmation |
-| [Grok](https://x.ai) | `grok` | Writes only `findings.json`; no shell | Full access after confirmation |
-| [Codex](https://github.com/openai/codex) | `codex` | Workspace-write sandbox: may write anywhere in the bundle folder | Full access after confirmation |
-| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini` | Auto-edit: may edit anywhere in the bundle folder | Full access after confirmation |
-| [opencode](https://opencode.ai) | `opencode` | Denied by default; reads, `findings.json` and the same listing commands as Claude Code | Full access after confirmation, except what your own opencode config denies |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | `claude` | File tools only; writes only `findings.json`; credentials denied; none of your settings files, MCP servers or connectors | Full access after confirmation |
+| [Grok](https://x.ai) | `grok` | File tools only; writes only `findings.json`; credentials denied; no web search, subagents, MCP or memory; `workspace` sandbox | Full access after confirmation |
+| [Codex](https://github.com/openai/codex) | `codex` | Workspace-write sandbox with the network off: may write anywhere in the bundle folder and run commands inside the sandbox; no web search or connectors; not your `config.toml`. It can read credentials, since Codex cannot deny reads, but cannot send them | Full access after confirmation |
+| [Gemini CLI](https://github.com/google-gemini/gemini-cli) | `gemini` | Auto-edit: may edit anywhere in the bundle folder, and reads the bundle and any folder your Gemini settings add; credentials denied by policy; no shell, web, memory or MCP tools; no extensions | Full access after confirmation |
+| [opencode](https://opencode.ai) | `opencode` | Its own sweep agent, denied by default: reads (credentials denied), finds and lists files, writes `findings.json`; no grep, shell, web, subagent or MCP tools; no plugins | Full access after confirmation, except what your own opencode config denies |
+
+Credentials denied means `.ssh`, `.aws`, `.config/gh`, `.gnupg`, `.netrc`, `.npmrc`, `.pypirc`,
+`.docker/config.json`, `.kube`, `Library/Keychains`, `.config/gcloud`, `.azure`, `.env*` files,
+and the token files of git, cargo and the agents (`.git-credentials`, `.codex/auth.json`, ...),
+in any folder, so other spellings of your home folder are covered too; another letter case of
+the same name (`~/.SSH`) is not, since the agents' rules do not fold case. Because
+Claude Code and Codex sweeps skip your own settings files, a provider set up only there (an
+`env` block for Bedrock in `~/.claude/settings.json`, a `model_provider` in
+`~/.codex/config.toml`) is not used during sweeps; a login, an API key in the environment, and
+fixes are not affected. Gemini CLI still loads your `~/.gemini/settings.json` (its hooks run,
+its MCP servers start, though their tools are denied), and ignores Vigil's sweep policy when an
+administrator has put policy files in `/Library/Application Support/GeminiCli/policies`.
 
 Agents are found through your login shell's `PATH` (`$SHELL -lc`), so an agent installed with
 npm or Homebrew usually starts as it does in a terminal. With zsh that reads `.zprofile`, not

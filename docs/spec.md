@@ -24,7 +24,7 @@ and the user can approve a fix the agent then performs.
 | History window | User-chosen (`since` date or `all`); then deltas |
 | Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV). Since 2026-11-10 the same rule covers OSV: Vigil compares versions itself (see "Version pre-match") and drops every advisory whose components are all out of range; the agent judges applicability. KEV entries no longer skip it (owner's decision, 2026-11-10): a known-exploited advisory that is provably out of range for every component is dropped too, which took one Mac's bundle from 271 advisories to 168 |
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
-| Agent permissions | Sweeps restricted: read anything, write only `findings.json`, read-only listing commands. Fixes get full access, only after the user confirms (decided 2026-11-05) |
+| Agent permissions | Sweeps restricted: read anything but credential paths, write only `findings.json`, no shell (Codex: inside its sandbox), and no network path out (decided 2026-11-05, network and credentials 2026-11-12). Fixes get full access, only after the user confirms (decided 2026-11-05) |
 | Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
 | GitHub | Explicit repo list added on demand; deps, Dependabot/code/secret alerts, Actions workflows, account/org settings; auth via `gh` login |
 | Servers | App runs a fixed read-only script over SSH, agent reads the result (changed 2026-11-06, see "Servers"); declared as `~/.ssh/config` alias or host/user/port/key fields |
@@ -453,22 +453,98 @@ often is) is not found, and the error says to install it. An agent missing or lo
 with a fix hint, never a silent skip.
 
 Sweeps run restricted (decided 2026-11-05): the agent may read anything, write only
-`findings.json`, and run only listing commands (`brew info`, `brew list`, `npm ls`, `npm view`)
-where the CLI can allow commands one by one. `cargo tree` is not one: it can write `Cargo.lock`
-and runs the `rustc` a project's `.cargo/config.toml` names. Fixes (step 7) get full access, and
-only after the user confirms the plan. Flags, checked 2026-11-05 against each CLI's `--help` and
-docs; every agent runs with the bundle folder as its working directory:
+`findings.json`, and run no shell command. Network and credentials (decided 2026-11-12, at the
+owner's request after a security review): sweeps keep reading the Mac, but every network path
+out of a sweep run is closed, so text a prompt-injected agent read cannot be sent anywhere from
+the run but to its own model provider, and credential paths are denied for every agent whose
+CLI can deny reads. What the agent writes in `findings.json` still leaves the run: the app shows
+it, and a fix the user confirms is given it (see "Fix flow"); that is the reason for the caps
+and command rules under "Bundle and findings". Concretely:
+
+- No shell command, except Codex's, which runs inside its sandbox with the network off. The
+  listing commands sweeps used to allow are gone: `npm view` took `--registry <url>` (any URL,
+  so any data in it), `npm ls` takes `--logs-dir` and `--cache` (writes anywhere) and every
+  npm command may run npm's update check against the configured registry, and `brew info
+  --analytics` fetches from formulae.brew.sh, with no setting to forbid it. None could be made
+  network-free, and the bundle already holds what they listed.
+  `cargo tree` was never one: it can write `Cargo.lock` and runs the `rustc` a project's
+  `.cargo/config.toml` names.
+- No web, MCP, subagent or memory tools, and not the user's own agent settings where they could
+  grant more: allow rules, hooks, plugins, MCP servers and connectors. Not closed: Gemini CLI
+  still loads `~/.gemini/settings.json` (its hooks run and its MCP servers start, with their
+  tools denied), and Grok its own `~/.grok` hooks; both are code the user installed.
+- Credential paths denied (one list, `CREDENTIAL_PATHS` in `agent.rs`): `.ssh`, `.aws`,
+  `.config/gh`, `.gnupg`, `.netrc`, `.npmrc`, `.pypirc`, `.docker/config.json`, `.kube`,
+  `Library/Keychains`, `.config/gcloud`, `.azure`, `.env*`, and the token files of git, cargo
+  and the agents (`.git-credentials`, `.codex/auth.json`, ...), in any folder: the home folder
+  has other spellings (`/System/Volumes/Data/Users/<name>`) that a rule anchored at `~/` would
+  miss. Not covered: another letter case (`~/.SSH`), which APFS accepts and no CLI's rules fold.
+  Gemini CLI gets them as a policy rule over its tools' path arguments; Codex cannot deny reads
+  inside its sandbox, which is accepted because it has no way to send them out of the run.
+- The environment is an allowlist: `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `TMPDIR`,
+  `TERM`, proxies and their certificate files, `LC_*`, `XDG_*`, and the agent's own prefixes
+  (`ANTHROPIC_` and `CLAUDE_` for Claude Code, `XAI_` and `GROK_` for Grok, `OPENAI_` and
+  `CODEX_` for Codex, `GEMINI_` and `GOOGLE_` for Gemini CLI, which includes Google Cloud
+  credentials for a Vertex AI login, and all of them for opencode, which serves any provider).
+  Logins still work: Claude Code reads the Keychain, the others files under `HOME`. Fixes keep
+  the inherited environment.
+- Sweeps and fixes alike get `HOMEBREW_FORBID_PACKAGES_FROM_PATHS=1` without
+  `HOMEBREW_INTERNAL_ALLOW_PACKAGES_FROM_PATHS`, so Homebrew never loads a formula from a file
+  in a cloned repository, and a `PATH` without empty, `.` or relative entries.
+
+Fixes (step 7) get full access, and only after the user confirms the plan. Flags, checked
+2026-11-12 against `claude --help` (2.1.322), `grok --help` and its user guide (1.0.77),
+`opencode run --help` and `opencode debug agent` (1.17.11), codex's CLI and config reference,
+and gemini-cli's source at v0.68.0; every agent runs with the bundle folder as its working
+directory:
 
 | Agent | Sweep call | Verified on this Mac |
 |---|---|---|
-| `claude` | `claude -p <prompt> --permission-mode dontAsk --allowedTools Read(//**) Edit(./findings.json) Bash(brew info *) ...` | yes: writes `findings.json`, cannot write elsewhere |
-| `grok` | `grok -p <prompt> --permission-mode default --allow Read(//**) --allow Edit(./findings.json) --deny Bash --cwd <bundle>` | yes, same check |
-| `codex` | `codex exec --sandbox workspace-write --skip-git-repo-check -C <bundle> <prompt>` | no: not installed (from its source at `openai/codex@49f0c60`) |
-| `gemini` | `gemini -p <prompt> --approval-mode auto_edit --skip-trust` | no: the free tier is refused (`IneligibleTierError`) |
-| `opencode` | `opencode run --dir <bundle> <prompt>`, permissions in `OPENCODE_CONFIG_CONTENT` | no: the local model timed out |
+| `claude` | `claude -p <prompt> --permission-mode dontAsk --setting-sources "" --strict-mcp-config --tools Read,Glob,Grep,Edit,Write --allowedTools Read(//**) Edit(./findings.json) --disallowedTools mcp__* WebFetch WebSearch Read(//**/.ssh) Read(//**/.ssh/**) ...` | 2026-11-05: writes `findings.json`, cannot write elsewhere. 2026-11-12: the new flags parse (an empty `--setting-sources` is accepted, an unknown one refused); not run with a prompt |
+| `grok` | `grok -p <prompt> --permission-mode default --sandbox workspace --disable-web-search --no-subagents --tools read_file,grep,list_dir,search_replace,write --disallowed-tools search_tool,use_tool --allow Read(/**) --allow Edit(./findings.json) --deny Bash --deny mcp__* --deny Read(**/.ssh) ... --cwd <bundle>`, `GROK_MEMORY=0` and `GROK_{CLAUDE,CURSOR}_{AGENTS,HOOKS,MCPS,RULES,SKILLS}_ENABLED=false` | 2026-11-05, same check as claude. The 2026-11-12 flags are from `grok --help` and its docs; not run with a prompt |
+| `codex` | `codex exec --sandbox workspace-write --skip-git-repo-check --ignore-user-config --ignore-rules --disable apps -c sandbox_workspace_write.network_access=false -c web_search="disabled" -C <bundle> <prompt>` | no: not installed (flags from its CLI and config reference) |
+| `gemini` | `gemini -p <prompt> --approval-mode auto_edit --skip-trust --extensions none --admin-policy <bundle>/gemini-policy.toml` | no: not installed; the free tier was refused (`IneligibleTierError`) |
+| `opencode` | `opencode run --pure --agent vigil-sweep --dir <bundle> <prompt>`, the agent defined in `OPENCODE_CONFIG_CONTENT` | `opencode debug agent vigil-sweep` against a permissive user config: the sweep's rules come last and win, and the shell, web, task and skill tools are off; not run with a prompt (the local model timed out) |
+
+Why each CLI needs what it gets:
+
+- Claude Code merges `permissions.allow` from every settings file with `--allowedTools`, so a
+  user rule such as `Bash(curl *)` would hold in a sweep. `--setting-sources ""` loads no user,
+  project or local settings (the Agent SDK's `settingSources: []`); its cost is that a provider
+  configured only in `~/.claude/settings.json` (Bedrock through its `env` block, an
+  `apiKeyHelper`) is not used during sweeps. `--tools` limits the built-in tools, but not MCP
+  ones: `--strict-mcp-config` without `--mcp-config` starts no MCP server, and the `mcp__*` deny
+  removes the claude.ai connectors too. A `Read` deny also covers Grep and Glob.
+- Grok's `web_search` (with an `open_page` action that fetches any URL) runs without approval
+  in every mode, so `--disable-web-search`; MCP stays reachable through its `search_tool` and
+  `use_tool` meta-tools unless they are removed. It also loads Claude Code's and Cursor's
+  hooks, MCP servers and skills unless its `GROK_*_ENABLED` switches are off. A leading `//`
+  is literal text in its rules, so "every path" is `/**`. The `workspace` sandbox makes the
+  kernel hold writes to the bundle, `~/.grok` and temporary folders; its network limits are a
+  no-op on macOS, so they are not relied on.
+- opencode deep-merges `OPENCODE_CONFIG_CONTENT` into the user's config, and agent rules come
+  after global ones, so a rule the user set for its `build` agent would outrank global sweep
+  rules. The sweep defines its own agent, whose rules are evaluated last (last match wins), and
+  runs without the user's plugins (`--pure`). Its grep tool stays denied: opencode checks the
+  search pattern, not the files searched, so `read` denies would not hold for it.
+- Codex's `--ignore-user-config` skips `~/.codex/config.toml`, so its MCP servers and any
+  `network_access = true` do not apply (the login under `CODEX_HOME` does); `--ignore-rules`
+  skips the user's command rules. A `model_provider` set only there is not used during sweeps.
+- Gemini CLI's `--admin-policy` loads a policy at the admin tier, above the user's own; it is
+  ignored when policy files exist in `/Library/Application Support/GeminiCli/policies`, an
+  administrator's choice. Its file tools reach only the workspace unless the user's settings
+  add folders, so the policy also denies any tool call (writes included) whose path argument
+  names a credential path, matching only path arguments so `findings.json` text may still name
+  `~/.ssh/config`, and denies content search and `read_many_files` outright, since a search or
+  a glob such as `.ss[h]` gets past a rule on names.
+  The app writes it into the bundle before each run, replacing whatever is there (a link
+  included), since Gemini CLI can edit bundle files but reads the policy only at start.
+  `--extensions none` turns every extension off.
 
 `auto_edit` (gemini) and `workspace-write` (codex) allow edits anywhere in the bundle, not only
-`findings.json`; the bundle is the app's own copy, so that is accepted.
+`findings.json`; the bundle is the app's own copy, so that is accepted. `findings.json` is
+opened without following a link and without waiting on a FIFO, and only a regular file of at
+most 4 MiB is read, since those two agents could put anything there.
 
 A confirmed fix runs with full access, in its fix folder (flags checked 2026-11-06 in each CLI's
 `--help`; codex in its CLI reference): `claude -p <prompt> --permission-mode bypassPermissions`,
@@ -551,8 +627,17 @@ the app raises such a finding to at least `high`; without it the agent's value s
 
 The app validates strictly (unknown fields, unknown ids, an advisory not fetched for the finding's
 component, a repeated advisory and component pair, empty text, control and invisible formatting
-characters, and bad enums are errors) and retries once with
-the errors appended to the prompt, the rejected file kept as `findings.rejected.json`; a second
+characters, and bad enums are errors) and caps what it shows (decided 2026-11-12): at most 500
+findings and 500 issues, 4000 bytes of evidence or explanation, 500 bytes per summary or step,
+20 steps and 20 commands per fix, and 300 bytes per command; a web address must be ASCII, so a
+look-alike letter cannot fake a host. A command is one visible command: printable ASCII, no
+run of spaces (which would push a second command out of sight in the confirmation), and no
+`;`, `|`, `&`, `<`, `>`, backtick, `$` or `\` (the last two build the others when the line
+runs: `eval $'a\x3b b'`), except the documented `. <dir>/nvm.sh && nvm ...`. A command naming
+a script (`bash ./x.sh`, or the nvm form's sourced file) still runs what that script holds;
+the rule keeps the line's shape visible, not what the programs it names do. It retries once
+with the first 50 errors appended to the prompt (the prompt is one argument, under macOS's
+1 MiB `ARG_MAX`), the rejected file kept as `findings.rejected.json`; a second
 failure marks the target failed. A valid file counts even if the agent then exits non-zero; an
 agent that exits non-zero without one is not retried. One sweep runs at a time: it holds a
 `flock` on `sweeps/.lock`, which the system releases when the process ends.

@@ -20,6 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use serde_json::Value;
 use serde_json::json;
@@ -41,7 +42,7 @@ const WORKFLOW_LIMIT: usize = 100;
 // Tests read every workflow at the limit through a fake `gh`, one process per file. On CI's
 // macOS runners a process takes about 0.35 s, so 100 made `limits_hold_at_their_edge` 70 of
 // the core suite's 75 s, paid again for every mutant. A small limit tests the same edges. It
-// stays above the 6 workflow files of the main fixture, `o/r`.
+// stays above the 7 workflow files of the main fixture, `o/r`.
 #[cfg(test)]
 const WORKFLOW_LIMIT: usize = 8;
 
@@ -187,10 +188,20 @@ impl Repo {
                 return;
             }
         };
+        // Workflow files "must have either a `.yml` or `.yaml` file extension"
+        // (<https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax>,
+        // no versioned copy; checked 2026-11-12), so nothing else here is a workflow. Left out
+        // without a note, and before the limit: a `CLAUDE.md` or `AGENTS.md` here would reach
+        // the bundle, where agents read such files as instructions.
         let names: Vec<(&str, Option<u64>)> = entries
             .iter()
             .filter(|e| e["type"] == "file")
             .filter_map(|e| Some((e["name"].as_str()?, e["size"].as_u64())))
+            .filter(|(name, _)| {
+                Path::new(name).extension().is_some_and(|e| {
+                    e.eq_ignore_ascii_case("yml") || e.eq_ignore_ascii_case("yaml")
+                })
+            })
             .collect();
         if names.len() > WORKFLOW_LIMIT {
             self.problems.push(format!(
@@ -821,6 +832,7 @@ case "$last" in
   repos/o/paged/*) echo '[]' ;;
   repos/o/r/contents/.github/workflows) ok workflows ;;
   repos/o/r/contents/.github/workflows/ci.yml) file "$@"; echo 'on: push' ;;
+  repos/o/r/contents/.github/workflows/release.yaml) file "$@"; echo 'on: release' ;;
   repos/o/r/contents/.github/workflows/big.yml) file "$@"; head -c 300000 /dev/zero | tr '\0' a ;;
   repos/o/r/contents/.github/workflows/gone.yml) refuse 404 "Not Found" ;;
   repos/o/r/vulnerability-alerts) ;;
@@ -926,10 +938,14 @@ esac
                     {"type": "file", "name": "ci.yml"},
                     {"type": "file", "name": "CI.yml"},
                     {"type": "dir", "name": "sub"},
-                    {"type": "file", "name": ".evil"},
+                    {"type": "file", "name": ".evil.yml"},
                     {"type": "file", "name": "big.yml"},
                     {"type": "file", "name": "gone.yml"},
-                    {"type": "file", "name": "huge.yml", "size": 10_000_000}
+                    {"type": "file", "name": "huge.yml", "size": 10_000_000},
+                    {"type": "file", "name": "CLAUDE.md"},
+                    {"type": "file", "name": "AGENTS.md"},
+                    {"type": "file", "name": "notes.txt"},
+                    {"type": "file", "name": "release.yaml"}
                 ]),
             ),
             ("many-alerts", json!(many_alerts)),
@@ -1035,12 +1051,21 @@ esac
             "refused: no file"
         );
         assert_eq!(file(&repo, "github/workflows/ci.yml").trim(), "on: push");
-        let workflows = repo
+        assert_eq!(
+            file(&repo, "github/workflows/release.yaml").trim(),
+            "on: release"
+        );
+        let workflows: Vec<&str> = repo
             .files
             .iter()
-            .filter(|(n, _)| n.contains("workflows/"))
-            .count();
-        assert_eq!(workflows, 1, "{:?}", repo.files);
+            .map(|(n, _)| n.as_str())
+            .filter(|n| n.contains("workflows/"))
+            .collect();
+        assert_eq!(
+            workflows,
+            ["github/workflows/ci.yml", "github/workflows/release.yaml"],
+            "only YAML files are workflows: no CLAUDE.md, AGENTS.md or notes.txt"
+        );
         let summary: Value = serde_json::from_str(file(&repo, "github/repository.json")).unwrap();
         assert_eq!(summary["owner_type"], "Organization");
         assert!(summary.get("url").is_none(), "{summary}");
@@ -1048,7 +1073,7 @@ esac
         let problems = repo.problems.join("\n");
         for expected in [
             "not checked: maven (1), no package URL (2)",
-            "\".evil\" is not a safe file name",
+            "\".evil.yml\" is not a safe file name",
             "\"CI.yml\" differs from another file only in case",
             "workflow big.yml: 300000 bytes, over the 262144-byte limit",
             "workflow gone.yml:",
