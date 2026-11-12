@@ -4842,6 +4842,7 @@ name = "vigil-app"
 version = "0.1.0"
 dependencies = [
  "jiff",
+ "minisign-verify",
  "serde",
  "serde_json",
  "tauri",

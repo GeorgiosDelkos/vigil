@@ -39,3 +39,6 @@ workspace = true
 [dev-dependencies]
 # A real log file for the fix view's last-line test; the core uses the same version.
 tempfile = "3.27.0"
+# examples/verify_update.rs, which the release workflow runs: the signature check the updater
+# plugin itself uses, in the same version.
+minisign-verify = "0.3.0"
