@@ -200,11 +200,21 @@ fn foreign_git(args: &[String]) -> Option<String> {
         if !arg.starts_with('-') {
             return None;
         }
-        if matches!(arg.as_str(), "-c" | "--config-env") || arg.starts_with("--config-env=") {
+        // `--exec-path` names where git finds the programs its subcommands run.
+        let runs = matches!(arg.as_str(), "-c" | "--config-env" | "--exec-path")
+            || arg.starts_with("--config-env=")
+            || arg.starts_with("--exec-path=");
+        if runs {
             return Some(format!("it runs git with {arg}, which can run a shell"));
         }
         let value = match arg.as_str() {
             "-C" | "--git-dir" | "--work-tree" => words.next().map_or("", String::as_str),
+            // git reads the next word as these options' value, not as the subcommand (git.c,
+            // `handle_options`, git 2.40 and later).
+            "--namespace" | "--attr-source" | "--super-prefix" | "--list-cmds" => {
+                words.next();
+                continue;
+            }
             _ => match arg
                 .strip_prefix("--git-dir=")
                 .or_else(|| arg.strip_prefix("--work-tree="))
@@ -618,6 +628,9 @@ mod tests {
         ),
         ("printf 'gh repo delete x/y' | . /dev/stdin", "it runs ."),
         ("alias g=gh", "it runs alias"),
+        ("git --namespace x -C / push --force", "outside the clone"),
+        ("git --attr-source HEAD -c alias.y=!x y", "can run a shell"),
+        ("git --exec-path=./tools push", "can run a shell"),
         (
             "printf 'gh repo delete x/y' | { . /dev/stdin; }",
             "it runs .",
