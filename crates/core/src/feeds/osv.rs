@@ -100,10 +100,11 @@ pub(super) fn fetch(
 }
 
 /// Keeps, for a versioned query (an OS package) that matched more than [`CROWDED`] advisories,
-/// only those for a CVE in the KEV catalog, and returns those queries. Only the kernel does this in practice: Debian 12's `linux` at one version matched
-/// over 1000 advisories (2026-11-06), far more than an agent can weigh, and the known-exploited
-/// ones are those that matter first. Queries by name are never thinned: their advisories are
-/// named `GHSA-...` or `RUSTSEC-...`, so the CVE could not be read from the id.
+/// only those for a CVE in the KEV catalog, and returns those queries. Only the kernel does
+/// this in practice: Debian 12's `linux` at one version matched over 1000 advisories
+/// (2026-11-06), far more than an agent can weigh, and the known-exploited ones matter first.
+/// Queries by name are never thinned: their advisories are named `GHSA-...` or `RUSTSEC-...`,
+/// so the CVE could not be read from the id.
 ///
 /// A record is not fetched to learn its CVE. The CVE is read from the id: OS advisories are
 /// named after it (`DEBIAN-CVE-2024-1086`, `UBUNTU-CVE-...`, `ALPINE-CVE-...`). Advisories that

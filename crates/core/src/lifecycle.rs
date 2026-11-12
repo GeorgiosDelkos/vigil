@@ -1610,9 +1610,11 @@ mod tests {
         let findings: Vec<Value> = findings
             .iter()
             .map(|(key, lookup)| {
+                let installed =
+                    json!({"version": "1", "lookup": lookup, "found_in": {"kind": "mac_os"}});
                 json!({"key": key, "severity": "high", "title": format!("finding {key}"),
                     "advisories": [format!("GHSA-{key}")], "explanation": "kept as saved",
-                    "installed": {"version": "1", "lookup": lookup, "found_in": {"kind": "mac_os"}}})
+                    "installed": installed})
             })
             .collect();
         let mut report = json!({"started": started, "target": "mac", "failure": null,

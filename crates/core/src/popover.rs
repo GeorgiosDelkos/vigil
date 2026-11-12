@@ -1330,9 +1330,10 @@ mod tests {
         assert_eq!(view.targets[2].warning, None);
         assert_eq!(
             view.warning.as_deref(),
-            Some(
-                "This Mac: CISA KEV, NVD for 1 product not checked; o/web: cannot read dismissals.json"
-            )
+            Some(concat!(
+                "This Mac: CISA KEV, NVD for 1 product not checked; ",
+                "o/web: cannot read dismissals.json"
+            ))
         );
 
         // With something open the headline counts it; the warning stays.

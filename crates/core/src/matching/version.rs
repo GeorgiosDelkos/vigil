@@ -510,7 +510,8 @@ mod tests {
                 return Ok(());
             };
             let public = |text: &str| text.split('+').next().map(str::to_owned);
-            let same_public = pep440(&public(&installed).unwrap()) == pep440(&public(&listed).unwrap());
+            let (a_public, b_public) = (public(&installed).unwrap(), public(&listed).unwrap());
+            let same_public = pep440(&a_public) == pep440(&b_public);
             let expected = if listed.contains('+') { a == b } else { same_public };
             prop_assert_eq!(a.is_listed_as(&b), expected);
         }
