@@ -92,8 +92,8 @@ pub enum Setting {
 /// # Errors
 ///
 /// Fails when the config cannot be read or is not TOML, when the change would make it invalid
-/// (the error lists every problem, and nothing is written), when it is a symlink to a file that
-/// does not exist, or when it cannot be written.
+/// (the error lists every problem, and nothing is written), when it is a symlink that cannot be
+/// followed, or when it cannot be written.
 pub fn save_setting(
     data_dir: &DataDir,
     home: &Path,
@@ -350,28 +350,30 @@ fn lock(path: &Path) -> Result<fs::File, SaveSettingError> {
 /// `path` and syncs the folder, so neither a reader nor a crash sees half a config.
 ///
 /// A `path` that is a symlink (into a dotfiles repository, say) is written through: the file it
-/// names is replaced and the link stays. A dangling link is refused rather than replaced by a
-/// regular file, which would cut the user's link without a word.
+/// names is replaced and the link stays. A link that cannot be followed is refused rather than
+/// replaced by a regular file, which would cut the user's link without a word.
 fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
-    let target = match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_symlink() => match fs::canonicalize(path) {
-            Ok(target) => target,
-            Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                return Err(SaveSettingError::Link {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-            // A link loop, or a folder on the way that cannot be read. Reading the config
-            // fails on these first, so this is for a link changed since the read.
-            Err(source) => {
-                return Err(SaveSettingError::Write {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-        },
-        _ => path.to_owned(),
+    // The file to replace, and its permissions; `None` for a config that does not exist yet.
+    let (target, permissions) = match fs::canonicalize(path) {
+        Ok(target) => {
+            let meta = fs::metadata(&target).map_err(|source| SaveSettingError::Write {
+                path: target.clone(),
+                source,
+            })?;
+            (target, Some(meta.permissions()))
+        }
+        // No config yet, and no link either: it is created with the default permissions.
+        Err(e) if e.kind() == io::ErrorKind::NotFound && fs::symlink_metadata(path).is_err() => {
+            (path.to_owned(), None)
+        }
+        // A dangling link (reading it gave the default config), a loop, or a folder on the way
+        // that cannot be read.
+        Err(source) => {
+            return Err(SaveSettingError::Link {
+                path: path.to_owned(),
+                source,
+            });
+        }
     };
     let write_err = |source| SaveSettingError::Write {
         path: target.clone(),
@@ -389,12 +391,6 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
     let partial_err = |source| SaveSettingError::Write {
         path: partial.clone(),
         source,
-    };
-    let permissions = match fs::metadata(&target) {
-        Ok(meta) => Some(meta.permissions()),
-        // A new file gets the default permissions.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-        Err(e) => return Err(write_err(e)),
     };
     // A file left by a crashed save is removed, and the new one is created only if the name is
     // free: `create` would follow a symlink planted under that name (in a shared dotfiles
@@ -458,15 +454,16 @@ pub enum SaveSettingError {
     /// The change would make the config invalid; nothing was written.
     #[error(transparent)]
     Invalid(#[from] LoadConfigError),
-    /// The config is a symlink to a file that does not exist; nothing was written.
+    /// The config is a symlink that cannot be followed (its target is missing, it loops, or a
+    /// folder on the way cannot be read); nothing was written.
     #[error(
-        "{} is a symlink to a file that cannot be found; point it at a config or remove it",
+        "cannot follow the symlink {}; point it at a config or remove it",
         path.display()
     )]
     Link {
         /// The link.
         path: PathBuf,
-        /// Why its target cannot be found.
+        /// Why it cannot be followed.
         #[source]
         source: io::Error,
     },
