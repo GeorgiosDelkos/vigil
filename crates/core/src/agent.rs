@@ -532,10 +532,9 @@ impl fmt::Display for AgentKind {
 /// the bundle is the one the agent just ran in, and a link it left at `path` would otherwise
 /// make the write land on the link's target.
 fn write_new(path: &Path, text: &str) -> io::Result<()> {
-    match fs::remove_file(path) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        Ok(()) | Err(_) => {}
-    }
+    // The removal's result is not needed: when it fails on anything but a missing file, the
+    // path is still taken, and `create_new` reports that.
+    drop(fs::remove_file(path));
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1339,7 +1338,12 @@ mod tests {
         assert_eq!(log_head(&log), b"short");
         assert_eq!(log_head(&tmp.path().join("missing")), b"");
 
-        // A FIFO left in place of the log is read without waiting, a link not at all.
+        // A link left in place of the log is not read at all, and a FIFO without waiting. The
+        // link comes first: an open without the flags follows it and fails here at once,
+        // instead of hanging on the FIFO.
+        let link = tmp.path().join("link.log");
+        std::os::unix::fs::symlink(&log, &link).unwrap();
+        assert_eq!(log_head(&link), b"");
         let fifo = tmp.path().join("fifo.log");
         assert!(
             Command::new("mkfifo")
@@ -1349,8 +1353,5 @@ mod tests {
                 .success()
         );
         assert_eq!(log_head(&fifo), b"");
-        let link = tmp.path().join("link.log");
-        std::os::unix::fs::symlink(&log, &link).unwrap();
-        assert_eq!(log_head(&link), b"");
     }
 }

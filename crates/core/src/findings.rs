@@ -236,22 +236,15 @@ pub(crate) fn read(path: &Path) -> io::Result<String> {
             "it is not a regular file",
         ));
     }
-    let too_large = || {
-        io::Error::new(
+    if metadata.len() > FILE_LIMIT {
+        return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("it is over the {FILE_LIMIT}-byte limit"),
-        )
-    };
-    // Checked before reading too, so a cut inside a multi-byte character cannot report the
-    // file as not UTF-8 instead; `take` still bounds a file that grows while it is read.
-    if metadata.len() > FILE_LIMIT {
-        return Err(too_large());
+        ));
     }
+    // `take` bounds a file that grows after the size check; what it cuts off fails to parse.
     let mut text = String::new();
-    file.take(FILE_LIMIT + 1).read_to_string(&mut text)?;
-    if text.len() as u64 > FILE_LIMIT {
-        return Err(too_large());
-    }
+    file.take(FILE_LIMIT).read_to_string(&mut text)?;
     Ok(text)
 }
 
@@ -874,7 +867,10 @@ mod tests {
             command_problems(&["brew\tupgrade curl"]),
             ["findings[0].fix.commands[0] is not one line of printable ASCII"]
         );
-        let long = format!("brew upgrade {}", "a".repeat(COMMAND_LIMIT));
+        let at_limit = format!("brew upgrade {}", "a".repeat(COMMAND_LIMIT - 13));
+        assert_eq!(at_limit.len(), COMMAND_LIMIT);
+        assert_eq!(command_problems(&[&at_limit]), Vec::<String>::new());
+        let long = format!("{at_limit}a");
         assert_eq!(
             command_problems(&[&long]),
             [format!(
@@ -958,8 +954,19 @@ mod tests {
             )]
         );
         let ci = issue(&json!({"file": "github/workflows/ci.yml"}));
-        let text = json!({"findings": [], "issues": vec![ci; MAX_ENTRIES + 1]});
+        let text = json!({"findings": [], "issues": vec![ci.clone(); MAX_ENTRIES + 1]});
         assert_eq!(validate(&text.to_string(), &kev).unwrap_err().len(), 1);
+
+        // Exactly at the cap, each is checked one by one: the repeats are reported, the count
+        // is not.
+        let marker = format!("at most {MAX_ENTRIES} of each");
+        let count = |problems: &[String]| problems.iter().any(|p| p.contains(&marker));
+        let text = json!({"findings": &many[..MAX_ENTRIES], "issues": []});
+        let problems = validate(&text.to_string(), &kev).unwrap_err();
+        assert!(problems.len() > 1 && !count(&problems), "{problems:?}");
+        let text = json!({"findings": [], "issues": vec![ci; MAX_ENTRIES]});
+        let problems = validate(&text.to_string(), &kev).unwrap_err();
+        assert!(problems.len() > 1 && !count(&problems), "{problems:?}");
     }
 
     #[test]
@@ -974,7 +981,10 @@ mod tests {
         fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
         let err = read(&path).unwrap_err();
-        assert!(err.to_string().contains("symbolic link"), "{err}");
+        assert_eq!(
+            err.to_string(),
+            "it is a symbolic link; write a regular file"
+        );
 
         fs::remove_file(&path).unwrap();
         let made = Command::new("mkfifo").arg(&path).status().unwrap();
@@ -989,7 +999,7 @@ mod tests {
         fs::write(&path, " ".repeat(limit + 1)).unwrap();
         let err = read(&path).unwrap_err();
         assert!(err.to_string().contains("byte limit"), "{err}");
-        // The read stops at limit + 1 bytes, inside the last character: still reported as too
+        // A read cut at the limit would land inside the last character: still reported as too
         // large, not as invalid UTF-8, because the size is checked before reading.
         fs::write(&path, format!("{}\u{e9}", " ".repeat(limit))).unwrap();
         let err = read(&path).unwrap_err();

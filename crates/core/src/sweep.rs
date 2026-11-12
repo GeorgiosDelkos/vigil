@@ -792,17 +792,10 @@ impl Shared<'_> {
                         log.display()
                     ));
                 }
-                Err(e) => {
-                    let previous = if e.kind() == io::ErrorKind::NotFound {
-                        "is missing"
-                    } else {
-                        "could not be read and was moved to findings.rejected.json"
-                    };
-                    (
-                        vec![format!("findings.json could not be read: {e}")],
-                        previous,
-                    )
-                }
+                Err(e) => (
+                    vec![format!("findings.json could not be read: {e}")],
+                    unread(&e),
+                ),
             };
             // Kept for the agent to correct, and so that it cannot pass for the next answer.
             if let Err(e) = fs::rename(&findings_path, &rejected_path)
@@ -906,6 +899,16 @@ const RETRY_PROBLEMS: usize = 50;
 /// The most characters of each listed problem, since one problem alone could pass `ARG_MAX`:
 /// some quote what the agent wrote (a 2 MB component id). See [`RETRY_PROBLEMS`] for the bound.
 const RETRY_PROBLEM_CHARS: usize = 500;
+
+/// What happened to a `findings.json` that `findings::read` refused with `e`, for the retry
+/// prompt: missing, or set aside (a link, a FIFO, a file too large).
+fn unread(e: &io::Error) -> &'static str {
+    if e.kind() == io::ErrorKind::NotFound {
+        "is missing"
+    } else {
+        "could not be read and was moved to findings.rejected.json"
+    }
+}
 
 /// The prompt of the second attempt: the first one's file `previous` (a phrase such as "was
 /// rejected"), and its first [`RETRY_PROBLEMS`] problems, each cut to [`RETRY_PROBLEM_CHARS`].
@@ -1608,6 +1611,17 @@ mod tests {
 
     use super::*;
     use crate::inventory::VersionManager;
+
+    #[test]
+    fn the_retry_prompt_says_whether_the_file_was_missing_or_refused() {
+        let missing = io::Error::from(io::ErrorKind::NotFound);
+        assert_eq!(unread(&missing), "is missing");
+        let refused = io::Error::new(io::ErrorKind::InvalidData, "it is a symbolic link");
+        assert_eq!(
+            unread(&refused),
+            "could not be read and was moved to findings.rejected.json"
+        );
+    }
 
     #[test]
     fn the_retry_prompt_lists_only_the_first_problems() {
