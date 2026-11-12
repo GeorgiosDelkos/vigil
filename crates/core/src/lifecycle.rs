@@ -1815,6 +1815,22 @@ mod tests {
         );
     }
 
+    /// Only a later sweep confirms a fix: one planned from the newest report itself is not
+    /// confirmed by that report, whatever it holds.
+    #[test]
+    fn a_fix_of_the_newest_report_is_not_confirmed_by_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let started = "2026-11-05T10:00:00Z";
+        let report = report(started, None, &[FindingKey(1)], "2026-11-01T00:00:00Z");
+        save(&data_dir.sweeps_dir(), "20261105T100000Z/mac", &report);
+        history(&data_dir, &[run(FindingKey(2), started, "fixed", Some(0))]);
+        assert!(latest(&data_dir, &config)[0].fixed.is_empty());
+    }
+
     #[test]
     fn a_fix_a_later_sweep_still_finds_did_not_hold() {
         let tmp = tempfile::tempdir().unwrap();

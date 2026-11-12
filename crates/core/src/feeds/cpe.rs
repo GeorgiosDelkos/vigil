@@ -569,6 +569,9 @@ mod tests {
             ("1.0.final", "1.0.ga", Some(Equal)),
             ("1.0.2k", "1.0.2l", None),
             ("1.0.update", "1.0.ga", None),
+            ("1.0.2k", "1.0.2k", Some(Equal)),
+            ("1.0-beta", "1.0-pre", Some(Less)),
+            ("1.0-preview", "1.0-rc", Some(Less)),
             ("3.0.0-beta1", "3.0.0-rc1", Some(Less)),
             ("1.0.0rc2", "1.0.0rc10", Some(Less)),
             ("3.12.0rc2", "3.12.0rc10", Some(Less)),
@@ -585,6 +588,28 @@ mod tests {
         for (a, b, expected) in cases {
             assert_eq!(compare(a, b), expected, "{a} against {b}");
         }
+    }
+
+    /// Sameness is known for any two words, unlike their order.
+    #[test]
+    fn versions_are_the_same_by_number_word_and_stage() {
+        let cases = [
+            ("1.1.1w", "1.1.1w", Some(true)),
+            ("1.1.1w", "1.1.1v", Some(false)),
+            ("1.0alpha1", "1.0a1", Some(true)),
+            ("1.0a1", "1.0b1", Some(false)),
+            ("1.0.final", "1.0.GA", Some(true)),
+            ("1.2", "1.2.0", Some(true)),
+            ("1.8.0update401", "1.8.0_401", None),
+        ];
+        for (named, installed, expected) in cases {
+            assert_eq!(
+                same_version(named, installed),
+                expected,
+                "{named} and {installed}"
+            );
+        }
+        assert!(is_prefix("1.1.1", "1.1.1w") && !is_prefix("1.1.1v", "1.1.1w"));
     }
 
     #[test]

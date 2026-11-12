@@ -214,5 +214,9 @@ mod tests {
             );
         }
         assert!(fetch_served(&catalog(&["CVE-2024-123456"])).is_ok());
+        assert!(
+            fetch_served(&catalog(&[])).is_ok(),
+            "exactly the fewest entries a catalog may have"
+        );
     }
 }

@@ -2015,8 +2015,14 @@ mod tests {
             component("npm:lodash", "4.17.20"),
             component("curl", "8.0.0"),
             component("openssl", "3.0.0"),
+            component("xz", "5.6.0"),
             component("zlib", "1.3"),
         ];
+        // xz's CVEs were fetched three hours ago, so the cache stands in for it.
+        let fetched_at = Timestamp::now() - jiff::SignedDuration::from_hours(3);
+        fs::create_dir_all(tmp.path().join("nvd")).unwrap();
+        let cache = json!({"fetched_at": fetched_at, "cves": {}});
+        fs::write(tmp.path().join("nvd/xz.json"), cache.to_string()).unwrap();
         let cancel = Cancel::new();
         let kev = Kev::from_ids(&[]);
         let sources = Sources {
@@ -2037,7 +2043,7 @@ mod tests {
                 nvd: names(&["curl", "openssl", "zlib"]),
             }
         );
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems.len(), 4, "{problems:?}");
         assert!(problems[0].starts_with("OSV: "), "{problems:?}");
         assert!(
             problems[1].starts_with("NVD product curl: "),
@@ -2047,6 +2053,12 @@ mod tests {
             problems[2],
             "NVD refused a request (its rate limit), so it was not asked about openssl, zlib, \
              which had nothing recent cached; add an NVD API key, or check the one set"
+        );
+        assert!(
+            problems[3].starts_with(
+                "NVD could not be asked about xz, so their cached CVEs were used: NVD refused"
+            ),
+            "{problems:?}"
         );
     }
 
@@ -2437,6 +2449,133 @@ mod tests {
         assert!(lodash < text.find("## LOW curl").unwrap(), "worst first");
         assert!(text.contains("## Not checked\n\n- OSV: offline"), "{text}");
         assert!(!text.contains("No affected"), "{text}");
+    }
+
+    /// An agent at `path` that reports GHSA-1 in component `c1` whenever the bundle has it,
+    /// until the file `fixed` exists.
+    fn ghsa_agent(path: &Path, fixed: &Path) -> Located {
+        let finding = r#"{"findings": [{"advisories": ["GHSA-1"], "component": "c1",
+            "severity": "critical", "known_exploited": false, "confidence": "confirmed",
+            "evidence": "e", "explanation": "x",
+            "fix": {"summary": "upgrade lodash", "steps": [], "commands": []}}]}"#;
+        let script = format!(
+            "#!/bin/sh\nif [ ! -e '{}' ] && grep -q GHSA-1 advisories.jsonl; then\n\
+             echo '{finding}' > findings.json\nelse\necho '{{\"findings\": []}}' > findings.json\n\
+             fi\n",
+            fixed.display()
+        );
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        Located::at(path)
+    }
+
+    /// Three sweeps of one Mac with lodash: OSV up, then down, then up again with lodash
+    /// fixed.
+    #[test]
+    fn a_finding_of_a_failed_source_stays_open_until_a_sweep_checks_it() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        // Relaxed: each flag is set between sweeps, before the request it decides is sent.
+        let osv_down = Arc::new(AtomicBool::new(false));
+        let server = {
+            let osv_down = Arc::clone(&osv_down);
+            TestServer::start(move |request: &Request| match request.path() {
+                _ if osv_down.load(Relaxed) => (503, "down".to_owned()),
+                "/v1/querybatch" => {
+                    let vulns = json!([{"id": "GHSA-1", "modified": "2026-01-01T00:00:00Z"}]);
+                    (200, json!({"results": [{"vulns": vulns}]}).to_string())
+                }
+                _ => (200, osv_record("GHSA-1", "npm", "lodash")),
+            })
+        };
+        let endpoints = Endpoints {
+            osv: server.url.clone(),
+            nvd: server.url.clone(),
+            kev: server.url.clone(),
+        };
+        let feeds = Feeds::with_endpoints(data_dir.feeds_dir(), NvdAccess::Anonymous, endpoints);
+        let fixed = tmp.path().join("fixed");
+        let located = ghsa_agent(&tmp.path().join("agent"), &fixed);
+        let kev = Kev::from_ids(&[]);
+        let cancel = Cancel::new();
+        let dismissals = Dismissals::default();
+        let shared = Shared {
+            data_dir: &data_dir,
+            dismissals: &dismissals,
+            sources: Sources {
+                feeds: &feeds,
+                history: Config::default_for_tests().history,
+                kev: Some(&kev),
+                cancel: &cancel,
+            },
+            agent: AgentKind::Claude,
+            located: &located,
+            notes: &[],
+        };
+        let sweep = |stamp: &str| {
+            let collected = Collected {
+                target: "mac".to_owned(),
+                dir_name: "mac".to_owned(),
+                title: "this Mac".to_owned(),
+                prompt: Prompt::Mac,
+                components: vec![component("npm:lodash", "4.17.20")],
+                files: Vec::new(),
+                settings: Vec::new(),
+                problems: Vec::new(),
+            };
+            let dir = data_dir.sweeps_dir().join(stamp);
+            fs::create_dir_all(&dir).unwrap();
+            shared.sweep_target(&dir, collected, &mut |_| {}).unwrap()
+        };
+        let config = Config::default_for_tests();
+        let mac = || lifecycle::latest(&data_dir, &config).remove(0);
+
+        let first = sweep("20261105T100000Z");
+        let [found] = &first.findings[..] else {
+            panic!("{:?}", first.findings)
+        };
+        let key = found.key;
+        let run = json!({"key": key, "title": "lodash", "found": first.started, "target": "mac",
+            "agent": "claude", "started": first.started, "finished": first.started,
+            "exit_code": 0, "outcome": "fixed", "summary": "upgraded lodash",
+            "pull_request": null, "confirmed": "asked", "dir": "/x"});
+        fs::create_dir_all(data_dir.state_dir()).unwrap();
+        fs::write(data_dir.state_dir().join("fixes.jsonl"), format!("{run}\n")).unwrap();
+
+        // OSV is down: the finding is carried, stays open, and its fix waits.
+        osv_down.store(true, Relaxed);
+        let second = sweep("20261105T130000Z");
+        assert!(second.findings.is_empty());
+        assert_eq!(second.unchecked.osv, Some(OsvUnchecked::All));
+        let carried: Vec<FindingKey> = second.carried.iter().map(|c| c.key).collect();
+        assert_eq!(carried, [key]);
+        let changes = second.changes.as_ref().unwrap();
+        assert!(changes.resolved.is_empty() && changes.new.is_empty());
+        let open = mac();
+        assert_eq!(open.open.len(), 1, "still open");
+        assert!(matches!(
+            open.open[0].fix_state,
+            Some(lifecycle::FixState::Reported { .. })
+        ));
+        assert!(
+            open.fixed.is_empty(),
+            "not confirmed by a sweep that could not check it"
+        );
+
+        // OSV is back and lodash is fixed: resolved, and the fix confirmed.
+        osv_down.store(false, Relaxed);
+        fs::write(&fixed, "").unwrap();
+        let third = sweep("20261105T160000Z");
+        assert!(third.carried.is_empty() && third.unchecked.is_empty());
+        assert_eq!(third.changes.as_ref().unwrap().resolved, [key]);
+        let done = mac();
+        assert!(done.open.is_empty());
+        assert_eq!(done.fixed.len(), 1);
+        assert_eq!(done.fixed[0].key, key);
     }
 
     #[test]
