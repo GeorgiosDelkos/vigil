@@ -284,13 +284,19 @@ ssh = "web-1"                    # an alias from ~/.ssh/config, or host, user, p
 dirs = ["/srv/app"]
 ```
 
-The data folder also holds:
+The lockfile walk skips hidden, vendored and build folders, macOS packages (apps, Photos
+libraries), `~/Library`, iCloud files not downloaded, and disks or network shares mounted
+under a project folder; it stops after a million entries in one project folder or ten minutes
+in all.
+
+The data folder is open to your user alone (mode 0700): a sweep or command refuses one that
+other users can write to or that belongs to another user. It also holds:
 
 | Path | Contents |
 |---|---|
 | `prompts/` | The sweep and fix prompts, editable |
 | `feeds/` | The OSV and NVD caches; safe to delete |
-| `sweeps/<time>/<target>/` | One folder per target (`mac`, `github-<owner>--<name>`, `server-<name>`) |
+| `sweeps/<time>/<target>/` | One folder per target (`mac`, `github-<owner>--<name>`, `server-<name>`). Only each target's newest sweep is kept, and its newest with a verdict when the newest has none; a sweep removes the target's older folders once its report is written |
 | `sweeps/<time>/<target>/report.{json,md}` | The target's report |
 | `sweeps/<time>/<target>/bundle/` | What the agent read, and the `findings.json` it wrote |
 | `sweeps/<time>/<target>/agent-<n>.log` | The agent's output, one log per attempt |

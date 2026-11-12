@@ -186,6 +186,7 @@ fn run() -> anyhow::Result<()> {
         Some(dir) => DataDir::new(dir),
         None => DataDir::for_home(&home()?),
     };
+    data_dir.ensure_private()?;
 
     match cli.command {
         Command::Init => {
@@ -199,7 +200,10 @@ fn run() -> anyhow::Result<()> {
         }
         Command::Inventory => {
             let config = load_config(&data_dir, &home()?)?;
-            inventory(&Inventory::collect_mac(&config.project_dirs))?;
+            // Never cancelled: Ctrl-C ends this process, and the core's watchdog then stops
+            // the command that runs.
+            let collected = Inventory::collect_mac(&config.project_dirs, &Cancel::new());
+            inventory(&collected)?;
         }
         Command::Sweep { target } => {
             let targets = target.as_deref().map_or(Targets::All, Targets::Only);

@@ -45,7 +45,7 @@ impl Detection {
 
 /// Runs detection as the app starts, in the background, so the settings open at once and
 /// tools are found on the login shell's `PATH` (macOS starts an app with a minimal one). Any
-/// macOS prompt it raises (Documents access, the Keychain) shows before the popover opens.
+/// macOS prompt it raises (Keychain access, through `gh`) shows before the popover opens.
 /// Off the main thread, so a slow login profile never delays the tray icon.
 pub(crate) fn detect_at_start(app: AppHandle) {
     thread::spawn(move || {

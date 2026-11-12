@@ -660,6 +660,11 @@ fn dismissals_hold_across_sweeps_and_changes_are_counted() {
         problems.contains("dismissals, so dismissed findings show again: cannot read"),
         "{problems}"
     );
+
+    // Five sweeps, and each target keeps only its newest, which had a verdict.
+    let folders = sweep_folders(&sandbox);
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    assert_eq!(folders[0].1, ["github-o--r", "mac"], "{folders:?}");
 }
 
 /// Checks that `env`, a repository fix agent's environment, turns git hooks and package
@@ -947,11 +952,14 @@ fn only_a_current_undismissed_finding_is_fixed_and_a_silent_agent_fails() {
     )
     .unwrap();
 
+    // The sweep that no longer finds it removed the reports that had it.
     assert!(sandbox.sweep("ok").status.success());
     let stale = sandbox.fix(&[&key, "--yes"], "");
     assert!(!stale.status.success());
     assert!(
-        text(&stale.stderr).contains(&format!("no longer found {key}; nothing to fix")),
+        text(&stale.stderr).contains(&format!(
+            "no report has finding {key}: a newer sweep no longer finds it"
+        )),
         "{}",
         text(&stale.stderr)
     );

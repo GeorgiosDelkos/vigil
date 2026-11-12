@@ -323,7 +323,7 @@ impl AgentKind {
              printf '%s\\n' {END_MARK}",
             self.binary()
         );
-        match command::run_any_status(&shell, &["-lc", &script]) {
+        match command::run_any_status(&shell, &["-lc", &script], &Cancel::new()) {
             Ok(Some(output)) => Ok(parse_located(&output.stdout, model)),
             Ok(None) => Err(AgentError::NoShell { shell }),
             Err(source) => Err(AgentError::Locate {

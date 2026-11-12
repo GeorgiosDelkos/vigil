@@ -25,6 +25,7 @@ use std::path::Path;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::cancel::Cancel;
 use crate::config::RepoSlug;
 use crate::feeds::cache_key;
 use crate::inventory::Component;
@@ -337,6 +338,9 @@ pub(crate) enum GitHubError {
 
 /// Collects `repo` with `gh`, the program to run.
 ///
+/// Not cancellable: the sweep checks its cancel before each repository, and each `gh` call is
+/// bounded by the command time limit.
+///
 /// # Errors
 ///
 /// Fails when `gh` is not installed or the repository itself cannot be read; every later part
@@ -506,7 +510,8 @@ fn is_failure(message: &str) -> bool {
 /// Runs `gh api` on `path`. A 403 or 404 that GitHub explains is a [`Answer::Refused`]; any
 /// other failure is an error.
 fn api(gh: &str, path: &str) -> Result<Answer, GitHubError> {
-    let output = command::run_any_status(gh, &["api", path])?.ok_or(GitHubError::NoGh)?;
+    let output =
+        command::run_any_status(gh, &["api", path], &Cancel::new())?.ok_or(GitHubError::NoGh)?;
     answer(path, &output.stdout, &output)
 }
 
@@ -538,8 +543,8 @@ fn alert_pages(gh: &str, path: &str) -> Result<Alerts, GitHubError> {
     let mut alerts = Vec::new();
     let mut page = path.to_owned();
     for _ in 0..ALERT_PAGES {
-        let output =
-            command::run_any_status(gh, &["api", "--include", &page])?.ok_or(GitHubError::NoGh)?;
+        let output = command::run_any_status(gh, &["api", "--include", &page], &Cancel::new())?
+            .ok_or(GitHubError::NoGh)?;
         // `--include` prints the status line (ending in `\n`), each header (ending in `\r\n`)
         // and an empty `\r\n` line before the body (checked with gh 2.96 on 2026-11-12).
         // Without them (gh failed before any answer) the whole output is the body.
@@ -658,7 +663,7 @@ fn error_body(body: &str) -> Option<(u16, String)> {
 /// Fetches a file's raw text through the contents API.
 fn raw(gh: &str, path: &str) -> Result<String, GitHubError> {
     let args = ["api", "-H", "Accept: application/vnd.github.raw", path];
-    match command::run(gh, &args)? {
+    match command::run(gh, &args, &Cancel::new())? {
         Some(text) => Ok(text),
         None => Err(GitHubError::NoGh),
     }

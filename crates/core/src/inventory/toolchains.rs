@@ -12,6 +12,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use crate::cancel::Cancel;
 use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
@@ -23,26 +24,26 @@ use crate::package::Package;
 
 type Parsed = Result<Vec<Component>, InventoryError>;
 
-pub(super) fn macos(inventory: &mut Inventory) {
-    if let Some(output) = inventory.run("sw_vers", &["-productVersion"]) {
+pub(super) fn macos(inventory: &mut Inventory, cancel: &Cancel) {
+    if let Some(output) = inventory.run("sw_vers", &["-productVersion"], cancel) {
         inventory.absorb(parse_macos_version(&output));
     }
 }
 
-pub(super) fn collect(inventory: &mut Inventory) {
-    rustup(inventory);
-    if let Some(output) = inventory.run("cargo", &["install", "--list"]) {
+pub(super) fn collect(inventory: &mut Inventory, cancel: &Cancel) {
+    rustup(inventory, cancel);
+    if let Some(output) = inventory.run("cargo", &["install", "--list"], cancel) {
         inventory.absorb(parse_cargo_install(&output));
     }
-    if let Some(output) = inventory.run("node", &["--version"]) {
+    if let Some(output) = inventory.run("node", &["--version"], cancel) {
         inventory.absorb(parse_node_version(&output));
     }
-    npm_global(inventory);
-    python(inventory);
-    if let Some(output) = inventory.run("uv", &["tool", "list"]) {
+    npm_global(inventory, cancel);
+    python(inventory, cancel);
+    if let Some(output) = inventory.run("uv", &["tool", "list"], cancel) {
         inventory.absorb(parse_uv_tools(&output));
     }
-    if let Some(output) = inventory.run("pipx", &["list", "--json"]) {
+    if let Some(output) = inventory.run("pipx", &["list", "--json"], cancel) {
         inventory.absorb(parse_pipx(&output));
     }
 }
@@ -83,13 +84,13 @@ fn parse_macos_version(output: &str) -> Parsed {
 
 /// Each toolchain's version comes from its `rustc`, since `stable` and `nightly` name no
 /// version. One toolchain failing does not stop the others.
-fn rustup(inventory: &mut Inventory) {
-    let Some(list) = inventory.run("rustup", &["toolchain", "list"]) else {
+fn rustup(inventory: &mut Inventory, cancel: &Cancel) {
+    let Some(list) = inventory.run("rustup", &["toolchain", "list"], cancel) else {
         return;
     };
     for toolchain in parse_rustup_toolchains(&list) {
         let args = ["run", toolchain.as_str(), "rustc", "--version"];
-        if let Some(output) = inventory.run("rustup", &args) {
+        if let Some(output) = inventory.run("rustup", &args, cancel) {
             inventory.absorb(parse_rustc_version(&output, toolchain));
         }
     }
@@ -162,9 +163,9 @@ fn parse_node_version(output: &str) -> Parsed {
 /// `npm ls` exits 1 when the global tree has a problem (a missing peer dependency, an
 /// extraneous package) but still prints the whole tree, so its output is used whenever it
 /// parses, and the exit status is reported alongside.
-fn npm_global(inventory: &mut Inventory) {
+fn npm_global(inventory: &mut Inventory, cancel: &Cancel) {
     let args = ["ls", "-g", "--json", "--depth=0"];
-    let output = match command::run_any_status("npm", &args) {
+    let output = match command::run_any_status("npm", &args, cancel) {
         Ok(Some(output)) => output,
         Ok(None) => {
             inventory.missing("npm");
@@ -225,13 +226,13 @@ fn parse_npm_global(json: &str) -> Parsed {
 /// Reads the `python3` on `PATH`. `/usr/bin/python3` is a stub until the Command Line Tools are
 /// installed, and running it then opens an install dialog on every sweep, so it counts as not
 /// installed unless `xcode-select -p` finds the tools.
-fn python(inventory: &mut Inventory) {
+fn python(inventory: &mut Inventory, cancel: &Cancel) {
     let mut problem = None;
     // A non-zero exit from `xcode-select -p` means no tools; any other failure (it cannot be
     // started, hangs, prints something unreadable) is reported, and python3 is then not run.
     let has_tools = || {
         tools_found(
-            command::run_any_status("xcode-select", &["-p"]),
+            command::run_any_status("xcode-select", &["-p"], cancel),
             &mut problem,
         )
     };
@@ -239,7 +240,7 @@ fn python(inventory: &mut Inventory) {
     inventory.problems.extend(problem);
     if !real {
         inventory.missing("python3");
-    } else if let Some(output) = inventory.run("python3", &["--version"]) {
+    } else if let Some(output) = inventory.run("python3", &["--version"], cancel) {
         inventory.absorb(parse_python_version(&output));
     }
 }
@@ -352,6 +353,24 @@ mod tests {
                 Lookup::Product(p) => format!("{p} {}", c.version),
             })
             .collect()
+    }
+
+    /// Whichever `python3` this Mac has, a cancelled sweep runs neither it nor `xcode-select`:
+    /// either is reported as cancelled, or `python3` is not installed at all.
+    #[test]
+    fn a_cancelled_sweep_reads_no_python() {
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let mut inventory = Inventory::default();
+        python(&mut inventory, &cancel);
+        assert!(inventory.components.is_empty());
+        let cancelled = matches!(inventory.problems[..], [InventoryError::Cancelled { .. }]);
+        assert!(
+            cancelled || inventory.not_installed == ["python3"],
+            "{:?} {:?}",
+            inventory.problems,
+            inventory.not_installed
+        );
     }
 
     #[test]

@@ -744,7 +744,12 @@ fn remove_run(dir: &Path, outcome: impl FnOnce() -> String) -> Result<(), FixErr
 /// or dismissed. Run under the sweeps lock, as a sweep or dismissal can land while the user
 /// reads the question.
 fn still_current(data_dir: &DataDir, finding: &Planned) -> Result<bool, FixError> {
-    Ok(current_report(data_dir, finding.key)? == finding.report)
+    match current_report(data_dir, finding.key) {
+        Ok(path) => Ok(path == finding.report),
+        // A sweep that no longer finds it removed the report it was planned from.
+        Err(FixError::State(StateError::UnknownKey { .. })) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Creates a new, empty fix folder `fixes/<started>-<name>[-n]/`.
@@ -2628,6 +2633,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, FixError::Stale { .. }), "{err:?}");
+        assert!(unrun());
+
+        // As the sweep that no longer finds it leaves things: its older reports are removed.
+        let sweeps = data_dir.sweeps_dir();
+        crate::retention::remove_older(&sweeps, &gone).unwrap();
+        let err = run_fix(
+            &data_dir,
+            &plan,
+            Confirmed::Asked,
+            &mut |_| {},
+            &Cancel::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FixError::Changed { .. }), "{err:?}");
         assert!(unrun());
     }
 

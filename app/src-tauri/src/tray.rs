@@ -50,8 +50,8 @@ pub(crate) struct Popover {
     hidden_on_blur: Mutex<Option<Instant>>,
     /// How many holds are alive. Each covers a time a system dialog can take the focus, which
     /// would otherwise hide the popover and the view that caused it: the folder picker, and
-    /// the privacy and Keychain prompts macOS shows while detection reads `~/Documents` and
-    /// runs `gh`. A count, since detection and the picker can overlap.
+    /// the Keychain prompt macOS shows while detection runs `gh`. A count, since detection and
+    /// the picker can overlap.
     held: AtomicUsize,
 }
 

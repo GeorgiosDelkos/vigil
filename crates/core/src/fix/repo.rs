@@ -14,6 +14,7 @@
 
 use serde_json::Value;
 
+use crate::cancel::Cancel;
 use crate::inventory::command;
 use crate::sweep;
 
@@ -577,7 +578,7 @@ fn head(gh: &str, repo: &str, branch: &str) -> Result<String, String> {
 
 /// The JSON `gh api` answers for `path`.
 fn api(gh: &str, path: &str) -> Result<Value, String> {
-    let text = command::run(gh, &["api", path])
+    let text = command::run(gh, &["api", path], &Cancel::new())
         .map_err(|e| sweep::error_chain(&e))?
         .ok_or_else(|| "gh is not installed".to_owned())?;
     serde_json::from_str(&text)
