@@ -139,19 +139,22 @@ acts on what it reads. Vigil is built around that.
 The fix rules in the last row are instructions in the fix prompt, which the agent runs with
 full access. The app checks what it can around them:
 
-- **What you confirm is what runs.** The confirmation shows where the fix runs, the agent, the
-  fix's summary, steps and exact commands, and says when your own edited fix prompt is used.
+- **What you confirm is what runs.** The confirmation shows where the fix runs, the agent and
+  its model, the fix's summary, steps and exact commands, and says when your own edited fix prompt is used.
   The app runs the plan it showed: a change to `config.toml` or the prompt after the question
   changes nothing that runs. A fix prompt without its "Where to work" rules (`{{access}}`) is
   refused.
-- **Repository fixes stay in their repository.** A fix whose commands name another repository
-  (`repos/<other>/...`, `--repo <other>`, a `gh api` path outside `repos/<this repository>`)
-  is refused before you are asked. The agent runs with git hooks and npm, pnpm and Yarn
-  lifecycle scripts off, and is told that files in the clone such as `CLAUDE.md` or
-  `AGENTS.md` are data. Each run makes its own branch, `vigil/fix-<key>-<time>`. Afterwards the
-  app asks GitHub: the default branch must have the head it had before the run, and the pull
-  request the agent names must be open from that branch into the default branch of the same
-  repository. Otherwise the outcome is recorded as unknown, with why.
+- **Repository fixes stay in their repository.** A fix whose `gh`, `git`, `curl` or `wget`
+  commands may reach another repository is refused before you are asked: another
+  `owner/name` in a GitHub address, a `gh` call without `--repo <this repository>`, a `gh api`
+  path outside `repos/<this repository>`, a `gh` subcommand a fix does not need, or a `cd` out
+  of the clone. The agent runs with git hooks and npm, pnpm and Yarn lifecycle scripts off,
+  and is told that files in the clone such as `CLAUDE.md` or `AGENTS.md` are data. Each run
+  makes its own branch, `vigil/fix-<key>-<time>`. Afterwards the app asks GitHub: the default
+  branch must be the same branch, with the head it had before the run, and the pull request
+  the agent names must be open from the run's branch into it, in the same repository; a change
+  to files reported done needs that pull request. Otherwise the outcome is recorded as
+  unknown, with why. Pushes to other branches and tags are not checked.
 - **Server fixes read the server.** A server fix runs the full-access agent on this Mac, and
   the agent reads what the server prints. A compromised server could try to steer it, so the
   confirmation says so; confirm only fixes you would run yourself.

@@ -353,8 +353,9 @@ use ssh.
   target with a verdict (a newer sweep without it means it is gone, and an old fix could
   downgrade a package), it is not dismissed, its fix passes the sweep's text checks again, the
   target is still in `config.toml`, and the agent is installed. The question shows where the
-  fix runs (for a server, the exact ssh command), when the sweep found it, the summary, the
-  steps and the exact commands, as the agent is told the user confirmed all three; and notes:
+  fix runs (for a server, the exact ssh command), the agent and its model, when the sweep
+  found it, the summary, the steps and the exact commands, as the agent is told the user
+  confirmed all three; and notes:
   for a server, that the agent on this Mac reads the server's output, and when the user's
   edited `prompts/fix.md` is used. A summary is shown on one line, so it cannot pass for a
   command. Not confirming exits non-zero.
@@ -365,12 +366,19 @@ use ssh.
   `config.toml` again, so a host, agent or model edited while the user read the question ran
   unseen. A fix prompt without `{{access}}`, where the "Where to work" rules go, is refused.
 - A repository fix whose commands may address another repository is refused before asking
-  (decided 2026-11-12). The rule is conservative, not a shell parser: every
-  `repos/<owner>/<name>` and `github.com/<owner>/<name>` must name this repository; no
-  `GH_REPO` or `GH_HOST`; in a `gh` invocation no `$` or backquote, `-R`/`--repo` names this
-  repository, `gh api` calls one path under `repos/<this repository>` with no `--hostname`
-  (so no `graphql`), and `gh repo` names no other `owner/name`. A fix it refuses wrongly is
-  for the user to run by hand.
+  (decided 2026-11-12). The rule is an allow-list and conservative; commands are split into
+  words and parts as a shell splits them, nothing is expanded. No `GH_*` or `GITHUB_*`
+  variable is set. In a `gh`, `git`, `curl`, `wget` or `cd` part no word holds `$` or a
+  backquote. In a `gh`, `git`, `curl` or `wget` part every GitHub address
+  (`github.com/<owner>/<name>`, `github.com:<owner>/<name>`, any case) names this repository,
+  and every `api.github.com` address is under `/repos/<this repository>` with no `..` or `%`.
+  `gh` runs only `api`, `secret`, `variable`, `workflow`, `pr`, `issue`, `label`, `release`
+  or `repo edit`, never with `--hostname`, `--org`, `-o` or `--owner`; `gh api` calls one
+  path under `repos/<this repository>`; every other subcommand names the repository with
+  `--repo` (or `gh repo edit <repo>`), as `gh` otherwise takes it from the folder it runs in.
+  `cd` goes only to a relative folder with no `..`. Other programs are not checked:
+  `go get github.com/<module>` names a module, not a repository to change. A fix it refuses
+  wrongly is for the user to run by hand.
 - A finding key is a 64-bit hash over every target, so two targets could share one (a crafted
   lockfile path in a repository). Looking a key up for a fix or a dismissal fails, naming both
   reports, when the newest report of another target also has it.
@@ -402,19 +410,23 @@ use ssh.
   configuration) and package lifecycle scripts off (`npm_config_ignore_scripts=true` for npm
   and pnpm, `YARN_ENABLE_SCRIPTS=false`), the owner's decision of 2026-11-12. The prompt says
   that files in the clone such as `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and `.cursorrules` are
-  data. Before the run the app reads the default branch's head with `gh`; after it, the head
-  must be the same, and a reported pull request must be open from the run's branch of this
-  repository into the default branch. Otherwise the run is recorded `unknown`, with why and
-  what the agent reported. Accepted risk: the full-access agent still reads the clone, and
-  could unset those variables; the repositories are the user's own, and the agent's project
-  settings and hooks come from its working folder, the fix folder.
+  data. Before the run the app reads the default branch and its head with `gh`; after it, the
+  default branch must be the same branch with the same head, a reported pull request must be
+  open from the run's branch of this repository into it, and a fix reported `fixed` must name
+  one unless every confirmed command is a `gh api` call (a settings fix). Otherwise the run is
+  recorded `unknown`, with why and what the agent reported. Accepted risk: the full-access
+  agent still reads the clone, could unset those variables, and could push to other branches
+  or tags, which are not checked; the check sees the end state, not each push, so a push to
+  the default branch undone before the agent exits is not seen; the repositories are the user's own, and the agent's
+  project settings and hooks come from its working folder, the fix folder.
 - Server fixes keep the full-access agent on this Mac (the owner's decision, 2026-11-12). It
   reads the server's output, which a compromised server controls; the confirmation says so.
 - `state/fixes.jsonl` gets one line per run: key, target, agent, start and end, exit code,
   outcome (`unknown` when `result.json` is missing or invalid, the agent did not start, or a
   repository's check after the run failed, with why), summary, pull request, how it was
   confirmed (`asked` or `yes_flag`). Records written before 2026-11-12 also name the folder,
-  which no longer exists. Appends
+  which those versions kept; this version does not remove such folders, nor one whose
+  deletion a quit cut short. Appends
   take `state/.lock`; a last line cut short by a crash is ended first. The CLI exits non-zero
   unless the outcome is `fixed` and the agent exited 0.
 - A fix holds `sweeps/.lock`, so no sweep or other fix runs while it changes the target.
