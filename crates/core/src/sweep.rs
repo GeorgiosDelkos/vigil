@@ -453,7 +453,7 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             .issues
             .iter()
             .filter(|i| i.dismissed.is_none() && serious(i.issue.severity) && new(i.key))
-            .map(|i| i.title.clone());
+            .map(|i| plain(&i.title));
         alerts.extend(
             components
                 .chain(issues)
@@ -2136,10 +2136,10 @@ mod tests {
         );
     }
 
-    /// The title of a lone finding is read back from `report.json`, so the alert cleans it
-    /// again rather than trust the file.
+    /// The titles of a lone finding and of an issue are read back from `report.json`, so the
+    /// alert cleans them again rather than trust the file.
     #[test]
-    fn alert_of_a_lone_finding_is_plain() {
+    fn alerts_of_a_lone_finding_and_an_issue_are_plain() {
         let mut first = Report {
             first_verdict: true,
             ..report(
@@ -2148,7 +2148,25 @@ mod tests {
             )
         };
         first.findings[0].title = "GHSA-1 in \u{202e}exe.txt\n".to_owned();
-        assert_eq!(alerts(&[first]), ["mac: GHSA-1 in \u{fffd}exe.txt "]);
+        first.issues = vec![ReportIssue {
+            key: FindingKey::new(&["f"]),
+            title: "file \u{1b}]52;c;aGk=\u{7}".to_owned(),
+            name: "f".to_owned(),
+            first_seen: Timestamp::UNIX_EPOCH,
+            issue: serde_json::from_value(json!({
+                "subject": {"file": "f"}, "severity": "high", "evidence": "e",
+                "explanation": "x", "fix": {"summary": "s", "steps": [], "commands": []}
+            }))
+            .unwrap(),
+            dismissed: None,
+        }];
+        assert_eq!(
+            alerts(&[first]),
+            [
+                "mac: GHSA-1 in \u{fffd}exe.txt ",
+                "mac: file \u{fffd}]52;c;aGk=\u{fffd}"
+            ]
+        );
     }
 
     #[test]

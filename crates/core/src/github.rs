@@ -127,12 +127,14 @@ impl Repo {
                 json!({ "open": open })
             }
             Ok(Alerts::First(alerts)) => {
+                // The count read, not the limit: five short pages that still link a sixth
+                // (GitHub misbehaving) hold fewer than the limit.
+                let read = alerts.len();
                 self.problems.push(format!(
-                    "{name} alerts: {ALERT_LIMIT} or more open, only the first {ALERT_LIMIT} \
-                     are in the bundle"
+                    "{name} alerts: {read} or more open, only the first {read} are in the bundle"
                 ));
                 self.alert_file(name, alerts);
-                json!({ "open": format!("{ALERT_LIMIT} or more") })
+                json!({ "open": format!("{read} or more") })
             }
             Ok(Alerts::Other(Answer::Ok(other))) => {
                 let what = kind_of(&other);
@@ -502,7 +504,7 @@ fn api(gh: &str, path: &str) -> Result<Answer, GitHubError> {
 enum Alerts {
     /// Every open alert.
     All(Vec<Value>),
-    /// The first [`ALERT_LIMIT`]; GitHub may have more.
+    /// The first alerts, at most [`ALERT_LIMIT`]: GitHub links more pages, or sent too many.
     First(Vec<Value>),
     /// A page that is not a list, or GitHub's refusal.
     Other(Answer),

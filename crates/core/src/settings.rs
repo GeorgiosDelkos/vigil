@@ -387,7 +387,14 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => None,
         Err(e) => return Err(write_err(e)),
     };
-    fs::File::create(&partial)
+    // A file left by a crashed save is removed, and the new one is created only if the name is
+    // free: `create` would follow a symlink planted under that name (in a shared dotfiles
+    // folder, say) and truncate whatever it points at. Removing a link removes the link only.
+    match fs::remove_file(&partial) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(write_err(e)),
+        _ => {}
+    }
+    fs::File::create_new(&partial)
         .and_then(|mut file| {
             if let Some(permissions) = permissions {
                 file.set_permissions(permissions)?;
@@ -831,6 +838,24 @@ mod tests {
         assert!(fs::read_to_string(&real).unwrap().contains("o/r"));
         let mode = fs::metadata(&real).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_planted_partial_file_link_is_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let victim = tmp.path().join("victim");
+        fs::write(&victim, "keep").unwrap();
+        std::os::unix::fs::symlink(&victim, tmp.path().join(".config.toml.partial")).unwrap();
+
+        save(&data_dir, repo_added("o/r")).unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep");
+        let config = fs::symlink_metadata(data_dir.config_file()).unwrap();
+        assert!(
+            config.is_file(),
+            "a regular config.toml, not the planted link"
+        );
     }
 
     #[test]
