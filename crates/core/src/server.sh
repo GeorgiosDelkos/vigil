@@ -36,9 +36,11 @@ listening() {
 
 # The lockfile names and skipped folders match the Mac's project folder walk (lockfiles.rs).
 # Names with a newline are skipped, since the list is one path per line. The exit status is
-# find's own: not 0 when some folder below could not be read.
+# find's own: not 0 when some folder below could not be read. `-H` follows the folder itself
+# when it is a symlink (a deploy's `current` link), as the `[ -d ]` check before it does;
+# without it find lists nothing under such a folder. Symlinks below it are still not followed.
 lockfiles() {
-  find "$1" -mindepth 1 \
+  find -H "$1" -mindepth 1 \
     \( -name "*$nl*" -o -type d \( -name '.*' -o -name node_modules -o -name target \
     -o -name vendor -o -name dist -o -name build \) \) -prune \
     -o -type f \( -name Cargo.lock -o -name package-lock.json -o -name npm-shrinkwrap.json \

@@ -1275,6 +1275,33 @@ Version: 1
         }
     }
 
+    /// A configured folder is often a symlink to the live release (`/var/www/current`). The
+    /// script follows that one link, and no symlink below it.
+    #[test]
+    fn the_script_follows_a_symlinked_folder_but_no_link_below_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let release = tmp.path().join("release");
+        fs::create_dir_all(release.join("p")).unwrap();
+        fs::write(release.join("p/uv.lock"), "").unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("Cargo.lock"), "").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, release.join("linked")).unwrap();
+        let current = tmp.path().join("current");
+        std::os::unix::fs::symlink(&release, &current).unwrap();
+        let input = format!("marker=M\nset -- '{}'\n{SCRIPT}", current.display());
+
+        let output = command::run_with_input("sh", &["-s"], input.as_bytes(), TIMEOUT)
+            .unwrap()
+            .unwrap();
+
+        let parts = parts(&output.stdout, "M").unwrap();
+        let listed = parts.iter().find(|p| p.name.starts_with("dir ")).unwrap();
+        assert_eq!(listed.status, 0);
+        let lockfile = current.join("p/uv.lock").display().to_string();
+        assert_eq!(listed.text.lines().collect::<Vec<_>>(), [lockfile.as_str()]);
+    }
+
     #[test]
     fn the_rust_side_names_the_script_statuses() {
         assert!(SCRIPT.contains(&format!("status={NOT_A_DIR}\n")));
