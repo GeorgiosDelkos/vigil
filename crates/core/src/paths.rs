@@ -338,14 +338,17 @@ mod tests {
         let err = DataDir::new(&file).ensure_private().unwrap_err();
         assert!(matches!(err, DataDirError::Io { .. }), "{err:?}");
 
-        // As root the chmod would succeed and change /usr: only run it as another user.
+        // A root-owned folder on a writable volume: `/usr` is on the read-only system volume,
+        // where the chmod fails as read-only before ownership is checked (seen on the GitHub
+        // macOS runner, 2026-11-12). As root the chmod would succeed and change /Library: only
+        // run it as another user.
         let uid = |path: &Path| std::os::unix::fs::MetadataExt::uid(&fs::metadata(path).unwrap());
         assert_ne!(
             uid(&file),
-            uid(Path::new("/usr")),
+            uid(Path::new("/Library")),
             "run the tests as a user"
         );
-        let err = DataDir::new("/usr").ensure_private().unwrap_err();
+        let err = DataDir::new("/Library").ensure_private().unwrap_err();
         assert!(matches!(err, DataDirError::NotOwned { .. }), "{err:?}");
         assert!(err.to_string().contains("another user"), "{err}");
     }
