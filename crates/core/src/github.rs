@@ -49,9 +49,9 @@ const WORKFLOW_LIMIT: usize = 8;
 /// kilobytes; the cap keeps one file from filling the agent's context.
 const WORKFLOW_SIZE_LIMIT: usize = 256 * 1024;
 
-/// The most alerts of one kind put in the bundle. Arbitrary, for the same reason. At it,
-/// `settings.json` says "500 or more" rather than the count, since the pages after the limit
-/// are not fetched.
+/// The most alerts of one kind put in the bundle. Arbitrary, for the same reason. When GitHub
+/// links a page past the last one read, or sends more than this, `settings.json` says `"N or
+/// more"`, N being the alerts kept, since the pages after the limit are not fetched.
 const ALERT_LIMIT: usize = ALERT_PAGES * ALERTS_PER_PAGE;
 
 /// The most pages of one kind of alert fetched.
@@ -118,7 +118,7 @@ impl Repo {
     }
 
     /// Writes `github/<name>-alerts.json` and returns the setting value: the open count (or
-    /// "500 or more"), or GitHub's refusal.
+    /// `"N or more"` when more pages are linked), or GitHub's refusal.
     fn alerts(&mut self, gh: &str, name: &str, path: &str) -> Value {
         match alert_pages(gh, path) {
             Ok(Alerts::All(alerts)) => {
@@ -567,7 +567,8 @@ fn next_cursor(headers: &str, path: &str) -> Result<Option<String>, GitHubError>
     let next = link.and_then(|link| {
         link.split(',').find_map(|entry| {
             let (url, params) = entry.split_once(';')?;
-            // RFC 8288 allows the relation quoted or not.
+            // RFC 8288 allows the relation quoted or not. A list of relations (`rel="next
+            // last"`) is not split: GitHub sends one per link.
             let is_next = params
                 .split(';')
                 .any(|p| matches!(p.trim(), "rel=\"next\"" | "rel=next"));
@@ -816,6 +817,7 @@ case "$last" in
   repos/o/paged) echo '{"default_branch":"main","owner":{"type":"User","login":"o"}}' ;;
   repos/o/paged/dependabot/alerts*) paged hundred after 9 ;;
   repos/o/paged/code-scanning/alerts*) paged hundred page 2 ;;
+  repos/o/paged/secret-scanning/alerts*hide_secret=true*) paged ten after 99 ;;
   repos/o/paged/*) echo '[]' ;;
   repos/o/r/contents/.github/workflows) ok workflows ;;
   repos/o/r/contents/.github/workflows/ci.yml) file "$@"; echo 'on: push' ;;
@@ -944,6 +946,10 @@ esac
                 .collect();
             let path = dir.join(format!("hundred-{page}.json"));
             fs::write(path, Value::Array(alerts).to_string()).unwrap();
+            // Short pages that always link another: only five are read.
+            let ten: Vec<Value> = (0..10).map(|n| json!({"number": page * 10 + n})).collect();
+            let path = dir.join(format!("ten-{page}.json"));
+            fs::write(path, Value::Array(ten).to_string()).unwrap();
         }
         path.to_str().unwrap().to_owned()
     }
@@ -1141,6 +1147,19 @@ esac
         );
         // Three pages of code scanning alerts, by page number: all are read.
         assert_eq!(settings["code_scanning_alerts"], json!({"open": 300}));
+        // Five short pages that still link a sixth: the count read, not the limit.
+        assert_eq!(
+            settings["secret_scanning_alerts"],
+            json!({"open": "50 or more"})
+        );
+        assert!(
+            repo.problems.contains(
+                &"secret-scanning alerts: 50 or more open, only the first 50 are in the bundle"
+                    .to_owned()
+            ),
+            "{:?}",
+            repo.problems
+        );
 
         let calls = fs::read_to_string(tmp.path().join("calls")).unwrap();
         let dependabot: Vec<&str> = calls.lines().filter(|c| c.contains("dependabot")).collect();

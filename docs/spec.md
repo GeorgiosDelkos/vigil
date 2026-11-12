@@ -275,8 +275,8 @@ the user's `gh` login; the agent never calls GitHub and reads only the bundle.
 
 Each kind of alert is read 100 a page, following the cursor in GitHub's `Link` header, for at
 most 5 pages: the bundle keeps the first 500, and when a sixth page is linked `settings.json`
-says "500 or more" open instead of a count, so a repository with thousands of alerts costs five
-requests.
+says "n or more" open (n the alerts kept, so usually "500 or more") instead of a count, so a
+repository with thousands of alerts costs five requests.
 
 A feature that is off answers with a 403 or 404 and a message ("Dependabot alerts are
 disabled", "no analysis found", "Branch not protected"); that answer is the setting's value in

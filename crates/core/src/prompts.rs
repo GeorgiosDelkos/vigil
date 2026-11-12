@@ -95,6 +95,7 @@ impl Prompt {
                 0xddaa_01c1_7a2a_02d4,
                 0xccb7_cd9e_780d_a2cd,
                 0x1b8f_a6db_4038_aed0,
+                0xfc5a_c134_c485_6303,
             ],
             Self::Server => &[
                 0xf408_6f27_d0ec_3536,

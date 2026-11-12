@@ -379,8 +379,17 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
     };
     // `lock` created the folder of `path`; a link's target is in a folder that exists.
     let dir = target.parent().expect("the config file has a folder");
-    // One name is enough: saves hold the lock from `save_setting` while writing it.
-    let partial = dir.join(".config.toml.partial");
+    // Named after the target, so configs of two data folders linked into one dotfiles folder
+    // do not share it. Saves of one data folder hold the lock from `save_setting`; two data
+    // folders linked to the same file are not kept apart.
+    let name = target
+        .file_name()
+        .expect("a canonical file path has a name");
+    let partial = dir.join(format!(".{}.partial", name.display()));
+    let partial_err = |source| SaveSettingError::Write {
+        path: partial.clone(),
+        source,
+    };
     let permissions = match fs::metadata(&target) {
         Ok(meta) => Some(meta.permissions()),
         // A new file gets the default permissions.
@@ -390,23 +399,21 @@ fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
     // A file left by a crashed save is removed, and the new one is created only if the name is
     // free: `create` would follow a symlink planted under that name (in a shared dotfiles
     // folder, say) and truncate whatever it points at. Removing a link removes the link only.
-    match fs::remove_file(&partial) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(write_err(e)),
-        _ => {}
+    if let Err(e) = fs::remove_file(&partial)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        return Err(partial_err(e));
     }
-    fs::File::create_new(&partial)
-        .and_then(|mut file| {
-            if let Some(permissions) = permissions {
-                file.set_permissions(permissions)?;
-            }
-            file.write_all(text.as_bytes())?;
-            file.sync_data()
-        })
+    let mut file = fs::File::create_new(&partial).map_err(partial_err)?;
+    permissions
+        .map_or(Ok(()), |permissions| file.set_permissions(permissions))
+        .and_then(|()| file.write_all(text.as_bytes()))
+        .and_then(|()| file.sync_data())
         .and_then(|()| fs::rename(&partial, &target))
         .inspect_err(|_| drop(fs::remove_file(&partial)))
-        // The rename is durable only once the folder's entry is. If this sync fails the new
-        // config is already in place, and the error still says the save may not last; saving
-        // again is harmless, since a save writes the whole file.
+        // The rename is durable only once the folder's entry is. If this sync fails, the error
+        // reports a failed write though the new config is in place; saving again is harmless,
+        // since a save writes the whole file.
         .and_then(|()| fs::File::open(dir)?.sync_all())
         .map_err(write_err)
 }

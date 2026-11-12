@@ -439,7 +439,7 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             .map(|group| {
                 let installed = &group[0].installed;
                 if group.len() == 1 {
-                    return plain(&group[0].title);
+                    return group[0].title.clone();
                 }
                 plain(&format!(
                     "{} {}, {}: {} advisories",
@@ -453,11 +453,12 @@ pub fn alerts(reports: &[Report]) -> Vec<String> {
             .issues
             .iter()
             .filter(|i| i.dismissed.is_none() && serious(i.issue.severity) && new(i.key))
-            .map(|i| plain(&i.title));
+            .map(|i| i.title.clone());
         alerts.extend(
             components
                 .chain(issues)
-                .map(|t| format!("{}: {t}", report.target)),
+                // Titles and targets are read back from report.json: one plain line.
+                .map(|t| plain(&format!("{}: {t}", report.target))),
         );
     }
     alerts
@@ -2136,10 +2137,10 @@ mod tests {
         );
     }
 
-    /// The titles of a lone finding and of an issue are read back from `report.json`, so the
-    /// alert cleans them again rather than trust the file.
+    /// The target and the titles of a lone finding and of an issue are read back from
+    /// `report.json`, so the alert cleans them again rather than trust the file.
     #[test]
-    fn alerts_of_a_lone_finding_and_an_issue_are_plain() {
+    fn alerts_are_plain_lines() {
         let mut first = Report {
             first_verdict: true,
             ..report(
@@ -2160,11 +2161,12 @@ mod tests {
             .unwrap(),
             dismissed: None,
         }];
+        first.target = "m\u{200b}ac".to_owned();
         assert_eq!(
             alerts(&[first]),
             [
-                "mac: GHSA-1 in \u{fffd}exe.txt ",
-                "mac: file \u{fffd}]52;c;aGk=\u{fffd}"
+                "m\u{fffd}ac: GHSA-1 in \u{fffd}exe.txt ",
+                "m\u{fffd}ac: file \u{fffd}]52;c;aGk=\u{fffd}"
             ]
         );
     }
