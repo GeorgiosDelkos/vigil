@@ -1941,3 +1941,44 @@ describe("the main view", () => {
     expect(canvas.paints).toBe(first + 3);
   });
 });
+
+describe("an update", () => {
+  const ready = { version: "0.1.0", checks: true, checked: null, problem: null, ready: "0.2.0" };
+
+  it("restarts only on the click, and waits while a sweep or fix runs", async () => {
+    shown = overview({ agent: null, busy: true, update: ready });
+    answer({ restart_to_update: () => null });
+    render(() => <App />);
+    const restart = await screen.findByRole("button", { name: "Restart to update" });
+    expect(screen.getByText(/Update ready: Vigil 0\.2\.0/)).toBeTruthy();
+    expect(screen.getByText(/after this run ends/)).toBeTruthy();
+    expect((restart as HTMLButtonElement).disabled).toBe(true);
+
+    shown = overview({ agent: null, update: ready });
+    handlers.get("changed")?.({ payload: null });
+    await vi.waitFor(() => expect((restart as HTMLButtonElement).disabled).toBe(false));
+    expect(invoke).not.toHaveBeenCalledWith("restart_to_update");
+    fireEvent.click(restart);
+    expect(invoke).toHaveBeenCalledWith("restart_to_update");
+  });
+
+  it("shows Rust's reason when the install is refused", async () => {
+    shown = overview({ agent: null, update: ready });
+    answer({
+      restart_to_update: () => {
+        throw new Error("cannot install Vigil 0.2.0: permission denied");
+      },
+    });
+    render(() => <App />);
+    fireEvent.click(await screen.findByRole("button", { name: "Restart to update" }));
+    expect(await screen.findByText(/cannot install Vigil 0\.2\.0/)).toBeTruthy();
+  });
+
+  it("offers no restart while none is ready", async () => {
+    shown = overview({ agent: null });
+    answer();
+    render(() => <App />);
+    expect(await screen.findByText("Choose an agent to start")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Restart to update" })).toBeNull();
+  });
+});

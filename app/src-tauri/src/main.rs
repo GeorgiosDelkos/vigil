@@ -11,6 +11,7 @@
 mod runner;
 mod settings;
 mod tray;
+mod update;
 
 use std::cmp::Ordering;
 use std::path::PathBuf;
@@ -46,6 +47,7 @@ use vigil_core::write_html_report;
 
 use crate::runner::Runner;
 use crate::runner::Status;
+use crate::update::UpdateView;
 
 fn main() {
     let home = std::env::home_dir().expect("a Mac user has a home directory");
@@ -58,6 +60,8 @@ fn main() {
         ))
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_dialog::init())
+        // Used from Rust only (`update`): the webview gets no updater permission.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Runner::new(data_dir, home))
         .manage(tray::Popover::default())
         .manage(settings::Detection::default())
@@ -79,7 +83,8 @@ fn main() {
             settings::detect_again,
             settings::save,
             settings::add_folder,
-            settings::set_nvd_key
+            settings::set_nvd_key,
+            update::restart_to_update
         ])
         .setup(|app| {
             // A menu-bar app: no Dock icon and no app menu (LSUIElement).
@@ -87,6 +92,7 @@ fn main() {
             tray::create(app.handle())?;
             runner::schedule(app.handle().clone());
             settings::detect_at_start(app.handle().clone());
+            update::schedule(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -137,6 +143,8 @@ struct Overview {
     /// The startup disk's size and free space; `None` when diskutil cannot say, and the row
     /// is hidden.
     disk: Option<Disk>,
+    /// The running version, the last update check, and an update waiting for a restart.
+    update: UpdateView,
 }
 
 /// The status as the popover shows it: targets by their labels, and where the sweep is.
@@ -318,7 +326,7 @@ const MAX_MARKED_TARGETS: usize = 12;
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
-fn overview(runner: State<'_, Runner>) -> Overview {
+fn overview(app: AppHandle, runner: State<'_, Runner>) -> Overview {
     // diskutil takes about 0.3 seconds, so it runs while the reports are read, not after.
     thread::scope(|scope| {
         let disk = scope.spawn(startup_disk);
@@ -347,6 +355,7 @@ fn overview(runner: State<'_, Runner>) -> Overview {
             disk: disk
                 .join()
                 .expect("startup_disk returns None on failure and does not panic"),
+            update: update::view(&app),
         }
     })
 }

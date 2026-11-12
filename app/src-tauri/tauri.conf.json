@@ -53,5 +53,14 @@
       "icons/icon.png"
     ],
     "category": "DeveloperTool"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNGNTBFNDhEREI3RDczMTYKUldRV2MzM2JqZVJRUDdlVWFvd0ZwUkRUanJqK2QyZmNpNU1ZNW1ndkxueDFmTnRqK0xvRHZybDAK",
+      "endpoints": [
+        "https://github.com/GeorgiosDelkos/vigil/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true
+    }
   }
 }

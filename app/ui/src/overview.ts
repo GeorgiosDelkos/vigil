@@ -206,6 +206,21 @@ export type Overview = {
   readonly problem: string | null;
   /** Null when Rust could not read the disk; the main view then has no disk row. */
   readonly disk: Disk | null;
+  readonly update: UpdateView;
+};
+
+/** The running version and the app's updates (app/src-tauri/src/update.rs). */
+export type UpdateView = {
+  /** The running version: "0.1.0". */
+  readonly version: string;
+  /** Whether this build checks for updates: only an installed release does. */
+  readonly checks: boolean;
+  /** When the last check ended. */
+  readonly checked: string | null;
+  /** Why the last check or install failed, one line as Rust words it. */
+  readonly problem: string | null;
+  /** The version downloaded and verified, waiting for Restart to update. */
+  readonly ready: string | null;
 };
 
 export type FixPreview = {

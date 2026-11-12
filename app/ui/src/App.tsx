@@ -38,6 +38,7 @@ import { Settings } from "./Settings.tsx";
 import type { Section } from "./settings.ts";
 import { Glyph, Icon, type IconName } from "./icons.tsx";
 import { ago, since } from "./time.ts";
+import { UpdateReady } from "./Update.tsx";
 
 type Tab = "needs" | "targets" | "all" | "fixed";
 
@@ -171,12 +172,23 @@ export function App() {
   return (
     <main class="pop" classList={{ "on-orbit": view() === "orbit" }}>
       <Show when={error()}>{(e) => <p class="banner bad">{e()}</p>}</Show>
+      <Show when={overview()?.update.ready}>
+        {(version) => (
+          <UpdateReady
+            version={version()}
+            busy={overview()?.busy ?? false}
+            onRestart={() => run(() => invoke("restart_to_update"))}
+          />
+        )}
+      </Show>
       <Show when={overview()} fallback={<p class="quiet">Reading the last sweep…</p>}>
         {(o) => (
           <Switch>
             <Match when={view() === "settings"}>
               <Settings
                 start={settings() ?? null}
+                update={o().update}
+                now={now()}
                 onClose={() => {
                   setSettings(undefined);
                   void refetch();

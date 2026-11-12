@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Settings } from "./Settings.tsx";
 import { settingsView } from "./fixtures.ts";
+import type { UpdateView } from "./overview.ts";
 import type { Section, SettingsView } from "./settings.ts";
 
 const invoke = vi.hoisted(() => vi.fn());
@@ -68,9 +69,17 @@ async function options(id: string): Promise<[string, string, boolean][]> {
   return [...(await menu(id)).options].map((o) => [o.value, o.text, o.disabled]);
 }
 
-function open(start: Section | null = null) {
+const NO_UPDATE: UpdateView = {
+  version: "0.1.0",
+  checks: true,
+  checked: null,
+  problem: null,
+  ready: null,
+};
+
+function open(start: Section | null = null, update: UpdateView = NO_UPDATE) {
   const onClose = vi.fn();
-  render(() => <Settings start={start} onClose={onClose} />);
+  render(() => <Settings start={start} update={update} now={new Date()} onClose={onClose} />);
   return onClose;
 }
 
@@ -859,5 +868,34 @@ describe("quick changes", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(await on("me/app")).toBe("false");
     expect(await on("me/site")).toBe("true");
+  });
+});
+
+describe("the version line", () => {
+  it("shows the version and when updates were last checked", async () => {
+    answer({ settings_data: () => settingsView() });
+    const checked = new Date(Date.now() - 5 * 60_000).toISOString();
+    open(null, { ...NO_UPDATE, checked });
+    expect(await screen.findByText("Vigil 0.1.0 · checked for updates 5 min ago")).toBeTruthy();
+  });
+
+  it("says when updates are not checked yet, and when this build never checks", async () => {
+    answer({ settings_data: () => settingsView() });
+    open();
+    expect(
+      await screen.findByText("Vigil 0.1.0 · checks for updates at start and every 12 hours"),
+    ).toBeTruthy();
+    cleanup();
+    open(null, { ...NO_UPDATE, checks: false });
+    expect(
+      await screen.findByText(/this build does not check for updates; installed releases do/),
+    ).toBeTruthy();
+  });
+
+  it("shows a failed check quietly, as Rust words it", async () => {
+    answer({ settings_data: () => settingsView() });
+    open(null, { ...NO_UPDATE, problem: "the last check failed: offline" });
+    expect(await screen.findByText("the last check failed: offline")).toBeTruthy();
+    expect(document.querySelector(".banner")).toBeNull();
   });
 });

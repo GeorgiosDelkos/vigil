@@ -1,7 +1,7 @@
 //! Runs sweeps off the UI thread, one at a time, and on the configured schedule.
 //!
-//! [`Runner`] holds the one piece of shared state behind a single lock: the status, and when
-//! the app last started a sweep. [`start`] takes it to check and claim the sweeping state in
+//! [`Runner`] holds the one piece of shared state behind a single lock: the status, when the
+//! app last started a sweep, and the update state (`crate::update`). [`start`] takes it to check and claim the sweeping state in
 //! one step, so two clicks, or a click and the schedule, cannot start two sweeps. The core's
 //! own lock on the sweeps folder still guards against a sweep from the CLI; that one surfaces
 //! as a failed sweep.
@@ -55,6 +55,8 @@ use vigil_core::target_label;
 use vigil_core::target_names;
 
 use crate::tray;
+use crate::update::Ready;
+use crate::update::Updates;
 
 /// How often the schedule is checked. Arbitrary: a sweep is due every few hours, so a minute
 /// late is nothing, and a Mac that wakes after a missed sweep runs it within a minute.
@@ -89,6 +91,9 @@ struct Shared {
     cancel: Cancel,
     /// How far quitting has got.
     quit: Quit,
+    /// The last update check, and an update waiting for a restart. Under this lock so that
+    /// installing one is refused in the same step that sees whether a sweep or fix runs.
+    updates: Updates,
 }
 
 /// How far quitting has got.
@@ -196,6 +201,7 @@ impl Runner {
                 started: None,
                 cancel: Cancel::new(),
                 quit: Quit::No,
+                updates: Updates::default(),
             }),
         }
     }
@@ -248,6 +254,36 @@ impl Runner {
             return Err("no fix's results are showing".to_owned());
         };
         run.log_tail().map_err(|e| error_chain(&e))
+    }
+
+    /// Reads or changes the update state under the lock. `f` must not block: every command
+    /// and the schedule wait on this lock.
+    pub(crate) fn updates<R>(&self, f: impl FnOnce(&mut Updates) -> R) -> R {
+        f(&mut self.lock().updates)
+    }
+
+    /// Takes the waiting update to install it, unless a sweep or fix runs or the app is
+    /// quitting, and marks the app as quitting, so nothing new starts while it installs and
+    /// restarts: one check and one write under one lock.
+    pub(crate) fn claim_restart(&self) -> Result<Ready, &'static str> {
+        let mut shared = self.lock();
+        if shared.quit != Quit::No {
+            return Err("the app is quitting");
+        }
+        if shared.status.is_busy() {
+            return Err("a sweep or fix is running; restart once it ends");
+        }
+        let ready = shared.updates.take_ready().ok_or("no update is ready")?;
+        shared.quit = Quit::Ready;
+        Ok(ready)
+    }
+
+    /// Undoes [`Self::claim_restart`] after the install failed with `problem`: the update waits
+    /// again, and sweeps and fixes may start.
+    pub(crate) fn restart_failed(&self, ready: Ready, problem: String) {
+        let mut shared = self.lock();
+        shared.quit = Quit::No;
+        shared.updates.put_back(ready, problem);
     }
 
     fn set(&self, status: Status) {
@@ -975,6 +1011,44 @@ mod tests {
             err.contains("/fixes/x/agent.log"),
             "the run's own log: {err}"
         );
+    }
+
+    #[test]
+    fn an_update_never_installs_while_a_sweep_or_fix_runs() {
+        let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
+        runner.claim(fixing()).unwrap();
+        assert_eq!(
+            runner.claim_restart().unwrap_err(),
+            "a sweep or fix is running; restart once it ends"
+        );
+        runner.set(Status::Sweeping {
+            step: "starting".to_owned(),
+            current: None,
+            done: Vec::new(),
+            pending: Vec::new(),
+            thousandths: 0,
+            open_ended: false,
+            stopping: false,
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        });
+        assert_eq!(
+            runner.claim_restart().unwrap_err(),
+            "a sweep or fix is running; restart once it ends"
+        );
+
+        runner.set(Status::Idle);
+        assert_eq!(runner.claim_restart().unwrap_err(), "no update is ready");
+        assert_eq!(
+            runner.lock().quit,
+            Quit::No,
+            "a refused restart leaves the app running"
+        );
+        runner.claim(fixing()).expect("and runs still start");
+
+        runner.set(Status::Idle);
+        runner.lock().quit = Quit::Waiting;
+        assert_eq!(runner.claim_restart().unwrap_err(), "the app is quitting");
     }
 
     #[test]
