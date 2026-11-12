@@ -655,7 +655,8 @@ impl Shared<'_> {
             && let Err(e) = retention::remove_older(&self.data_dir.sweeps_dir(), dir)
         {
             report.problems.push(format!(
-                "removing the target's older sweeps: {}",
+                "removing the target's older sweeps: {}; repair or delete the file named, and the \
+                 next sweep removes them",
                 error_chain(&e)
             ));
         }

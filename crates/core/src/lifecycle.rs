@@ -322,10 +322,12 @@ pub(crate) fn first_seen(
 ///
 /// Read without the sweeps lock, so a sweep can end meanwhile: once its report is written it
 /// removes the target's older folders (see `retention`), which can fall between reading its
-/// folder, still without a report, and reading an older one, by then gone. So when a folder
-/// read without a report has one by the end, the scan is taken again, and finds it. A scan
-/// that ends with every such folder still without a report is whole: the report is written
-/// before anything is removed, so every older folder was read before its removal.
+/// folder, still without a report, and reading an older one, by then gone. So the scan is
+/// taken again when a folder it read without a report has one by the end, or the sweep
+/// folders are not the ones it listed (a sweep folder created, or one emptied and removed). A
+/// scan that ends with neither is whole: the report is written before anything is removed,
+/// and the new report's sweep folder was listed, so its target folder was read before the
+/// report and every older one before its removal.
 pub(crate) fn newest_verdict(
     sweeps: &Path,
     dir_name: &str,
@@ -342,7 +344,8 @@ fn newest_verdict_read_by(
     loop {
         let mut unreported = Vec::new();
         let mut found = None;
-        for sweep in newest_first(sweeps)? {
+        let listed = newest_first(sweeps)?;
+        for sweep in &listed {
             let dir = sweep.join(dir_name);
             match read(&dir)? {
                 Some(saved) if saved.failure.is_none() => {
@@ -353,7 +356,7 @@ fn newest_verdict_read_by(
                 None => unreported.push(dir),
             }
         }
-        if !reported_since(&unreported) {
+        if !reported_since(&unreported) && newest_first(sweeps)? == listed {
             return Ok(found);
         }
     }
@@ -858,9 +861,11 @@ fn newest(sweeps: &Path, key: FindingKey) -> Result<Option<SavedEntry>, StateErr
     Ok(newest_report(sweeps, key)?.map(|(_, entry)| entry))
 }
 
-/// The newest `report.json` with a verdict that has `key`, with the entry. Taken again when a
-/// target folder read without a report has one by the end, for the reason
-/// [`newest_verdict`] gives.
+/// The newest `report.json` with a verdict that has `key`, with the entry. Taken again for the
+/// reasons [`newest_verdict`] gives. One case is left: a target folder created in a listed
+/// sweep folder after it was listed, whose whole sweep (bundle, agent, report) ends before
+/// this scan reads an older folder. A target's sweep takes minutes and a scan milliseconds;
+/// accepted.
 pub(crate) fn newest_report(
     sweeps: &Path,
     key: FindingKey,
@@ -875,10 +880,11 @@ fn newest_report_read_by(
     read: &mut dyn FnMut(&Path) -> Result<Option<Saved>, StateError>,
 ) -> Result<Option<(PathBuf, SavedEntry)>, StateError> {
     loop {
+        let listed = newest_first(sweeps)?;
         let mut unreported = Vec::new();
         let found = 'scan: {
-            for sweep in newest_first(sweeps)? {
-                for target in folders(&sweep)? {
+            for sweep in &listed {
+                for target in folders(sweep)? {
                     let Some(saved) = read(&target)? else {
                         unreported.push(target);
                         continue;
@@ -891,7 +897,7 @@ fn newest_report_read_by(
             }
             None
         };
-        if !reported_since(&unreported) {
+        if !reported_since(&unreported) && newest_first(sweeps)? == listed {
             return Ok(found);
         }
     }
@@ -999,7 +1005,8 @@ mod tests {
     }
 
     /// A reader that, the first time it is asked for `old`, plays the end of a sweep first:
-    /// writes `new`'s report and removes `old`, as `retention` does.
+    /// writes `new`'s report (creating its folder if need be) and removes `old`, as
+    /// `retention` does.
     fn racing_reader(
         old: PathBuf,
         new: PathBuf,
@@ -1009,6 +1016,7 @@ mod tests {
         move |dir| {
             if dir == old && !raced {
                 raced = true;
+                fs::create_dir_all(&new).unwrap();
                 fs::write(new.join("report.json"), report.to_string()).unwrap();
                 fs::remove_dir_all(&old).unwrap();
             }
@@ -1050,6 +1058,23 @@ mod tests {
         let (path, _) = newest_report_read_by(sweeps, key, &mut read)
             .unwrap()
             .expect("the new report has the key");
+        assert_eq!(path, new.join("report.json"));
+
+        // A whole sweep folder created after the listing: the listing changed.
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path();
+        save(
+            sweeps,
+            "20261101T000000Z/mac",
+            &report(at, None, &[key], at),
+        );
+        let old = sweeps.join("20261101T000000Z/mac");
+        let new = sweeps.join("20261102T000000Z/mac");
+        let new_report = report("2026-11-02T00:00:00Z", None, &[key], at);
+        let mut read = racing_reader(old, new.clone(), new_report);
+        let (path, _) = newest_verdict_read_by(sweeps, "mac", &mut read)
+            .unwrap()
+            .expect("the new sweep folder is listed on the second scan");
         assert_eq!(path, new.join("report.json"));
     }
 

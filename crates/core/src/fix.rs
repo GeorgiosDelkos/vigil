@@ -174,8 +174,16 @@ fn plan_finding(data_dir: &DataDir, key: FindingKey) -> Result<Planned, FixError
         source,
     };
     let invalid = |e: serde_json::Error| read_err(io::Error::new(io::ErrorKind::InvalidData, e));
-    let report: Saved =
-        serde_json::from_str(&fs::read_to_string(&path).map_err(read_err)?).map_err(invalid)?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        // Read without the sweeps lock: a sweep that ended since can have removed it, keeping
+        // its own newer report.
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Err(StateError::UnknownKey { key }.into());
+        }
+        Err(e) => return Err(read_err(e)),
+    };
+    let report: Saved = serde_json::from_str(&text).map_err(invalid)?;
     let entry = report
         .findings
         .into_iter()
@@ -498,7 +506,12 @@ pub fn run_fix(
 /// or dismissed. Run under the sweeps lock, as a sweep or dismissal can land while the user
 /// reads the question.
 fn still_current(data_dir: &DataDir, finding: &Planned) -> Result<bool, FixError> {
-    Ok(current_report(data_dir, finding.key)? == finding.report)
+    match current_report(data_dir, finding.key) {
+        Ok(path) => Ok(path == finding.report),
+        // A sweep that no longer finds it removed the report it was planned from.
+        Err(FixError::State(StateError::UnknownKey { .. })) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Creates a new fix folder `fixes/<started>-<name>[-n]/` holding `files`, by name and text.
@@ -2026,6 +2039,20 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, FixError::Stale { .. }), "{err:?}");
+        assert!(unrun());
+
+        // As the sweep that no longer finds it leaves things: its older reports are removed.
+        let sweeps = data_dir.sweeps_dir();
+        crate::retention::remove_older(&sweeps, &gone).unwrap();
+        let err = run_fix(
+            &data_dir,
+            &plan,
+            Confirmed::Asked,
+            &mut |_| {},
+            &Cancel::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, FixError::Changed { .. }), "{err:?}");
         assert!(unrun());
     }
 

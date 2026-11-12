@@ -9,8 +9,8 @@
 //! that one report and nothing older, and why it runs only once the new report is written: the
 //! comparison with the last sweep has been made by then.
 //!
-//! A target removed from the config is never swept again, so its newest sweep stays until the
-//! user deletes it. A cancelled sweep writes no report for the target it stopped in, so nothing
+//! A target removed from the config is never swept again, so the folders it has stay until the
+//! user deletes them: its newest only, if it was swept since this rule came in, or all of them. A cancelled sweep writes no report for the target it stopped in, so nothing
 //! of that target is removed.
 
 use std::fs;
@@ -43,6 +43,18 @@ pub(crate) fn remove_older(sweeps: &Path, target_dir: &Path) -> Result<(), State
         .expect("a target folder is named in UTF-8");
     let kept = lifecycle::newest_verdict(sweeps, dir_name)?
         .and_then(|(report, _)| report.parent().map(Path::to_owned));
+    let write_err = |path: &Path| {
+        let path = path.to_owned();
+        move |source| StateError::Write { path, source }
+    };
+    // So a crash after a removal cannot keep the removal and lose the new report: the report
+    // and its entry were synced as they were written; these sync the entries of its target
+    // folder and of its sweep folder.
+    for folder in [current, sweeps] {
+        fs::File::open(folder)
+            .and_then(|folder| folder.sync_all())
+            .map_err(write_err(folder))?;
+    }
     let all = lifecycle::newest_first(sweeps)?;
     // Only sweeps older than this one: a newer name can only come from a clock set back, and
     // that sweep is left alone.
@@ -52,10 +64,6 @@ pub(crate) fn remove_older(sweeps: &Path, target_dir: &Path) -> Result<(), State
         if kept.as_deref() == Some(target.as_path()) {
             continue;
         }
-        let write_err = |path: &Path| {
-            let path = path.to_owned();
-            move |source| StateError::Write { path, source }
-        };
         let is_folder = match fs::symlink_metadata(&target) {
             Ok(meta) => meta.is_dir(),
             Err(e) if e.kind() == io::ErrorKind::NotFound => false,
