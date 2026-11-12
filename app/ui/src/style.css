@@ -241,6 +241,11 @@ select:focus-visible {
   background: rgba(79, 209, 139, 0.14);
   color: #a9f0c8;
 }
+/* Not fully checked: amber, as a warning, between the red of a failure and the green of clear. */
+.banner.warn {
+  background: rgba(245, 192, 68, 0.14);
+  color: #f8dc8f;
+}
 .banner .x {
   margin-left: auto;
 }
@@ -1327,6 +1332,10 @@ ol.steps {
   font: var(--text-11) / var(--leading-11) var(--ui);
   color: var(--l3);
   user-select: text;
+}
+/* A target not fully checked reads amber, the colour of its banner. */
+.trow .unchecked {
+  color: var(--medium);
 }
 /* A fix the agent reported reads green, as fixed, until the next sweep confirms it. */
 .fixed-row .confirming,

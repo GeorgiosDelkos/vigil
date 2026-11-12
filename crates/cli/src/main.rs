@@ -28,6 +28,7 @@ use vigil_core::Product;
 use vigil_core::Progress;
 use vigil_core::SshConn;
 use vigil_core::SweepError;
+use vigil_core::SweepsLock;
 use vigil_core::Targets;
 use vigil_core::dismiss;
 use vigil_core::error_chain;
@@ -196,7 +197,7 @@ fn main() -> anyhow::Result<()> {
             run_sweep(&data_dir, &load_config(&data_dir, &home()?)?, targets)?;
         }
         Command::Findings { json } => {
-            let all = latest(&data_dir, &load_config(&data_dir, &home()?)?)?;
+            let all = latest(&data_dir, &load_config(&data_dir, &home()?)?);
             if json {
                 for target in &all {
                     print(&serde_json::to_string(target).context("write JSON")?);
@@ -317,8 +318,17 @@ fn fix_line(state: &FixState) -> String {
 fn findings_text(all: Vec<Latest>) -> String {
     let mut out = String::new();
     for mut target in all {
+        // Under the target's line and above its items, which may lack what the gap hides.
+        let mut gaps = String::new();
+        if let Some(failed) = target.unchecked.describe() {
+            gaps.push_str(&format!("  not fully checked: {failed}\n"));
+        }
+        if let Some(problem) = &target.problem {
+            gaps.push_str(&format!("  could not read: {problem}\n"));
+        }
         let Some(swept) = target.swept else {
             out.push_str(&format!("{}: no sweep with a verdict yet\n", target.target));
+            out.push_str(&gaps);
             continue;
         };
         let dismissed = match target.dismissed {
@@ -340,6 +350,7 @@ fn findings_text(all: Vec<Latest>) -> String {
             target.target,
             listed.open.len()
         ));
+        out.push_str(&gaps);
         for item in &listed.open {
             out.push_str(&item_text(item));
         }
@@ -545,13 +556,20 @@ fn fix_all(data_dir: &DataDir, config: &Config, target: &str, yes: bool) -> anyh
 
 /// Prints every advisory each source could fetch, as it arrives, and reports every failure on
 /// stderr. One failing source or record never hides the rest; the command still exits
-/// non-zero at the end so a script notices the gap.
+/// non-zero at the end so a script notices the gap. Records served from the cache because their
+/// source could not be asked are printed, with a warning that does not count as a failure.
+///
+/// Asking NVD takes the sweeps lock, so it never runs beside a sweep: each process paces its own
+/// NVD requests, and two at once would exceed NVD's rate limit.
 fn advisories(
     data_dir: &DataDir,
     history: History,
     packages: &[Package],
     products: &[Product],
 ) -> anyhow::Result<()> {
+    let _lock = (!products.is_empty())
+        .then(|| SweepsLock::acquire(data_dir))
+        .transpose()?;
     // Reading the Keychain can prompt the user, so only when NVD will be queried.
     let nvd = if products.is_empty() {
         NvdAccess::Anonymous
@@ -563,6 +581,12 @@ fn advisories(
     let mut fail = |what: &str, error: &dyn std::error::Error| {
         failures += 1;
         warn(&format!("{what}: {}", error_chain(error)));
+    };
+    let stale = |what: &str, error: &dyn std::error::Error| {
+        warn(&format!(
+            "{what}: cached copy, as asking failed: {}",
+            error_chain(error)
+        ));
     };
 
     let kev = feeds.kev();
@@ -585,8 +609,11 @@ fn advisories(
                 for found in &osv.advisories {
                     print(&found.advisory.to_json_line(kev));
                 }
-                for e in &osv.failures {
-                    fail("OSV record", e);
+                for failure in &osv.failures {
+                    fail("OSV record", &failure.error);
+                }
+                for cached in &osv.stale {
+                    stale(&format!("OSV record {}", cached.id), &cached.error);
                 }
                 for crowded in &osv.crowded {
                     warn(&format!(
@@ -601,8 +628,11 @@ fn advisories(
     for product in products {
         match feeds.nvd(product, history) {
             Ok(found) => {
-                for advisory in &found {
+                for advisory in &found.advisories {
                     print(&advisory.to_json_line(kev));
+                }
+                if let Some(e) = &found.stale {
+                    stale(&format!("NVD product {product}"), e);
                 }
             }
             Err(e) => fail(&format!("NVD product {product}"), &e),
@@ -794,6 +824,8 @@ mod tests {
             open: vec![open],
             fixed: vec![fixed],
             dismissed: 0,
+            unchecked: vigil_core::Unchecked::default(),
+            problem: None,
         };
         let text = findings_text(vec![latest]);
         assert!(

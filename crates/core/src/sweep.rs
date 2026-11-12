@@ -12,6 +12,7 @@
 //! sweeps folder, which the system releases when the process ends, however it ends.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -35,6 +36,7 @@ use crate::config::Config;
 use crate::config::History;
 use crate::config::RepoSlug;
 use crate::config::Server;
+use crate::feeds::FeedError;
 use crate::feeds::Feeds;
 use crate::feeds::Kev;
 use crate::feeds::NvdAccess;
@@ -57,6 +59,7 @@ use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::Lookup;
 use crate::lifecycle;
+use crate::lifecycle::CarriedFinding;
 use crate::lifecycle::Changes;
 use crate::lifecycle::ComponentKey;
 use crate::lifecycle::Dismissal;
@@ -73,6 +76,9 @@ use crate::prompts;
 use crate::prompts::Prompt;
 use crate::retention;
 use crate::server;
+use crate::unchecked;
+use crate::unchecked::OsvUnchecked;
+use crate::unchecked::Unchecked;
 
 /// How often [`Lock::acquire`] tries, and how long it waits between tries. Arbitrary: 100 ms in
 /// all is far longer than starting a process takes, and nothing a user would notice.
@@ -208,6 +214,11 @@ pub struct Report {
     pub out_of_range: usize,
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
+    /// Findings of the target's last report that this sweep did not find and could not check
+    /// again, because a source that could have produced them failed (see [`Unchecked`]). Each
+    /// stays open, as that report saved it, until a sweep checks it. Every reader of a report's
+    /// `findings` reads these too: they are open findings, only not checked again.
+    pub carried: Vec<CarriedFinding>,
     /// Risky settings and files, most severe first.
     pub issues: Vec<ReportIssue>,
     /// What changed since this target's last sweep with a verdict; `None` without a verdict
@@ -225,6 +236,9 @@ pub struct Report {
     pub first_verdict: bool,
     /// What could not be checked: failed sources, unknown products, tools not installed.
     pub problems: Vec<String>,
+    /// The sources that failed for this target, as a record readers can act on: while it is
+    /// not empty the target is not clear. `problems` says why each failed.
+    pub unchecked: Unchecked,
     /// Why the agent's verdict is missing, when it is.
     pub failure: Option<String>,
     /// The target's folder: bundle, agent logs and this report.
@@ -243,10 +257,12 @@ impl Report {
             advisories: 0,
             out_of_range: 0,
             findings: Vec::new(),
+            carried: Vec::new(),
             issues: Vec::new(),
             changes: None,
             first_verdict: false,
             problems: Vec::new(),
+            unchecked: Unchecked::default(),
             failure: None,
             dir,
         }
@@ -363,7 +379,8 @@ pub fn sweep(
         Ok(kev) => Some(kev),
         Err(e) => {
             notes.push(format!(
-                "CISA KEV catalog, so known_exploited is unknown: {}",
+                "CISA KEV catalog, so known_exploited is unknown and crowded OS packages keep \
+                 every advisory: {}",
                 error_chain(&e)
             ));
             None
@@ -692,10 +709,10 @@ impl Shared<'_> {
         let dir = sweep_dir.join(&collected.dir_name);
         let mut problems = self.notes.to_vec();
         problems.extend(collected.problems);
-        let (fetched, out_of_range) =
-            fetch(self.sources, &collected.components, &mut problems, progress);
+        let fetched = fetch(self.sources, &collected.components, &mut problems, progress);
         self.sources.cancel.check()?;
         let entries: Vec<_> = fetched
+            .linked
             .iter()
             .map(|(advisory, components)| bundle::Entry {
                 advisory,
@@ -719,8 +736,12 @@ impl Shared<'_> {
             Ok(verdict) => (verdict, None),
             Err(failure) => (Verdict::default(), Some(plain(&failure))),
         };
-        let (mut findings, mut issues) =
-            self.keyed(&collected.target, &collected.components, verdict, &fetched);
+        let (mut findings, mut issues) = self.keyed(
+            &collected.target,
+            &collected.components,
+            verdict,
+            &fetched.linked,
+        );
         // Each keeps the first-seen time the target's last report gave it, or is new now.
         let sweeps = self.data_dir.sweeps_dir();
         let seen = lifecycle::first_seen(&sweeps, &collected.dir_name).unwrap_or_else(|e| {
@@ -737,41 +758,86 @@ impl Shared<'_> {
         for i in &mut issues {
             i.first_seen = first(i.key);
         }
-        let mut first_verdict = false;
-        let changes = if failure.is_some() {
-            None
+        // Without a verdict nothing is carried or compared: the lifecycle skips such a report.
+        let (carried, changes, first_verdict) = if failure.is_some() {
+            (Vec::new(), None, false)
         } else {
-            let keys = || {
-                let findings = findings.iter().map(|f| (f.key, f.dismissed.is_some()));
-                findings.chain(issues.iter().map(|i| (i.key, i.dismissed.is_some())))
-            };
-            let all = keys().map(|(key, _)| key).collect();
-            let active = keys().filter(|(_, d)| !d).map(|(key, _)| key).collect();
-            let sweeps = self.data_dir.sweeps_dir();
-            match Changes::since_last(&sweeps, &collected.dir_name, &active, &all) {
-                Ok(changes) => {
-                    first_verdict = changes.is_none();
-                    changes
-                }
-                Err(e) => {
-                    problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
-                    None
-                }
-            }
+            let dir_name = &collected.dir_name;
+            let carried = self.carry_over(dir_name, &fetched.unchecked, &findings, &mut problems);
+            let shown: Vec<(FindingKey, bool)> = (findings.iter())
+                .map(|f| (f.key, f.dismissed.is_some()))
+                .chain(carried.iter().map(|c| (c.key, c.dismissed.is_some())))
+                .chain(issues.iter().map(|i| (i.key, i.dismissed.is_some())))
+                .collect();
+            let (changes, first_verdict) = self.changes(dir_name, &shown, &mut problems);
+            (carried, changes, first_verdict)
         };
 
         let mut report = Report::new(started, collected.target, self.agent, dir.clone());
         report.components = collected.components.len();
         report.advisories = entries.len();
-        report.out_of_range = out_of_range;
+        report.out_of_range = fetched.out_of_range;
         report.findings = findings;
+        report.carried = carried;
         report.issues = issues;
         report.changes = changes;
         report.first_verdict = first_verdict;
         report.problems = problems.iter().map(|p| plain(p)).collect();
+        report.unchecked = fetched.unchecked;
         report.failure = failure;
         self.save(&dir, &mut report);
         Ok(report)
+    }
+
+    /// The findings of the target's newest readable report with a verdict that this sweep,
+    /// which found `findings`, could not check again ([`lifecycle::carried_over`]); none, with a
+    /// note, when the report it picked cannot be read again whole.
+    fn carry_over(
+        &self,
+        dir_name: &str,
+        unchecked: &Unchecked,
+        findings: &[ReportFinding],
+        problems: &mut Vec<String>,
+    ) -> Vec<CarriedFinding> {
+        let found = findings.iter().map(|f| f.key).collect();
+        let sweeps = self.data_dir.sweeps_dir();
+        lifecycle::carried_over(&sweeps, dir_name, unchecked, &found, self.dismissals)
+            .unwrap_or_else(|e| {
+                problems.push(format!(
+                    "the last sweep's findings, so those of failed sources were not kept: {}",
+                    error_chain(&e)
+                ));
+                Vec::new()
+            })
+    }
+
+    /// What changed since the target's last sweep with a verdict, for a verdict that shows
+    /// `shown` (each key and whether it is dismissed), and whether this is the target's first
+    /// verdict: the two fields of [`Report`] that only make sense together. Not known, with a
+    /// note, when the earlier reports cannot be read.
+    fn changes(
+        &self,
+        dir_name: &str,
+        shown: &[(FindingKey, bool)],
+        problems: &mut Vec<String>,
+    ) -> (Option<Changes>, bool) {
+        let all = shown.iter().map(|(key, _)| *key).collect();
+        let active = shown
+            .iter()
+            .filter(|(_, d)| !d)
+            .map(|(key, _)| *key)
+            .collect();
+        let sweeps = self.data_dir.sweeps_dir();
+        match Changes::since_last(&sweeps, dir_name, &active, &all) {
+            Ok(changes) => {
+                let first_verdict = changes.is_none();
+                (changes, first_verdict)
+            }
+            Err(e) => {
+                problems.push(format!("changes since the last sweep: {}", error_chain(&e)));
+                (None, false)
+            }
+        }
     }
 
     /// Runs the agent and validates its findings, once more with the problems if they are
@@ -1059,16 +1125,27 @@ fn nvd_access(problems: &mut Vec<String>) -> NvdAccess {
     })
 }
 
-/// Fetches every advisory for the inventory, each with the components whose lookup returned
-/// it, by index, and how its affected versions relate to each one's version. Out-of-range
-/// pairs are already left out (see [`matching::keep_candidates`]); the count is how many
-/// advisories that left out.
+/// A target's advisories, ready for its bundle.
+#[derive(Debug)]
+struct Fetched {
+    /// Every advisory with the components whose lookup returned it, by index, and how its
+    /// affected versions relate to each one's version; out-of-range pairs already left out.
+    linked: Vec<Linked>,
+    /// How many advisories the version comparison left out.
+    out_of_range: usize,
+    /// The sources that failed.
+    unchecked: Unchecked,
+}
+
+/// Fetches every advisory for the inventory (see [`Fetched`]; [`matching::keep_candidates`]
+/// leaves out the out-of-range pairs), noting in `problems` what could not be fetched or was
+/// fetched only from the cache.
 fn fetch(
     sources: Sources<'_>,
     components: &[Component],
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> (Vec<Linked>, usize) {
+) -> Fetched {
     let mut packages: BTreeMap<OsvQuery, Vec<usize>> = BTreeMap::new();
     let mut products: BTreeMap<String, (Product, Vec<usize>)> = BTreeMap::new();
     for (i, component) in components.iter().enumerate() {
@@ -1090,36 +1167,52 @@ fn fetch(
         products: products.len(),
     });
 
-    let mut fetched = fetch_osv(sources, components, &packages, problems);
-    fetched.extend(fetch_nvd(
-        sources, components, &products, problems, progress,
-    ));
-    let out_of_range = matching::keep_candidates(&mut fetched);
-    (fetched, out_of_range)
+    let (mut linked, osv) = fetch_osv(sources, components, &packages, problems);
+    let (nvd_linked, nvd) = fetch_nvd(sources, components, &products, problems, progress);
+    linked.extend(nvd_linked);
+    let out_of_range = matching::keep_candidates(&mut linked);
+    Fetched {
+        linked,
+        out_of_range,
+        unchecked: Unchecked {
+            kev: sources.kev.is_none(),
+            osv,
+            nvd,
+        },
+    }
 }
 
-/// OSV advisories, linked by the queries that returned them. The record's own `affected`
-/// names do not decide the link: OSV matches names the way each ecosystem compares them
-/// (PyPI's `Django` is `django`), and the query result already carries that match.
+/// OSV advisories, linked by the queries that returned them, and what of OSV failed. The
+/// record's own `affected` names do not decide the link: OSV matches names the way each
+/// ecosystem compares them (PyPI's `Django` is `django`), and the query result already carries
+/// that match.
 fn fetch_osv(
     sources: Sources<'_>,
     components: &[Component],
     packages: &BTreeMap<OsvQuery, Vec<usize>>,
     problems: &mut Vec<String>,
-) -> Vec<Linked> {
+) -> (Vec<Linked>, Option<OsvUnchecked>) {
     if packages.is_empty() {
-        return Vec::new();
+        return (Vec::new(), None);
     }
     let list: Vec<OsvQuery> = packages.keys().cloned().collect();
     let osv = match sources.feeds.osv(&list, sources.history, sources.kev) {
         Ok(osv) => osv,
         Err(e) => {
             problems.push(format!("OSV: {}", error_chain(&e)));
-            return Vec::new();
+            return (Vec::new(), Some(OsvUnchecked::All));
         }
     };
-    for e in &osv.failures {
-        problems.push(format!("OSV record: {}", error_chain(e)));
+    for failure in &osv.failures {
+        problems.push(format!("OSV record: {}", error_chain(&failure.error)));
+    }
+    if let Some(first) = osv.stale.first() {
+        let ids: Vec<&str> = osv.stale.iter().map(|s| s.id.as_str()).collect();
+        problems.push(format!(
+            "OSV could not be asked for {}, so their cached copies were used: {}",
+            ids.join(", "),
+            error_chain(&first.error)
+        ));
     }
     for crowded in &osv.crowded {
         let package = &crowded.query.package;
@@ -1133,6 +1226,13 @@ fn fetch_osv(
             crowded.kept,
         ));
     }
+    let unchecked = (!osv.failures.is_empty()).then(|| {
+        let packages = (osv.failures.iter())
+            .flat_map(|f| &f.packages)
+            .map(|p| unchecked::package_key(&p.ecosystem.osv_name(), &p.name))
+            .collect();
+        OsvUnchecked::Packages(packages)
+    });
     let mut fetched = Vec::with_capacity(osv.advisories.len());
     for OsvAdvisory { advisory, queries } in osv.advisories {
         let record = OsvRecord::parse(&advisory.record);
@@ -1145,21 +1245,22 @@ fn fetch_osv(
         }
         fetched.push((advisory, matches));
     }
-    fetched
+    (fetched, unchecked)
 }
 
 /// NVD CVEs per product, merged by CVE id, each linked to the components of its products with
-/// the verdict of its CPE matches (see `feeds::cpe`), and one note for every product NVD does
-/// not know.
+/// the verdict of its CPE matches (see `feeds::cpe`), and the products whose CVEs could not be
+/// fetched and had none cached. What failed, came from the cache, or names a product NVD does
+/// not know goes into `problems`, one line per kind where many products share it.
 fn fetch_nvd(
     sources: Sources<'_>,
     components: &[Component],
     products: &BTreeMap<String, (Product, Vec<usize>)>,
     problems: &mut Vec<String>,
     progress: &mut dyn FnMut(Progress<'_>),
-) -> Vec<Linked> {
+) -> (Vec<Linked>, BTreeSet<String>) {
     let mut found: BTreeMap<String, Linked> = BTreeMap::new();
-    let mut unknown = Vec::new();
+    let mut gaps = NvdGaps::default();
     for (done, (name, (product, indexes))) in products.iter().enumerate() {
         // The caller sees the request and stops; what was fetched is not used.
         if sources.cancel.is_cancelled() {
@@ -1170,39 +1271,92 @@ fn fetch_nvd(
             total: products.len(),
             product: name,
         });
-        match sources.feeds.nvd(product, sources.history) {
-            // No CVEs can mean a clean product or a name NVD does not know; tell them apart.
-            Ok(advisories) if advisories.is_empty() => match sources
-                .feeds
-                .nvd_product_known(product)
-            {
-                Ok(true) => {}
-                Ok(false) => unknown.push(name.as_str()),
-                Err(e) => problems.push(format!("NVD product check {name}: {}", error_chain(&e))),
-            },
-            Ok(advisories) => {
-                for advisory in advisories {
-                    let matches = cpe::Matches::parse(&advisory.record);
-                    let verdicts: Vec<(usize, Match)> = indexes
-                        .iter()
-                        .map(|&i| (i, matches.verdict(product, &components[i].version)))
-                        .collect();
-                    let entry = found
-                        .entry(advisory.id.clone())
-                        .or_insert_with(|| (advisory, BTreeMap::new()));
-                    entry.1.extend(verdicts);
-                }
+        let cves = match sources.feeds.nvd(product, sources.history) {
+            Ok(cves) => cves,
+            Err(e) => {
+                gaps.fail(name, &e, problems);
+                continue;
             }
-            Err(e) => problems.push(format!("NVD product {name}: {}", error_chain(&e))),
+        };
+        match &cves.stale {
+            Some(e) => gaps.use_cache(name, e),
+            // No CVEs can mean a clean product or a name NVD does not know; tell them apart.
+            None if cves.advisories.is_empty() => match sources.feeds.nvd_product_known(product) {
+                Ok(true) => {}
+                Ok(false) => gaps.unknown.push(name),
+                Err(e) => {
+                    problems.push(format!("NVD product check {name}: {}", error_chain(&e)));
+                }
+            },
+            None => {}
+        }
+        for advisory in cves.advisories {
+            let matches = cpe::Matches::parse(&advisory.record);
+            let verdicts: Vec<(usize, Match)> = indexes
+                .iter()
+                .map(|&i| (i, matches.verdict(product, &components[i].version)))
+                .collect();
+            let entry = found
+                .entry(advisory.id.clone())
+                .or_insert_with(|| (advisory, BTreeMap::new()));
+            entry.1.extend(verdicts);
         }
     }
-    if !unknown.is_empty() {
-        problems.push(format!(
-            "NVD knows no product named {}, so these were not checked",
-            unknown.join(", ")
-        ));
+    gaps.note(problems);
+    (found.into_values().collect(), gaps.failed)
+}
+
+/// What NVD could not answer for a target's products.
+#[derive(Debug, Default)]
+struct NvdGaps<'a> {
+    /// Products with nothing fetched and nothing cached in the last week.
+    failed: BTreeSet<String>,
+    /// Those of them not asked because NVD refused an earlier request, noted together.
+    refused: Vec<&'a str>,
+    /// The first reason a cached copy was used, and every product it was used for.
+    stale: Option<(String, Vec<&'a str>)>,
+    /// Products NVD's CPE dictionary does not know.
+    unknown: Vec<&'a str>,
+}
+
+impl<'a> NvdGaps<'a> {
+    fn fail(&mut self, name: &'a str, error: &FeedError, problems: &mut Vec<String>) {
+        self.failed.insert(name.to_owned());
+        if matches!(error, FeedError::NvdRefused { .. }) {
+            self.refused.push(name);
+        } else {
+            problems.push(format!("NVD product {name}: {}", error_chain(error)));
+        }
     }
-    found.into_values().collect()
+
+    fn use_cache(&mut self, name: &'a str, error: &FeedError) {
+        let (_, names) = self
+            .stale
+            .get_or_insert_with(|| (error_chain(error), Vec::new()));
+        names.push(name);
+    }
+
+    fn note(&self, problems: &mut Vec<String>) {
+        if !self.refused.is_empty() {
+            problems.push(format!(
+                "NVD refused a request (its rate limit), so it was not asked about {}, which \
+                 had nothing recent cached; add an NVD API key, or check the one set",
+                self.refused.join(", ")
+            ));
+        }
+        if let Some((reason, names)) = &self.stale {
+            problems.push(format!(
+                "NVD could not be asked about {}, so their cached CVEs were used: {reason}",
+                names.join(", ")
+            ));
+        }
+        if !self.unknown.is_empty() {
+            problems.push(format!(
+                "NVD knows no product named {}, so these were not checked",
+                self.unknown.join(", ")
+            ));
+        }
+    }
 }
 
 /// The agent the config names, found on the login shell's `PATH`, set to run the model the
@@ -1334,6 +1488,7 @@ pub fn report_markdown(report: &Report) -> String {
             out.push_str(&issue_markdown(issue.key, &issue.issue));
         }
     }
+    out.push_str(&carried_markdown(&report.carried));
     let dismissed = dismissed_findings
         .iter()
         .map(|f| {
@@ -1375,12 +1530,39 @@ pub fn report_markdown(report: &Report) -> String {
     out
 }
 
+/// The section listing the findings carried over from an earlier sweep; nothing without any.
+fn carried_markdown(carried: &[CarriedFinding]) -> String {
+    if carried.is_empty() {
+        return String::new();
+    }
+    let mut out = "## Not checked again\n\nA source that could have found these failed in this \
+                   sweep (see the end), so each stays open as an earlier sweep found it.\n\n"
+        .to_owned();
+    for c in carried {
+        let dismissed = if c.dismissed.is_some() {
+            ", dismissed"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "- {} {} (key {}{dismissed}), found by the sweep of {}\n",
+            c.severity,
+            escape(&c.title),
+            c.key,
+            c.carried_from
+        ));
+    }
+    out.push('\n');
+    out
+}
+
 /// The sentence under the title: no verdict, a clean result, or a clean result with gaps.
 fn headline(report: &Report) -> String {
     if let Some(failure) = &report.failure {
         return format!("**No verdict:** {}\n\n", escape(failure));
     }
     let nothing_found = report.findings.iter().all(|f| f.dismissed.is_some())
+        && report.carried.iter().all(|c| c.dismissed.is_some())
         && report.issues.iter().all(|i| i.dismissed.is_some());
     match (nothing_found, report.problems.is_empty()) {
         (true, true) => "Nothing affected or risky was found.\n\n".to_owned(),
@@ -1566,6 +1748,28 @@ impl Lock {
             }
         }
         Err(SweepError::Busy { lock: path })
+    }
+}
+
+/// The sweeps lock, for a command outside a sweep that asks NVD (`vigil advisories`). NVD
+/// requests are paced within one process only, so one made while a sweep runs would add to
+/// the sweep's and can push both past NVD's rate limit; holding the lock makes them take
+/// turns. Released on drop.
+#[derive(Debug)]
+#[must_use = "the lock is released as soon as this is dropped"]
+pub struct SweepsLock {
+    _lock: Lock,
+}
+
+impl SweepsLock {
+    /// Takes the lock a sweep takes.
+    ///
+    /// # Errors
+    ///
+    /// [`SweepError::Busy`] while a sweep or fix holds it, and [`SweepError::Write`] when the
+    /// lock file cannot be opened.
+    pub fn acquire(data_dir: &DataDir) -> Result<Self, SweepError> {
+        Lock::acquire(&data_dir.sweeps_dir()).map(|lock| Self { _lock: lock })
     }
 }
 
@@ -1826,9 +2030,14 @@ mod tests {
             kev: Some(&kev),
             cancel: &cancel,
         };
-        let (fetched, dropped) = fetch(sources, &inventory.components, &mut problems, &mut |p| {
+        let Fetched {
+            linked: fetched,
+            out_of_range: dropped,
+            unchecked,
+        } = fetch(sources, &inventory.components, &mut problems, &mut |p| {
             seen.push(format!("{p:?}"));
         });
+        assert_eq!(unchecked, Unchecked::default(), "every source answered");
         assert_eq!(
             fetched[0].1[&0],
             Match::Unknown("an affected entry gives neither ranges nor versions".to_owned()),
@@ -1881,8 +2090,78 @@ mod tests {
             kev: None,
             ..sources
         };
-        let (_, dropped) = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
-        assert_eq!(dropped, 2);
+        let without = fetch(unknown, &inventory.components, &mut Vec::new(), &mut |_| {});
+        assert_eq!(without.out_of_range, 2);
+        assert!(
+            without.unchecked.kev,
+            "a missing catalog is a failed source"
+        );
+    }
+
+    #[test]
+    fn failed_sources_are_recorded_by_name_and_noted_once_per_kind() {
+        // OSV is down, and NVD refuses everything after its first answer, a rate limit.
+        let server = TestServer::start(|request: &Request| match request.path() {
+            "/v1/querybatch" => (500, "down".to_owned()),
+            _ => (429, "slow down".to_owned()),
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let endpoints = Endpoints {
+            osv: server.url.clone(),
+            nvd: server.url.clone(),
+            kev: server.url.clone(),
+        };
+        let feeds = Feeds::with_endpoints(tmp.path().to_owned(), NvdAccess::Anonymous, endpoints)
+            .without_pacing();
+        let components = [
+            component("npm:lodash", "4.17.20"),
+            component("curl", "8.0.0"),
+            component("openssl", "3.0.0"),
+            component("xz", "5.6.0"),
+            component("zlib", "1.3"),
+        ];
+        // xz's CVEs were fetched three hours ago, so the cache stands in for it.
+        let fetched_at = Timestamp::now() - jiff::SignedDuration::from_hours(3);
+        fs::create_dir_all(tmp.path().join("nvd")).unwrap();
+        let cache = json!({"fetched_at": fetched_at, "cves": {}});
+        fs::write(tmp.path().join("nvd/xz.json"), cache.to_string()).unwrap();
+        let cancel = Cancel::new();
+        let kev = Kev::from_ids(&[]);
+        let sources = Sources {
+            feeds: &feeds,
+            history: Config::default_for_tests().history,
+            kev: Some(&kev),
+            cancel: &cancel,
+        };
+        let mut problems = Vec::new();
+        let fetched = fetch(sources, &components, &mut problems, &mut |_| {});
+        assert!(fetched.linked.is_empty());
+        let names = |names: &[&str]| names.iter().map(|n| (*n).to_owned()).collect();
+        assert_eq!(
+            fetched.unchecked,
+            Unchecked {
+                kev: false,
+                osv: Some(OsvUnchecked::All),
+                nvd: names(&["curl", "openssl", "zlib"]),
+            }
+        );
+        assert_eq!(problems.len(), 4, "{problems:?}");
+        assert!(problems[0].starts_with("OSV: "), "{problems:?}");
+        assert!(
+            problems[1].starts_with("NVD product curl: "),
+            "{problems:?}"
+        );
+        assert_eq!(
+            problems[2],
+            "NVD refused a request (its rate limit), so it was not asked about openssl, zlib, \
+             which had nothing recent cached; add an NVD API key, or check the one set"
+        );
+        assert!(
+            problems[3].starts_with(
+                "NVD could not be asked about xz, so their cached CVEs were used: NVD refused"
+            ),
+            "{problems:?}"
+        );
     }
 
     #[test]
@@ -1998,10 +2277,12 @@ mod tests {
             advisories: 1,
             out_of_range: 3,
             findings,
+            carried: Vec::new(),
             issues: Vec::new(),
             changes: None,
             first_verdict: false,
             problems: problems.iter().map(|p| (*p).to_owned()).collect(),
+            unchecked: Unchecked::default(),
             failure: None,
             dir: PathBuf::from("/tmp/s"),
         }
@@ -2270,6 +2551,191 @@ mod tests {
         assert!(lodash < text.find("## LOW curl").unwrap(), "worst first");
         assert!(text.contains("## Not checked\n\n- OSV: offline"), "{text}");
         assert!(!text.contains("No affected"), "{text}");
+    }
+
+    /// An agent at `path` that reports GHSA-1 in component `c1` whenever the bundle has it,
+    /// until the file `fixed` exists.
+    fn ghsa_agent(path: &Path, fixed: &Path) -> Located {
+        let finding = r#"{"findings": [{"advisories": ["GHSA-1"], "component": "c1",
+            "severity": "critical", "known_exploited": false, "confidence": "confirmed",
+            "evidence": "e", "explanation": "x",
+            "fix": {"summary": "upgrade lodash", "steps": [], "commands": []}}]}"#;
+        let script = format!(
+            "#!/bin/sh\nif [ ! -e '{}' ] && grep -q GHSA-1 advisories.jsonl; then\n\
+             echo '{finding}' > findings.json\nelse\necho '{{\"findings\": []}}' > findings.json\n\
+             fi\n",
+            fixed.display()
+        );
+        fs::write(path, script).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        Located::at(path)
+    }
+
+    /// Three sweeps of one Mac with lodash: OSV up, then down, then up again with lodash
+    /// fixed.
+    #[test]
+    fn a_finding_of_a_failed_source_stays_open_until_a_sweep_checks_it() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use std::sync::atomic::Ordering::Relaxed;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        // Relaxed: each flag is set between sweeps, before the request it decides is sent.
+        let osv_down = Arc::new(AtomicBool::new(false));
+        let server = {
+            let osv_down = Arc::clone(&osv_down);
+            TestServer::start(move |request: &Request| match request.path() {
+                _ if osv_down.load(Relaxed) => (503, "down".to_owned()),
+                "/v1/querybatch" => {
+                    let vulns = json!([{"id": "GHSA-1", "modified": "2026-01-01T00:00:00Z"}]);
+                    (200, json!({"results": [{"vulns": vulns}]}).to_string())
+                }
+                _ => (200, osv_record("GHSA-1", "npm", "lodash")),
+            })
+        };
+        let endpoints = Endpoints {
+            osv: server.url.clone(),
+            nvd: server.url.clone(),
+            kev: server.url.clone(),
+        };
+        let feeds = Feeds::with_endpoints(data_dir.feeds_dir(), NvdAccess::Anonymous, endpoints);
+        let fixed = tmp.path().join("fixed");
+        let located = ghsa_agent(&tmp.path().join("agent"), &fixed);
+        let kev = Kev::from_ids(&[]);
+        let cancel = Cancel::new();
+        let dismissals = Dismissals::default();
+        let shared = Shared {
+            data_dir: &data_dir,
+            dismissals: &dismissals,
+            sources: Sources {
+                feeds: &feeds,
+                history: Config::default_for_tests().history,
+                kev: Some(&kev),
+                cancel: &cancel,
+            },
+            agent: AgentKind::Claude,
+            located: &located,
+            notes: &[],
+        };
+        let sweep = |stamp: &str| {
+            let collected = Collected {
+                target: "mac".to_owned(),
+                dir_name: "mac".to_owned(),
+                title: "this Mac".to_owned(),
+                prompt: Prompt::Mac,
+                components: vec![component("npm:lodash", "4.17.20")],
+                files: Vec::new(),
+                settings: Vec::new(),
+                problems: Vec::new(),
+            };
+            let dir = data_dir.sweeps_dir().join(stamp);
+            fs::create_dir_all(&dir).unwrap();
+            shared.sweep_target(&dir, collected, &mut |_| {}).unwrap()
+        };
+        let config = Config::default_for_tests();
+        let mac = || lifecycle::latest(&data_dir, &config).remove(0);
+
+        let first = sweep("20261105T100000Z");
+        let [found] = &first.findings[..] else {
+            panic!("{:?}", first.findings)
+        };
+        let key = found.key;
+        let run = json!({"key": key, "title": "lodash", "found": first.started, "target": "mac",
+            "agent": "claude", "started": first.started, "finished": first.started,
+            "exit_code": 0, "outcome": "fixed", "summary": "upgraded lodash",
+            "pull_request": null, "confirmed": "asked", "dir": "/x"});
+        fs::create_dir_all(data_dir.state_dir()).unwrap();
+        fs::write(data_dir.state_dir().join("fixes.jsonl"), format!("{run}\n")).unwrap();
+
+        // OSV is down: the finding is carried, stays open, and its fix waits.
+        osv_down.store(true, Relaxed);
+        let second = sweep("20261105T130000Z");
+        assert!(second.findings.is_empty());
+        assert_eq!(second.unchecked.osv, Some(OsvUnchecked::All));
+        let carried: Vec<FindingKey> = second.carried.iter().map(|c| c.key).collect();
+        assert_eq!(carried, [key]);
+        let changes = second.changes.as_ref().unwrap();
+        assert!(changes.resolved.is_empty() && changes.new.is_empty());
+        let open = mac();
+        assert_eq!(open.open.len(), 1, "still open");
+        assert!(matches!(
+            open.open[0].fix_state,
+            Some(lifecycle::FixState::Reported { .. })
+        ));
+        assert!(
+            open.fixed.is_empty(),
+            "not confirmed by a sweep that could not check it"
+        );
+
+        // OSV is back and lodash is fixed: resolved, and the fix confirmed.
+        osv_down.store(false, Relaxed);
+        fs::write(&fixed, "").unwrap();
+        let third = sweep("20261105T160000Z");
+        assert!(third.carried.is_empty() && third.unchecked.is_empty());
+        assert_eq!(third.changes.as_ref().unwrap().resolved, [key]);
+        let done = mac();
+        assert!(done.open.is_empty());
+        assert_eq!(done.fixed.len(), 1);
+        assert_eq!(done.fixed[0].key, key);
+    }
+
+    #[test]
+    fn a_report_lists_and_saves_what_it_carried_over() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path().join("sweeps");
+        let last = sweeps.join("20261105T100000Z/mac");
+        fs::create_dir_all(&last).unwrap();
+        let previous = report(vec![report_finding("CVE-3", "high", false, "curl")], &[]);
+        write_report(&last, &previous).unwrap();
+        let nvd_down = Unchecked {
+            nvd: ["curl".to_owned()].into(),
+            ..Unchecked::default()
+        };
+        let carried = lifecycle::carried_over(
+            &sweeps,
+            "mac",
+            &nvd_down,
+            &BTreeSet::new(),
+            &Dismissals::default(),
+        )
+        .unwrap();
+        assert_eq!(carried.len(), 1, "written by this build, read back whole");
+
+        let mut now = report(Vec::new(), &["NVD product curl: refused"]);
+        now.started = "2026-11-05T13:00:00Z".parse().unwrap();
+        now.carried = carried;
+        now.unchecked = nvd_down.clone();
+        let text = report_markdown(&now);
+        assert!(text.contains("## Not checked again"), "{text}");
+        assert!(
+            text.contains("found by the sweep of 2026-11-05T10:00:00Z"),
+            "{text}"
+        );
+        assert!(!text.contains("Nothing affected"), "{text}");
+
+        let dir = sweeps.join("20261105T130000Z/mac");
+        fs::create_dir_all(&dir).unwrap();
+        write_report(&dir, &now).unwrap();
+        let json: Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
+        assert_eq!(json["carried"][0]["carried_from"], "2026-11-05T10:00:00Z");
+        assert_eq!(json["unchecked"]["nvd"], json!(["curl"]));
+        // Retention removes the report it was found in: the carried copy holds what is needed.
+        retention::remove_older(&sweeps, &dir).unwrap();
+        assert!(!last.exists());
+        let again = lifecycle::carried_over(
+            &sweeps,
+            "mac",
+            &nvd_down,
+            &BTreeSet::new(),
+            &Dismissals::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            again[0].carried_from, previous.started,
+            "from the last check"
+        );
     }
 
     #[test]

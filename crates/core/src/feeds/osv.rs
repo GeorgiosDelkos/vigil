@@ -21,6 +21,7 @@ use crate::feeds::Kev;
 use crate::feeds::OsvAdvisories;
 use crate::feeds::OsvAdvisory;
 use crate::feeds::OsvQuery;
+use crate::feeds::RecordFailure;
 use crate::feeds::Source;
 use crate::feeds::cache_key;
 use crate::feeds::http::decode;
@@ -52,18 +53,37 @@ pub(super) fn fetch(
             .modified
             .is_none_or(|modified| in_window(None, Some(modified), history))
     });
-    let crowded = thin_crowded(&mut ids, kev);
+    // Without the catalog nothing is known to be exploited, so thinning would keep nothing of a
+    // crowded query: every advisory stays instead, and the sweep notes the missing catalog.
+    let crowded = kev.map_or_else(Vec::new, |kev| thin_crowded(&mut ids, kev));
     let mut advisories = Vec::with_capacity(ids.len());
     let mut failures = Vec::new();
+    let mut stale = Vec::new();
     for (id, queried) in ids {
+        let packages = || queried.queries.iter().map(|q| q.package.clone()).collect();
         // One bad record must not hide the others: keep going and report it.
-        let (header, record) = match record(feeds, &id, queried.modified) {
+        let Record {
+            header,
+            raw,
+            stale: why,
+        } = match record(feeds, &id, queried.modified) {
             Ok(fetched) => fetched,
-            Err(e) => {
-                failures.push(e);
+            Err(error) => {
+                failures.push(RecordFailure {
+                    id,
+                    packages: packages(),
+                    error,
+                });
                 continue;
             }
         };
+        if let Some(error) = why {
+            stale.push(RecordFailure {
+                id,
+                packages: packages(),
+                error,
+            });
+        }
         if in_window(header.published, Some(header.modified), history) {
             let mut aliases = header.aliases;
             aliases.extend(header.upstream);
@@ -72,7 +92,7 @@ pub(super) fn fetch(
                 id: header.id,
                 aliases,
                 modified: Some(header.modified),
-                record,
+                record: raw,
             };
             advisories.push(OsvAdvisory {
                 advisory,
@@ -83,21 +103,22 @@ pub(super) fn fetch(
     Ok(OsvAdvisories {
         advisories,
         failures,
+        stale,
         crowded,
     })
 }
 
 /// Keeps, for a versioned query (an OS package) that matched more than [`CROWDED`] advisories,
-/// only those for a CVE in the KEV catalog (none without the catalog), and returns those
-/// queries. Only the kernel does this in practice: Debian 12's `linux` at one version matched
-/// over 1000 advisories (2026-11-06), far more than an agent can weigh, and the known-exploited
-/// ones are those that matter first. Queries by name are never thinned: their advisories are
-/// named `GHSA-...` or `RUSTSEC-...`, so the CVE could not be read from the id.
+/// only those for a CVE in the KEV catalog, and returns those queries. Only the kernel does
+/// this in practice: Debian 12's `linux` at one version matched over 1000 advisories
+/// (2026-11-06), far more than an agent can weigh, and the known-exploited ones matter first.
+/// Queries by name are never thinned: their advisories are named `GHSA-...` or `RUSTSEC-...`,
+/// so the CVE could not be read from the id.
 ///
 /// A record is not fetched to learn its CVE. The CVE is read from the id: OS advisories are
 /// named after it (`DEBIAN-CVE-2024-1086`, `UBUNTU-CVE-...`, `ALPINE-CVE-...`). Advisories that
 /// group several CVEs under their own id (`DSA-...`, `USN-...`) are dropped for such a query.
-fn thin_crowded(ids: &mut BTreeMap<String, Queried>, kev: Option<&Kev>) -> Vec<Crowded> {
+fn thin_crowded(ids: &mut BTreeMap<String, Queried>, kev: &Kev) -> Vec<Crowded> {
     let mut counts: BTreeMap<&OsvQuery, usize> = BTreeMap::new();
     for queried in ids.values() {
         for query in &queried.queries {
@@ -115,7 +136,7 @@ fn thin_crowded(ids: &mut BTreeMap<String, Queried>, kev: Option<&Kev>) -> Vec<C
 
     let exploited = |id: &str| {
         let cve = id.find("CVE-").map(|at| &id[at..]);
-        cve.zip(kev).is_some_and(|(cve, kev)| kev.contains(cve))
+        cve.is_some_and(|cve| kev.contains(cve))
     };
     let mut report: BTreeMap<OsvQuery, Crowded> = BTreeMap::new();
     ids.retain(|id, queried| {
@@ -203,34 +224,72 @@ fn query_ids(feeds: &Feeds, queries: &[OsvQuery]) -> Result<BTreeMap<String, Que
     Ok(ids)
 }
 
-/// Returns the record for `id`, from the cache unless OSV says it changed since.
-fn record(
-    feeds: &Feeds,
-    id: &str,
-    modified: Option<Timestamp>,
-) -> Result<(Header, Box<RawValue>), FeedError> {
+/// One OSV record, and why it is the cached copy when OSV could not be asked for a newer one.
+#[derive(Debug)]
+struct Record {
+    header: Header,
+    raw: Box<RawValue>,
+    stale: Option<FeedError>,
+}
+
+/// Returns the record for `id`, from the cache unless OSV says it changed since. When asking
+/// fails, a cached copy is returned with the error as `stale`: an older record is closer to the
+/// truth than none, and dropping it would hide the advisory for that sweep.
+fn record(feeds: &Feeds, id: &str, modified: Option<Timestamp>) -> Result<Record, FeedError> {
     let key = cache_key(id)?;
     let cached: Option<Box<RawValue>> = feeds.cache.read("osv", key)?;
-    if let Some(record) = cached
-        && let Ok(header) = serde_json::from_str::<Header>(record.get())
-        && header.id == id
-        && modified.is_some_and(|m| header.modified >= m)
-    {
-        return Ok((header, record));
-    }
+    let cached = cached.and_then(|raw| {
+        let header = serde_json::from_str::<Header>(raw.get()).ok()?;
+        (header.id == id).then_some((header, raw))
+    });
+    let cached = match cached {
+        Some((header, raw)) if modified.is_some_and(|m| header.modified >= m) => {
+            return Ok(Record {
+                header,
+                raw,
+                stale: None,
+            });
+        }
+        other => other,
+    };
 
     let url = format!("{}/v1/vulns/{key}", feeds.endpoints.osv);
-    let text = feeds.http.get(&url, &[], &[])?;
-    let record: Box<RawValue> = decode(&url, &text)?;
-    let header: Header = decode(&url, record.get())?;
+    match request_record(feeds, &url, id) {
+        Ok((header, raw)) => {
+            feeds.cache.write("osv", key, &raw)?;
+            Ok(Record {
+                header,
+                raw,
+                stale: None,
+            })
+        }
+        Err(error) => match cached {
+            Some((header, raw)) => Ok(Record {
+                header,
+                raw,
+                stale: Some(error),
+            }),
+            None => Err(error),
+        },
+    }
+}
+
+/// GETs the record for `id` from `url` and checks that it is that record.
+fn request_record(
+    feeds: &Feeds,
+    url: &str,
+    id: &str,
+) -> Result<(Header, Box<RawValue>), FeedError> {
+    let text = feeds.http.get(url, &[], &[])?;
+    let raw: Box<RawValue> = decode(url, &text)?;
+    let header: Header = decode(url, raw.get())?;
     if header.id != id {
         return Err(FeedError::Unexpected {
-            url,
+            url: url.to_owned(),
             what: "the record's id differs from the id requested",
         });
     }
-    feeds.cache.write("osv", key, &record)?;
-    Ok((header, record))
+    Ok((header, raw))
 }
 
 #[derive(Debug, Serialize)]
@@ -612,8 +671,12 @@ mod tests {
         let without_kev = feeds(&server, tmp.path())
             .osv(&queries[..1], History::All, None)
             .unwrap();
-        assert!(without_kev.advisories.is_empty());
-        assert_eq!(without_kev.crowded[0].kept, 0);
+        assert_eq!(
+            without_kev.advisories.len(),
+            CROWDED + 2,
+            "nothing is known to be exploited, so nothing is thinned"
+        );
+        assert!(without_kev.crowded.is_empty());
     }
 
     #[test]
@@ -636,7 +699,7 @@ mod tests {
             let queried = ids.entry(format!("GHSA-{n}")).or_default();
             queried.queries.insert(query.clone());
         }
-        assert!(thin_crowded(&mut ids, None).is_empty());
+        assert!(thin_crowded(&mut ids, &Kev::from_ids(&[])).is_empty());
         assert_eq!(ids.len(), CROWDED + 1);
     }
 
@@ -652,7 +715,7 @@ mod tests {
             let queried = ids.entry(format!("GHSA-{n}")).or_default();
             queried.queries.insert(query.clone());
         }
-        assert!(thin_crowded(&mut ids, None).is_empty());
+        assert!(thin_crowded(&mut ids, &Kev::from_ids(&[])).is_empty());
         assert_eq!(ids.len(), CROWDED);
     }
 
@@ -681,7 +744,13 @@ mod tests {
         let osv = feeds.osv(&[pkg("npm:a")], History::All, None).unwrap();
         assert!(osv.advisories.is_empty());
         assert!(
-            matches!(osv.failures[..], [FeedError::BadId { .. }]),
+            matches!(
+                &osv.failures[..],
+                [RecordFailure {
+                    error: FeedError::BadId { .. },
+                    ..
+                }]
+            ),
             "{:?}",
             osv.failures
         );
@@ -753,7 +822,13 @@ mod tests {
             .unwrap();
         assert!(osv.advisories.is_empty());
         assert!(
-            matches!(osv.failures[..], [FeedError::Unexpected { .. }]),
+            matches!(
+                &osv.failures[..],
+                [RecordFailure {
+                    error: FeedError::Unexpected { .. },
+                    ..
+                }]
+            ),
             "{:?}",
             osv.failures
         );
@@ -788,9 +863,81 @@ mod tests {
             .collect();
         assert_eq!(ids, ["B-2"]);
         assert!(
-            matches!(osv.failures[..], [FeedError::Status { status: 404, .. }]),
+            matches!(
+                &osv.failures[..],
+                [RecordFailure {
+                    error: FeedError::Status { status: 404, .. },
+                    ..
+                }]
+            ),
             "{:?}",
             osv.failures
+        );
+    }
+
+    #[test]
+    fn a_record_osv_cannot_send_again_comes_from_the_cache() {
+        let modified = Arc::new(Mutex::new("2026-01-01T00:00:00Z".to_owned()));
+        let down = Arc::new(Mutex::new(false));
+        let server = {
+            let (modified, down) = (Arc::clone(&modified), Arc::clone(&down));
+            TestServer::start(move |request: &Request| {
+                let m = modified.lock().unwrap().clone();
+                match request.path() {
+                    "/v1/querybatch" => {
+                        let vulns = serde_json::json!([{"id": "A-1", "modified": m}]);
+                        let body = serde_json::json!({"results": [{"vulns": vulns}]});
+                        (200, body.to_string())
+                    }
+                    _ if *down.lock().unwrap() => (503, "busy".to_owned()),
+                    _ => (200, record_json("A-1", &m, "2026-01-01T00:00:00Z")),
+                }
+            })
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let feeds_of = |dir: &std::path::Path| feeds(&server, dir);
+        let fresh = feeds_of(tmp.path())
+            .osv(&[pkg("npm:a")], History::All, None)
+            .unwrap();
+        assert!(fresh.stale.is_empty() && fresh.failures.is_empty());
+
+        // OSV says the record changed, then fails to send it.
+        *modified.lock().unwrap() = "2026-02-01T00:00:00Z".to_owned();
+        *down.lock().unwrap() = true;
+        let osv = feeds_of(tmp.path())
+            .osv(&[pkg("npm:a")], History::All, None)
+            .unwrap();
+        let [cached] = &osv.advisories[..] else {
+            panic!("{:?}", osv.advisories)
+        };
+        assert_eq!(
+            cached.advisory.modified,
+            "2026-01-01T00:00:00Z".parse().ok()
+        );
+        assert!(osv.failures.is_empty(), "{:?}", osv.failures);
+        let [stale] = &osv.stale[..] else {
+            panic!("{:?}", osv.stale)
+        };
+        assert_eq!(stale.id, "A-1");
+        assert_eq!(
+            stale.packages,
+            [pkg("npm:a").package],
+            "the query that returned it"
+        );
+        assert!(
+            matches!(stale.error, FeedError::Status { status: 503, .. }),
+            "{:?}",
+            stale.error
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        let uncached = feeds_of(empty.path())
+            .osv(&[pkg("npm:a")], History::All, None)
+            .unwrap();
+        assert!(uncached.advisories.is_empty() && uncached.stale.is_empty());
+        assert!(
+            matches!(&uncached.failures[..], [RecordFailure { id, .. }] if id == "A-1"),
+            "nothing cached, so it is missing"
         );
     }
 
