@@ -188,8 +188,12 @@ pub enum DataDirError {
         #[source]
         source: io::Error,
     },
-    /// The path is a symlink or a file.
-    #[error("the data folder {} is not a folder (a symlink or a file); use a real folder", path.display())]
+    /// The path is a symlink to a folder. A file in its place fails to be created, as
+    /// [`DataDirError::Io`].
+    #[error(
+        "the data folder {} is a symlink; use the folder it points to",
+        path.display()
+    )]
     NotAFolder {
         /// The data folder.
         path: PathBuf,
@@ -334,6 +338,13 @@ mod tests {
         let err = DataDir::new(&file).ensure_private().unwrap_err();
         assert!(matches!(err, DataDirError::Io { .. }), "{err:?}");
 
+        // As root the chmod would succeed and change /usr: only run it as another user.
+        let uid = |path: &Path| std::os::unix::fs::MetadataExt::uid(&fs::metadata(path).unwrap());
+        assert_ne!(
+            uid(&file),
+            uid(Path::new("/usr")),
+            "run the tests as a user"
+        );
         let err = DataDir::new("/usr").ensure_private().unwrap_err();
         assert!(matches!(err, DataDirError::NotOwned { .. }), "{err:?}");
         assert!(err.to_string().contains("another user"), "{err}");
