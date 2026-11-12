@@ -1343,6 +1343,43 @@ mod tests {
         }
     }
 
+    /// With no sweep ending meanwhile, each reader scans once: the views and plans read every
+    /// report once, even past a target folder that has no report (a save that failed).
+    #[test]
+    fn a_quiet_scan_is_taken_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path();
+        let (key, at) = (FindingKey(5), "2026-11-01T00:00:00Z");
+        save(
+            sweeps,
+            "20261101T000000Z/mac",
+            &report(at, None, &[key], at),
+        );
+        fs::create_dir_all(sweeps.join("20261102T000000Z/mac")).unwrap();
+        let mut reads = 0;
+        let mut read = |dir: &Path| {
+            reads += 1;
+            read_saved(dir)
+        };
+        assert!(
+            newest_verdict_read_by(sweeps, "mac", &mut read)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            newest_report_read_by(sweeps, key, &mut read)
+                .unwrap()
+                .is_some()
+        );
+        let (found, _) = newest_readable_verdict_read_by(sweeps, "mac", &mut read);
+        assert!(found.is_some());
+        assert_eq!(
+            reads,
+            3 * 2,
+            "two folders, read once by each of the three readers"
+        );
+    }
+
     /// A scan of folders that keep changing ends after a few takes, with the last answer.
     #[test]
     fn scans_of_ever_changing_folders_end() {
