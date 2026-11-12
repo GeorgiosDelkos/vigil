@@ -11,9 +11,10 @@ publish = false
 [dependencies]
 # std: date and timestamp parsing. serde: `Timestamp` fields in feed records and caches.
 jiff = { version = "0.2.39", default-features = false, features = ["serde", "std"] }
-# O_NONBLOCK and O_NOFOLLOW, which std does not export, to open files an agent wrote without
-# following a link or blocking on a FIFO. Already in the tree through many crates.
-libc = "0.2.191"
+# Only the `O_NOFOLLOW`, `O_NONBLOCK` and `ELOOP` constants, for opening files an agent wrote
+# (findings.json, the fix's result files, every agent log) without following a link or waiting
+# on a FIFO. Already in the tree through security-framework.
+libc = { version = "0.2.191", default-features = false }
 # derive: config, feed and cache types. std: `PathBuf` and `String` impls.
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
 # raw_value: advisory records kept byte-for-byte as served, for the agent.

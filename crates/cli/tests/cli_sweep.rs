@@ -2,7 +2,8 @@
 //!
 //! Every feed request goes to a dead proxy, so the bundle holds the inventory and no
 //! advisories, and the only valid verdict is `{"findings": []}`. The fake agent's behaviour is
-//! chosen by `FAKE_AGENT_MODE`; it counts its runs in `FAKE_AGENT_COUNTER`.
+//! chosen by `CLAUDE_FAKE_MODE`; it counts its runs in `CLAUDE_FAKE_COUNTER`. Both carry Claude
+//! Code's prefix, since a sweep passes on only the variables in its allowlist.
 
 use std::fs;
 use std::io::Write as _;
@@ -17,13 +18,13 @@ const FAKE_AGENT: &str = r#"#!/bin/sh
 echo "path: $PATH"
 # The login shell's PATH is made up; this script needs cat.
 PATH=/usr/bin:/bin
-n=$(cat "$FAKE_AGENT_COUNTER" 2>/dev/null || echo 0)
+n=$(cat "$CLAUDE_FAKE_COUNTER" 2>/dev/null || echo 0)
 n=$((n + 1))
-echo $n > "$FAKE_AGENT_COUNTER"
+echo $n > "$CLAUDE_FAKE_COUNTER"
 test -f PROMPT.md || { echo "no PROMPT.md in $(pwd)" >&2; exit 9; }
 echo "args: $*"
 # What this run was given, kept for the test: a fix's folder is deleted once it is recorded.
-seen="$FAKE_AGENT_COUNTER.seen"
+seen="$CLAUDE_FAKE_COUNTER.seen"
 mkdir -p "$seen"
 cp PROMPT.md "$seen/"
 for f in fix.json fixes.json; do if [ -f $f ]; then cp $f "$seen/"; fi; done
@@ -31,12 +32,12 @@ pwd > "$seen/dir"
 env > "$seen/env"
 echo "$*" > "$seen/args"
 # A repository fix's branch, for the fake gh's pull request.
-grep -o 'vigil/fix-[0-9a-f]*-[0-9T.]*Z' PROMPT.md | head -n 1 > "$FAKE_AGENT_COUNTER.branch"
+grep -o 'vigil/fix-[0-9a-f]*-[0-9T.]*Z' PROMPT.md | head -n 1 > "$CLAUDE_FAKE_COUNTER.branch"
 # A Fix all reports each item on a line of results.jsonl.
 report() {
   printf '{"key": "%s", "outcome": "%s", "summary": "%s"}\n' "$1" "$2" "$3" >> results.jsonl
 }
-case "$FAKE_AGENT_MODE:$n" in
+case "$CLAUDE_FAKE_MODE:$n" in
   ok:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   issue:*)
     if [ -f github/workflows/ci.yml ]; then
@@ -55,11 +56,11 @@ case "$FAKE_AGENT_MODE:$n" in
     echo '{"outcome": "fixed", "summary": "pinned the action",
       "pull_request": "https://github.com/o/r/pull/7"}' > result.json ;;
   push-main:*)
-    echo 2222222222222222222222222222222222222222 > "$FAKE_AGENT_COUNTER.main"
+    echo 2222222222222222222222222222222222222222 > "$CLAUDE_FAKE_COUNTER.main"
     echo '{"outcome": "fixed", "summary": "pinned the action"}' > result.json ;;
   no-pr:*) echo '{"outcome": "fixed", "summary": "pinned the action"}' > result.json ;;
   crash:*) exit 3 ;;
-  hang:*|second-hangs:2) sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
+  hang:*|second-hangs:2) sleep 60 & echo $! > "$CLAUDE_FAKE_COUNTER.child"; wait ;;
   second-hangs:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   late-crash:*) echo '{"findings": [], "issues": []}' > findings.json; exit 3 ;;
   server-issues:*)
@@ -86,13 +87,13 @@ case "$FAKE_AGENT_MODE:$n" in
   fix-all-hang:*)
     set -- $(grep -o '"key": "[0-9a-f]*"' fixes.json | cut -d'"' -f4)
     report "$1" fixed "stopped redis"
-    sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
+    sleep 60 & echo $! > "$CLAUDE_FAKE_COUNTER.child"; wait ;;
 esac
 "#;
 
 /// A fake `gh`: `o/r` is a public repository with one npm dependency and one workflow;
 /// `o/missing` does not exist. Answers by the API path, its last argument. The head of `main`
-/// is the one the fake agent wrote to `$FAKE_AGENT_COUNTER.main`, if any, and pull request 7
+/// is the one the fake agent wrote to `$CLAUDE_FAKE_COUNTER.main`, if any, and pull request 7
 /// is open from the branch it read from its prompt into `main`.
 const FAKE_GH: &str = r#"#!/bin/sh
 PATH=/usr/bin:/bin
@@ -102,11 +103,11 @@ case "$last" in
   repos/o/r) echo '{"default_branch":"main","private":false,"owner":{"type":"User"}}' ;;
   repos/o/r/git/ref/heads/main)
     sha=0000000000000000000000000000000000000001
-    if [ -f "$FAKE_AGENT_COUNTER.main" ]; then sha=$(cat "$FAKE_AGENT_COUNTER.main"); fi
+    if [ -f "$CLAUDE_FAKE_COUNTER.main" ]; then sha=$(cat "$CLAUDE_FAKE_COUNTER.main"); fi
     echo "{\"object\":{\"sha\":\"$sha\"}}" ;;
   repos/o/r/pulls/7)
     printf '{"state":"open","head":{"ref":"%s","repo":{"full_name":"o/r"}},' \
-      "$(cat "$FAKE_AGENT_COUNTER.branch")"
+      "$(cat "$CLAUDE_FAKE_COUNTER.branch")"
     echo '"base":{"ref":"main","repo":{"full_name":"o/r"}}}' ;;
   repos/o/r/dependency-graph/sbom) echo '{"sbom":{"packages":[{"versionInfo":"4.17.20",
     "externalRefs":[{"referenceType":"purl","referenceLocator":"pkg:npm/lodash@4.17.20"}]}]}}' ;;
@@ -225,8 +226,8 @@ impl Sandbox {
             .env("HOME", self.path())
             .env("PATH", self.bin())
             .env("SHELL", self.path().join("login-shell"))
-            .env("FAKE_AGENT_MODE", mode)
-            .env("FAKE_AGENT_COUNTER", self.path().join("counter"))
+            .env("CLAUDE_FAKE_MODE", mode)
+            .env("CLAUDE_FAKE_COUNTER", self.path().join("counter"))
             // Version managers are read from the sandbox's home only.
             .env_remove("NVM_DIR")
             .env_remove("FNM_DIR")
