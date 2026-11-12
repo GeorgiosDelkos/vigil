@@ -77,6 +77,7 @@ Core modules (one concept each):
   sweeps/.lock
   fixes/<utc-timestamp>-<key>/{PROMPT.md, fix.json, result.schema.json, agent.log, result.json}
   fixes/<utc-timestamp>-all/{PROMPT.md, fixes.json, result.schema.json, agent.log, results.jsonl}
+    (only while the fix runs: deleted once its run is in state/fixes.jsonl)
   sweeps/<utc-timestamp>[-n]/<target>/{bundle/, agent-1.log, agent-2.log, report.json, report.md}
     (<target> is `mac`, `github-<owner>--<name>` or `server-<name>`)
 ```
@@ -352,8 +353,27 @@ use ssh.
   target with a verdict (a newer sweep without it means it is gone, and an old fix could
   downgrade a package), it is not dismissed, its fix passes the sweep's text checks again, the
   target is still in `config.toml`, and the agent is installed. The question shows where the
-  fix runs (for a server, the exact ssh command) and when the sweep found it. A summary is
-  shown on one line, so it cannot pass for a command. Not confirming exits non-zero.
+  fix runs (for a server, the exact ssh command), when the sweep found it, the summary, the
+  steps and the exact commands, as the agent is told the user confirmed all three; and notes:
+  for a server, that the agent on this Mac reads the server's output, and when the user's
+  edited `prompts/fix.md` is used. A summary is shown on one line, so it cannot pass for a
+  command. Not confirming exits non-zero.
+- What runs is the plan the question showed (decided 2026-11-12): the plan holds where it runs,
+  the agent and model, and the prompt template, read once. The app keeps the plan of the last
+  confirmation it showed under a number the UI sends back with Run; a newer preview replaces
+  it, and an old number is refused. Planning again at the click was the old design: it read
+  `config.toml` again, so a host, agent or model edited while the user read the question ran
+  unseen. A fix prompt without `{{access}}`, where the "Where to work" rules go, is refused.
+- A repository fix whose commands may address another repository is refused before asking
+  (decided 2026-11-12). The rule is conservative, not a shell parser: every
+  `repos/<owner>/<name>` and `github.com/<owner>/<name>` must name this repository; no
+  `GH_REPO` or `GH_HOST`; in a `gh` invocation no `$` or backquote, `-R`/`--repo` names this
+  repository, `gh api` calls one path under `repos/<this repository>` with no `--hostname`
+  (so no `graphql`), and `gh repo` names no other `owner/name`. A fix it refuses wrongly is
+  for the user to run by hand.
+- A finding key is a 64-bit hash over every target, so two targets could share one (a crafted
+  lockfile path in a repository). Looking a key up for a fix or a dismissal fails, naming both
+  reports, when the newest report of another target also has it.
 - The agent gets `fix.json` with the key, target, severity, advisories or subject, the
   installed component and the fix, not the sweep's evidence and explanation: those were
   written from untrusted advisory text and files, and the user confirmed the fix, not them.
@@ -365,17 +385,36 @@ use ssh.
   `result.json`, the agent's `agent.log`, and `result.json`, which the agent writes: `outcome`
   (`fixed`, `partial`, `failed`), a one-line `summary`, and for a repository the
   `pull_request` URL (`https://github.com/<owner>/<name>/pull/<number>` of that repository
-  only).
+  only, owner and name compared case-insensitively as GitHub does). Files the agent wrote are
+  read only when regular (no link, no FIFO, which would block the read) and only up to a cap.
+  Once the run is recorded the folder is deleted (the owner's decision, 2026-11-12), under the
+  sweeps lock, without following links; the app keeps the end of `agent.log` in memory for the
+  results view, and the CLI prints it for a fix that did not finish. A run whose record cannot
+  be appended keeps its folder.
 - Where to work: this Mac; for a repository, a clone in the fix folder, a branch
-  `vigil/fix-<key>`, and a pull request (never a push to the default branch); for a
-  server, every command through `ssh` with the sweep's options to that one host, carried to the
-  server's `sh -s` in a quoted heredoc, so a quote in a command cannot end the ssh line and run
-  the rest on the Mac. Accepted risk: a repository fix lets the full-access agent read the
-  clone, which may hold agent instruction files; the repositories are the user's own, and the
-  agent's project settings and hooks come from its working folder, the fix folder.
+  `vigil/fix-<key>-<start time to the millisecond>`, new for each run, and a pull request
+  into the default branch (never a push to the default branch); for a server, every command
+  through `ssh` with the sweep's options to that one host, carried to the server's `sh -s` in
+  a quoted heredoc, so a quote in a command cannot end the ssh line and run the rest on the
+  Mac.
+- A repository fix's agent runs with git hooks off (`GIT_CONFIG_COUNT` setting
+  `core.hooksPath=/dev/null`, which every git command it runs reads as command-line
+  configuration) and package lifecycle scripts off (`npm_config_ignore_scripts=true` for npm
+  and pnpm, `YARN_ENABLE_SCRIPTS=false`), the owner's decision of 2026-11-12. The prompt says
+  that files in the clone such as `CLAUDE.md`, `AGENTS.md`, `GEMINI.md` and `.cursorrules` are
+  data. Before the run the app reads the default branch's head with `gh`; after it, the head
+  must be the same, and a reported pull request must be open from the run's branch of this
+  repository into the default branch. Otherwise the run is recorded `unknown`, with why and
+  what the agent reported. Accepted risk: the full-access agent still reads the clone, and
+  could unset those variables; the repositories are the user's own, and the agent's project
+  settings and hooks come from its working folder, the fix folder.
+- Server fixes keep the full-access agent on this Mac (the owner's decision, 2026-11-12). It
+  reads the server's output, which a compromised server controls; the confirmation says so.
 - `state/fixes.jsonl` gets one line per run: key, target, agent, start and end, exit code,
-  outcome (`unknown` when `result.json` is missing or invalid or the agent did not start, with
-  why), summary, pull request, how it was confirmed (`asked` or `yes_flag`), folder. Appends
+  outcome (`unknown` when `result.json` is missing or invalid, the agent did not start, or a
+  repository's check after the run failed, with why), summary, pull request, how it was
+  confirmed (`asked` or `yes_flag`). Records written before 2026-11-12 also name the folder,
+  which no longer exists. Appends
   take `state/.lock`; a last line cut short by a crash is ended first. The CLI exits non-zero
   unless the outcome is `fixed` and the agent exited 0.
 - A fix holds `sweeps/.lock`, so no sweep or other fix runs while it changes the target.
@@ -397,8 +436,9 @@ The owner asked for a Fix all button on a target's screen and chose "one run, on
   well formed, target configured, agent installed), and all come from the same report. The
   one question lists every item: its name and version, the fix's summary and exact commands,
   where it runs and with which agent, then "Fix all N" and Cancel.
-- Staleness: the app runs only the list it showed (the same keys in the same order, from the
-  same sweep). Under the sweeps lock the list is made again as planning makes it, and must be
+- Staleness: the app runs only the list it showed: the plan the question showed, kept as for
+  one fix, so the same keys in the same order, from the same sweep, with the same destination,
+  agent and prompt. Under the sweeps lock the list is made again as planning makes it, and must be
   the same keys in the same order from the same report: a sweep, a fix reported in between, a
   dismissal or undismissal, or a new lead refuses the whole run, naming the first item that
   differs ("nothing was run: curl 8.1.2: a sweep, fix or dismissal changed the list while it
@@ -704,8 +744,9 @@ Built in step 9a (2026-11-06):
     did), and a repository fix's pull request: plain wrapped text, shown and never acted on.
   - Show log shows the end of the run's `agent.log`, its last 64 KiB from a whole line, in a
     scrollable monospace block (the one place not in IBM Plex Sans: the owner asked for
-    monospace), each line plain. The app reads it through the core's `FixRun::log_tail`, from
-    the folder Rust kept, never a path from the UI. A missing or unreadable log says so.
+    monospace), each line plain. The run read it before it deleted its folder, and the app
+    keeps it in memory in the core's `FixRun` (`FixRun::log_tail`), never a path from the UI.
+    A missing or unreadable log says so.
   - At the bottom, one line from Rust: "5 of 9 fixed · 4 partial" (then failed, then "with no
     result", each only when there are any).
   - Close, or Escape, returns to where the fix was started: the target's screen or the
@@ -775,8 +816,10 @@ Built in step 9b (2026-11-06):
 - Saves take an exclusive lock on `.config.toml.lock`, so two at once (quick clicks; any
   other process that saves later) both land. A key written another way than a change expects (an inline
   table, `repos = "o/r"`) is refused with what to change, never replaced.
-- A confirmed fix carries the preview's `found`; the app refuses it when a newer sweep
-  changed the finding, and the confirm shows the commands that will run.
+- A confirmed fix or Fix all carries the preview's number, and the app runs the plan it kept
+  for that preview (see "Fix flow"); the core refuses it when a sweep, fix or dismissal changed
+  the finding since. The confirm shows the summary, the steps, the commands that will run and
+  Rust's notes.
 - The NVD key is saved with `/usr/bin/security -i`, the command on stdin, so the program
   that reads it before each sweep is the one that created it and is trusted without a
   prompt. Accepted: a key saved by an earlier build through Security.framework may prompt
