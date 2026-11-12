@@ -88,6 +88,7 @@ impl Prompt {
                 0x6700_b7d7_68f8_b586,
                 0x6fb4_8641_0926_923e,
                 0xd7b9_24a3_0c7b_42b5,
+                0x40f6_3d88_cb2d_afb9,
             ],
             Self::GitHub => &[
                 0x61c0_4d78_7cf2_cfd0,
@@ -95,6 +96,7 @@ impl Prompt {
                 0x63b2_93e7_5d62_bfc3,
                 0xddaa_01c1_7a2a_02d4,
                 0x461e_5ecd_ab4c_3f4c,
+                0x5587_5ec1_ca59_bdce,
             ],
             Self::Server => &[
                 0xf408_6f27_d0ec_3536,
@@ -102,6 +104,7 @@ impl Prompt {
                 0x495c_677b_2b0e_eafc,
                 0xafea_94d5_e019_3384,
                 0x7204_4cf2_d0b2_ddbe,
+                0x9723_54ab_1f75_134c,
             ],
             Self::Fix => &[0x77ef_cded_9b10_794c, 0x55ae_3d08_e3e0_8813],
             Self::FixAll => &[0xd72c_2266_ddd2_d7f2],

@@ -76,7 +76,7 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   install --only-upgrade <package>`, `sudo apk upgrade <package>`), naming the installed
   packages from `found_in`. They are shown to the user, never run now. Each command is one
   line of printable ASCII with single spaces, at most 300 characters, and one command: no
-  `;`, `|`, `&`, `<`, `>`, backticks or `$(`. At most 20 steps and 20 commands; write web
+  `;`, `|`, `&`, `<`, `>`, backticks, `$` or `\`. At most 20 steps and 20 commands; write web
   addresses in ASCII.
 
 If nothing is affected and nothing is risky, write `{"findings": [], "issues": []}`.

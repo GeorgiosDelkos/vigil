@@ -792,10 +792,17 @@ impl Shared<'_> {
                         log.display()
                     ));
                 }
-                Err(e) => (
-                    vec![format!("findings.json could not be read: {e}")],
-                    "is missing",
-                ),
+                Err(e) => {
+                    let previous = if e.kind() == io::ErrorKind::NotFound {
+                        "is missing"
+                    } else {
+                        "could not be read and was moved to findings.rejected.json"
+                    };
+                    (
+                        vec![format!("findings.json could not be read: {e}")],
+                        previous,
+                    )
+                }
             };
             // Kept for the agent to correct, and so that it cannot pass for the next answer.
             if let Err(e) = fs::rename(&findings_path, &rejected_path)
@@ -803,15 +810,7 @@ impl Shared<'_> {
             {
                 return Err(format!("cannot set aside the rejected findings.json: {e}"));
             }
-            prompt = format!(
-                "{PROMPT_LINE} Your findings.json {previous}; fix these problems and write \
-                 findings.json again:\n- {}",
-                problems
-                    .iter()
-                    .map(|p| plain(p))
-                    .collect::<Vec<_>>()
-                    .join("\n- ")
-            );
+            prompt = retry_prompt(previous, &problems);
             last = problems;
         }
         Err(format!(
@@ -896,6 +895,30 @@ impl Shared<'_> {
         issues.sort_by_key(|i| i.issue.severity);
         (findings, issues)
     }
+}
+
+/// The most problems the retry prompt lists. Arbitrary: enough for the agent to see what to
+/// fix. The prompt is one command-line argument, and macOS allows 1 MiB for all of them
+/// (`getconf ARG_MAX`), which a file at every cap could exceed with every problem listed.
+const RETRY_PROBLEMS: usize = 50;
+
+/// The prompt of the second attempt: the first one's file `previous` (a phrase such as "was
+/// rejected"), and its first [`RETRY_PROBLEMS`] problems.
+fn retry_prompt(previous: &str, problems: &[String]) -> String {
+    let listed: Vec<String> = problems
+        .iter()
+        .take(RETRY_PROBLEMS)
+        .map(|p| plain(p))
+        .collect();
+    let more = match problems.len().saturating_sub(RETRY_PROBLEMS) {
+        0 => String::new(),
+        n => format!("\n- and {n} more like these"),
+    };
+    format!(
+        "{PROMPT_LINE} Your findings.json {previous}; fix these problems and write findings.json \
+         again:\n- {}{more}",
+        listed.join("\n- ")
+    )
 }
 
 /// The key of each finding, given as its primary advisory and component: the target, the
@@ -1580,6 +1603,26 @@ mod tests {
 
     use super::*;
     use crate::inventory::VersionManager;
+
+    #[test]
+    fn the_retry_prompt_lists_only_the_first_problems() {
+        let few: Vec<String> = (0..3).map(|i| format!("problem {i}")).collect();
+        let prompt = retry_prompt("was rejected", &few);
+        assert!(
+            prompt.ends_with("again:\n- problem 0\n- problem 1\n- problem 2"),
+            "{prompt}"
+        );
+
+        let many: Vec<String> = (0..RETRY_PROBLEMS + 7).map(|i| format!("p{i}")).collect();
+        let prompt = retry_prompt("was rejected", &many);
+        assert_eq!(prompt.matches("\n- p").count(), RETRY_PROBLEMS);
+        assert!(
+            prompt.contains(&format!("\n- p{}\n", RETRY_PROBLEMS - 1)),
+            "{prompt}"
+        );
+        assert!(!prompt.contains(&format!("p{RETRY_PROBLEMS}")), "{prompt}");
+        assert!(prompt.ends_with("\n- and 7 more like these"), "{prompt}");
+    }
 
     #[test]
     fn no_agent_is_found_until_one_is_chosen() {
