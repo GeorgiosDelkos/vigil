@@ -47,6 +47,13 @@ use vigil_core::write_html_report;
 use crate::runner::Runner;
 use crate::runner::Status;
 
+// Without `custom-protocol`, Tauri is in dev mode (tauri-build sets the `dev` cfg from it) and
+// the window loads the UI from the dev server's URL, http://localhost:5173. In a release build
+// that would hand every command (fix, save, dismiss) to whichever local process binds that
+// port first. Debug builds stay allowed, since `cargo tauri dev` is one.
+#[cfg(all(dev, not(debug_assertions)))]
+compile_error!("a release build of vigil-app needs `--features custom-protocol`");
+
 fn main() {
     let home = std::env::home_dir().expect("a Mac user has a home directory");
     let data_dir = DataDir::for_home(&home);
