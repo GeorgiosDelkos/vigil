@@ -174,16 +174,8 @@ fn plan_finding(data_dir: &DataDir, key: FindingKey) -> Result<Planned, FixError
         source,
     };
     let invalid = |e: serde_json::Error| read_err(io::Error::new(io::ErrorKind::InvalidData, e));
-    let text = match fs::read_to_string(&path) {
-        Ok(text) => text,
-        // Read without the sweeps lock: a sweep that ended since can have removed it, keeping
-        // its own newer report.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return Err(StateError::UnknownKey { key }.into());
-        }
-        Err(e) => return Err(read_err(e)),
-    };
-    let report: Saved = serde_json::from_str(&text).map_err(invalid)?;
+    let report: Saved =
+        serde_json::from_str(&fs::read_to_string(&path).map_err(read_err)?).map_err(invalid)?;
     let entry = report
         .findings
         .into_iter()

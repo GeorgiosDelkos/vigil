@@ -355,6 +355,24 @@ mod tests {
             .collect()
     }
 
+    /// Whichever `python3` this Mac has, a cancelled sweep runs neither it nor `xcode-select`:
+    /// either is reported as cancelled, or `python3` is not installed at all.
+    #[test]
+    fn a_cancelled_sweep_reads_no_python() {
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let mut inventory = Inventory::default();
+        python(&mut inventory, &cancel);
+        assert!(inventory.components.is_empty());
+        let cancelled = matches!(inventory.problems[..], [InventoryError::Cancelled { .. }]);
+        assert!(
+            cancelled || inventory.not_installed == ["python3"],
+            "{:?} {:?}",
+            inventory.problems,
+            inventory.not_installed
+        );
+    }
+
     #[test]
     fn macos_and_node_versions() {
         assert_eq!(

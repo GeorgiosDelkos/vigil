@@ -764,6 +764,20 @@ mod tests {
     }
 
     #[test]
+    fn a_walk_slower_than_a_poll_but_within_the_limit_finishes() {
+        // Longer than one poll, so the waiter checks the deadline at least once before the
+        // result; far shorter than the limit.
+        let walk = |_: &Path, _: &Cancel| {
+            thread::sleep(POLL * 2);
+            Inventory::default()
+        };
+        let roots = [PathBuf::from("/slow")];
+        let (walked, stopped) = bounded(&Cancel::new(), WALK_TIMEOUT, &roots, walk);
+        assert!(stopped.is_none(), "{stopped:?}");
+        assert_eq!(walked.len(), 1);
+    }
+
+    #[test]
     fn finished_walks_are_returned_in_order() {
         let roots = [PathBuf::from("/a"), PathBuf::from("/b")];
         let walk = |root: &Path, _: &Cancel| Inventory {
