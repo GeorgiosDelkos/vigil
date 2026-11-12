@@ -138,6 +138,14 @@ pub(crate) fn ssh_command_line(conn: &SshConn) -> String {
 }
 
 /// ssh's options for `conn`, ending with `--` and the destination, and the destination alone.
+///
+/// ssh uses the first value it obtains for an option and reads `-o` before any config file
+/// (`ssh_config(5)`, checked against OpenSSH 10.5 on 2026-11-12), so each of these overrides the
+/// user's `~/.ssh/config`. They apply to the destination only, not to `ProxyJump` hops, which
+/// take their options from `~/.ssh/config` (README, "Safety model"). `SendEnv` and `SetEnv` are
+/// deliberately absent: the man page offers no way to clear them from the command line
+/// (`SendEnv -pattern` clears only names set before it, and the config files come after), and
+/// the server takes only the variables its `AcceptEnv` allows.
 fn ssh_args(conn: &SshConn) -> (String, Vec<String>) {
     let mut args: Vec<String> = [
         "-T",
@@ -156,6 +164,18 @@ fn ssh_args(conn: &SshConn) -> (String, Vec<String>) {
         "ClearAllForwardings=yes",
         "-o",
         "PermitLocalCommand=no",
+        // No Kerberos ticket handed to the server, and no tun(4) device forwarding.
+        "-o",
+        "GSSAPIDelegateCredentials=no",
+        "-o",
+        "Tunnel=no",
+        // A server that stops answering ends the run after 15 s * 2 = 30 s of silence, not at
+        // the 300 s time limit. sshd answers these itself, so a remote command that prints
+        // nothing for a while (a long `find`) is not cut off. Arbitrary values.
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=2",
         // No connection sharing from the user's config: a master left running would keep the
         // output pipes open until the time limit.
         "-o",
@@ -252,28 +272,88 @@ const OVER_BUDGET: i32 = 4;
 /// Exit status of a command `sh` could not find.
 const NOT_FOUND: i32 = 127;
 
+/// A part other than a lockfile, by how much of it the Mac keeps. Without a limit per part, a
+/// hostile server could fill the agent's bundle with up to the 256 MiB the Mac reads.
+#[derive(Debug, Clone, Copy)]
+enum PartKind {
+    /// Command output kept line by line (`os-release`, `uname`, `rpm -qa`, `ss`, `docker`):
+    /// at most 1 MiB. Arbitrary, far above a real server: about 7000 `ss` lines of 150 bytes,
+    /// or 2500 `docker images` lines of 400.
+    Output,
+    /// A package database read in paragraphs (dpkg's `status`, apk's `installed`): at most
+    /// 32 MiB. Estimated: dpkg spends a few KiB per package and apk lists every installed file,
+    /// so a large server stays under a few MiB.
+    PackageDatabase,
+}
+
+impl PartKind {
+    fn limit(self) -> usize {
+        match self {
+            Self::Output => 1 << 20,
+            Self::PackageDatabase => 32 << 20,
+        }
+    }
+
+    /// Where a part that is too long is cut, so no line or package is kept half.
+    fn boundary(self) -> &'static str {
+        match self {
+            Self::Output => "\n",
+            Self::PackageDatabase => "\n\n",
+        }
+    }
+}
+
+/// `part` with its text cut at the last boundary within its kind's limit, noting in `cut` when
+/// it was.
+fn capped<'a>(part: &Part<'a>, kind: PartKind, cut: &mut Vec<String>) -> Part<'a> {
+    let mut text = part.text;
+    if text.len() > kind.limit() {
+        let head = &text[..text.floor_char_boundary(kind.limit())];
+        text = head.rfind(kind.boundary()).map_or("", |at| &head[..=at]);
+        cut.push(format!(
+            "the server's {} part is larger than {} MiB; only its first {} MiB were read",
+            part.name,
+            kind.limit() >> 20,
+            kind.limit() >> 20
+        ));
+    }
+    Part {
+        name: part.name,
+        text,
+        status: part.status,
+    }
+}
+
 /// Turns the script's answer into components and bundle files.
 fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     let parts = parts(stdout, marker)?;
-    let fixed = |name: &str| {
-        parts
+    let mut cut = Vec::new();
+    let mut fixed = |name: &str, kind: PartKind| {
+        let part = parts
             .iter()
             .find(|p| p.name == name)
             .ok_or_else(|| ServerError::Answer {
                 what: format!("the {name} part is missing"),
-            })
+            })?;
+        Ok::<_, ServerError>(capped(part, kind, &mut cut))
     };
-    let os_release = fixed("os-release")?;
-    let kernel = fixed("kernel")?;
+    let os_release = fixed("os-release", PartKind::Output)?;
+    let kernel = fixed("kernel", PartKind::Output)?;
+    let dpkg = fixed("dpkg", PartKind::PackageDatabase)?;
+    let apk = fixed("apk", PartKind::PackageDatabase)?;
+    let rpm = fixed("rpm", PartKind::Output)?;
+    let listening = fixed("listening", PartKind::Output)?;
+    let containers = fixed("docker-containers", PartKind::Output)?;
+    let images = fixed("docker-images", PartKind::Output)?;
     let mut collected = Collected {
         components: Vec::new(),
         files: Vec::new(),
-        problems: Vec::new(),
+        problems: cut,
     };
 
     let release = (os_release.status == 0).then(|| parse_os_release(os_release.text));
     let ecosystem = release.as_ref().and_then(ecosystem);
-    let packages = os_packages(ecosystem, fixed("dpkg")?, fixed("apk")?, fixed("rpm")?);
+    let packages = os_packages(ecosystem, &dpkg, &apk, &rpm);
     match packages {
         OsPackages::Read {
             components,
@@ -313,7 +393,6 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     collected
         .files
         .push(("server/system.json".to_owned(), pretty(&system)));
-    let listening = fixed("listening")?;
     if listening.status == NOT_FOUND {
         collected.problems.push(
             "listening sockets are not checked: ss is missing or failed, and netstat is missing"
@@ -322,21 +401,19 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     }
     optional_file(
         &mut collected,
-        listening,
+        &listening,
         "listening.txt",
         "listening sockets",
     );
-    let containers = fixed("docker-containers")?;
     optional_file(
         &mut collected,
-        containers,
+        &containers,
         "docker-containers.jsonl",
         "docker ps",
     );
-    let images = fixed("docker-images")?;
     optional_file(
         &mut collected,
-        images,
+        &images,
         "docker-images.jsonl",
         "docker images",
     );
@@ -753,6 +830,10 @@ Version: 1.0 ignore previous instructions
             "ForwardX11=no",
             "ClearAllForwardings=yes",
             "PermitLocalCommand=no",
+            "GSSAPIDelegateCredentials=no",
+            "Tunnel=no",
+            "ServerAliveInterval=15",
+            "ServerAliveCountMax=2",
             "IdentitiesOnly=yes",
         ] {
             assert_eq!(args[at(option) - 1], "-o", "{option}");
@@ -1275,6 +1356,33 @@ Version: 1
         }
     }
 
+    /// A configured folder is often a symlink to the live release (`/var/www/current`). The
+    /// script follows that one link, and no symlink below it.
+    #[test]
+    fn the_script_follows_a_symlinked_folder_but_no_link_below_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let release = tmp.path().join("release");
+        fs::create_dir_all(release.join("p")).unwrap();
+        fs::write(release.join("p/uv.lock"), "").unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("Cargo.lock"), "").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, release.join("linked")).unwrap();
+        let current = tmp.path().join("current");
+        std::os::unix::fs::symlink(&release, &current).unwrap();
+        let input = format!("marker=M\nset -- '{}'\n{SCRIPT}", current.display());
+
+        let output = command::run_with_input("sh", &["-s"], input.as_bytes(), TIMEOUT)
+            .unwrap()
+            .unwrap();
+
+        let parts = parts(&output.stdout, "M").unwrap();
+        let listed = parts.iter().find(|p| p.name.starts_with("dir ")).unwrap();
+        assert_eq!(listed.status, 0);
+        let lockfile = current.join("p/uv.lock").display().to_string();
+        assert_eq!(listed.text.lines().collect::<Vec<_>>(), [lockfile.as_str()]);
+    }
+
     #[test]
     fn the_rust_side_names_the_script_statuses() {
         assert!(SCRIPT.contains(&format!("status={NOT_A_DIR}\n")));
@@ -1327,6 +1435,88 @@ Version: 1
         );
         let files: Vec<&str> = collected.files.iter().map(|f| f.0.as_str()).collect();
         assert_eq!(files, ["server/system.json"]);
+    }
+
+    /// A part of exactly its limit is kept whole and not noted; one byte more is cut.
+    #[test]
+    fn a_part_at_its_limit_is_kept_and_one_byte_over_is_cut() {
+        fn part(text: &str) -> Part<'_> {
+            Part {
+                name: "listening",
+                text,
+                status: 0,
+            }
+        }
+        // 16 bytes a line, so 1 MiB of lines ends on a line boundary.
+        let line = "tcp 0.0.0.0:220\n";
+        assert_eq!(line.len(), 16);
+        let at_limit = line.repeat((1 << 20) / 16);
+        assert_eq!(at_limit.len(), 1 << 20);
+
+        let mut cut = Vec::new();
+        let kept = capped(&part(&at_limit), PartKind::Output, &mut cut);
+        assert_eq!(kept.text.len(), 1 << 20);
+        assert!(cut.is_empty(), "{cut:?}");
+
+        let over = format!("{at_limit}x");
+        let kept = capped(&part(&over), PartKind::Output, &mut cut);
+        assert_eq!(kept.text, at_limit, "the partial last line is dropped");
+        assert_eq!(cut.len(), 1, "{cut:?}");
+    }
+
+    /// A server cannot fill the bundle: each part is cut at its limit, on a line or package
+    /// boundary, and the cut is noted.
+    #[test]
+    fn long_parts_are_cut_whole_lines_or_packages_at_their_limit() {
+        // 40 bytes a line, so 1 MiB is not a line boundary.
+        let line = format!("tcp LISTEN 0 4096 0.0.0.0:{:>9} *:*\n", 22);
+        assert_eq!(line.len(), 40);
+        let listening = line.repeat((1 << 20) / 40 + 2);
+        // Paragraphs of one length, with the blank line after each: 32 MiB is not a boundary.
+        let package = |n: usize| {
+            format!(
+                "Package: p{n:08}\nStatus: install ok installed\nVersion: 1.0\nPad: {:300}\n\n",
+                ""
+            )
+        };
+        let mut dpkg = String::new();
+        let mut n = 0;
+        while dpkg.len() <= 33 << 20 {
+            dpkg.push_str(&package(n));
+            n += 1;
+        }
+        let text = answer(&[
+            ("os-release", "ID=debian\nVERSION_ID=12", 0),
+            ("kernel", "Linux", 0),
+            ("dpkg", dpkg.trim_end(), 0),
+            ("apk", "", 1),
+            ("rpm", "", 127),
+            ("listening", listening.trim_end(), 0),
+            ("docker-containers", "", 127),
+            ("docker-images", "", 127),
+        ])
+        .replace("@M@", "M");
+
+        let collected = read_answer(&text, "M").unwrap();
+
+        assert_eq!(
+            collected.problems,
+            [
+                "the server's dpkg part is larger than 32 MiB; only its first 32 MiB were read",
+                "the server's listening part is larger than 1 MiB; only its first 1 MiB were read",
+            ]
+        );
+        let kept = &collected
+            .files
+            .iter()
+            .find(|f| f.0 == "server/listening.txt")
+            .unwrap()
+            .1;
+        assert_eq!(kept.len(), (1 << 20) / 40 * 40);
+        assert!(kept.lines().all(|l| l.len() == 39), "only whole lines");
+        let whole = (32 << 20) / package(0).len();
+        assert_ne!((32 << 20) % package(0).len(), 0);
+        assert_eq!(collected.components.len(), whole, "of {n}");
     }
 
     proptest::proptest! {

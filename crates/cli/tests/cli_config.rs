@@ -27,6 +27,24 @@ fn config_before_init_says_to_run_init() {
     assert!(text(&out.stderr).contains("run `vigil init` first"));
 }
 
+/// A TOML parse error quotes the offending line, so the error that ends the command must not
+/// pass an escape sequence in that line on to the terminal.
+#[test]
+fn config_error_prints_no_escape_sequences() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("config.toml"),
+        "agent = \"\u{1b}]52;c;aGk=\u{7}\n",
+    )
+    .unwrap();
+    let out = run(tmp.path(), &["config"]);
+    assert!(!out.status.success());
+    let stderr = text(&out.stderr);
+    assert!(stderr.starts_with("error: "), "{stderr:?}");
+    assert!(stderr.contains("]52;c;aGk="), "{stderr:?}");
+    assert!(!stderr.contains(['\u{1b}', '\u{7}']), "{stderr:?}");
+}
+
 #[test]
 fn init_then_config_prints_summary() {
     let tmp = tempfile::tempdir().unwrap();

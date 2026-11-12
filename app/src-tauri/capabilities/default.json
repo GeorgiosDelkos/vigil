@@ -1,12 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "The popover: app commands, events, launch at login.",
+  "description": "The popover: the changed event and launch at login, nothing more, so a script in the page cannot drive the tray, menus, windows or webview. The app's own commands need no permission: Tauri 2 allows them for local pages while the app declares no app manifest.",
   "windows": [
     "popover"
   ],
   "permissions": [
-    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
     "autostart:allow-enable",
     "autostart:allow-disable",
     "autostart:allow-is-enabled"

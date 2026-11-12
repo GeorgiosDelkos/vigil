@@ -184,6 +184,30 @@ fn failing_tool_is_reported_and_the_rest_still_count() {
     assert!(stdout.contains("apple:macos"), "{stdout}");
 }
 
+/// A tool's stderr is quoted in the warning, so escape sequences in it must not reach the
+/// terminal: here an OSC 52 clipboard write and a right-to-left override.
+#[test]
+fn warnings_print_no_escape_sequences() {
+    let sandbox = Sandbox::new();
+    sandbox.tool("sw_vers", "echo 27.2");
+    sandbox.tool(
+        "brew",
+        r"printf 'broken \033]52;c;aGk=\007 \342\200\256txt.exe\n' >&2; exit 1",
+    );
+    let out = sandbox.inventory("");
+
+    let stderr = text(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("broken \u{fffd}]52;c;aGk=\u{fffd}"),
+        "{stderr:?}"
+    );
+    assert!(
+        !stderr.contains(['\u{1b}', '\u{7}', '\u{202e}']),
+        "{stderr:?}"
+    );
+}
+
 /// npm lists the whole global tree even when it exits 1 over a problem in it; the packages
 /// count, the problem is noted, and it does not fail the command.
 #[test]

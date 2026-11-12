@@ -296,6 +296,11 @@ the user's `gh` login; the agent never calls GitHub and reads only the bundle.
 | Workflows | `repos/{repo}/contents/.github/workflows` and each file | `github/workflows/<name>` |
 | Settings | the repository's `security_and_analysis`, `vulnerability-alerts`, the default branch's protection, `rulesets`, `actions/permissions`, `actions/permissions/workflow`, and for an organization owner its 2FA requirement | `github/settings.json`, one key per setting |
 
+Each kind of alert is read 100 a page, following the cursor in GitHub's `Link` header, for at
+most 5 pages: the bundle keeps the first 500, and when a sixth page is linked `settings.json`
+says "n or more" open (n the alerts kept, so usually "500 or more") instead of a count, so a
+repository with thousands of alerts costs five requests.
+
 A feature that is off answers with a 403 or 404 and a message ("Dependabot alerts are
 disabled", "no analysis found", "Branch not protected"); that answer is the setting's value in
 `settings.json`, not a failure, so the agent can report it. Any other failure of a part is a
@@ -317,9 +322,14 @@ instead and the agent only reads the bundle, as for GitHub.
 The app sends one fixed script, `server.sh`, on ssh's stdin and runs it with `sh -s -- <random
 marker> <dirs...>`. It only reads and never uses sudo. ssh runs with `BatchMode=yes` (a prompt
 fails the target), `StrictHostKeyChecking=yes` (the host key must already be in
-`known_hosts`, which a sweep never updates), agent, X11 and port forwarding off, and no
-connection sharing. The marker and the folders travel on stdin, not on the server's process
-list. The Mac reads at most 256 MiB of the answer and decodes each part on its own.
+`known_hosts`, which a sweep never updates), agent, X11, port, tunnel and Kerberos credential
+forwarding off, a server that stops answering dropped after 30 s, and no connection sharing.
+These are command-line options, so `ProxyJump` hops do not get them; the README asks for
+`BatchMode` and `StrictHostKeyChecking` on each hop in `~/.ssh/config`. The marker and the
+folders travel on stdin, not on the server's process list. The Mac reads at most 256 MiB of
+the answer and decodes each part on its own. It keeps at most 32 MiB of a package database and
+1 MiB of any other part but a lockfile, cut on a package or line boundary and noted in the
+report, so a server cannot fill the agent's bundle.
 
 | Part | Read with | In the bundle as |
 |---|---|---|
