@@ -11,6 +11,7 @@
 mod runner;
 mod settings;
 mod tray;
+mod update;
 
 use std::cmp::Ordering;
 use std::path::PathBuf;
@@ -47,6 +48,7 @@ use vigil_core::write_html_report;
 use crate::runner::Previewed;
 use crate::runner::Runner;
 use crate::runner::Status;
+use crate::update::UpdateView;
 
 // Without `custom-protocol`, Tauri is in dev mode (tauri-build 2.7.4 sets the `dev` cfg from it
 // with `cfg_alias("dev", is_dev())` in its `src/lib.rs`, and declares it for check-cfg) and
@@ -71,6 +73,8 @@ fn main() {
         ))
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_dialog::init())
+        // Used from Rust only (`update`): the webview gets no updater permission.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Runner::new(data_dir, home))
         .manage(tray::Popover::default())
         .manage(settings::Detection::default())
@@ -91,7 +95,8 @@ fn main() {
             settings::detect_again,
             settings::save,
             settings::add_folder,
-            settings::set_nvd_key
+            settings::set_nvd_key,
+            update::restart_to_update
         ])
         .setup(|app| {
             // A menu-bar app: no Dock icon and no app menu (LSUIElement).
@@ -99,6 +104,7 @@ fn main() {
             tray::create(app.handle())?;
             runner::schedule(app.handle().clone());
             settings::detect_at_start(app.handle().clone());
+            update::schedule(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -120,6 +126,8 @@ fn main() {
             // An exit request while a sweep or fix runs goes through `runner::quit`, which
             // cancels it and exits once it has ended. A quit that skips this event (logout,
             // `kill`, a crash) is covered by the core's watchdog, which stops the programs.
+            // While an update installs, the request is held and dropped (`Quit::Installing`):
+            // the app restarts once the install succeeds, or keeps running if it fails.
             if let RunEvent::ExitRequested { api, .. } = event
                 && runner::must_wait_to_quit(app)
             {
@@ -149,6 +157,8 @@ struct Overview {
     /// The startup disk's size and free space; `None` when diskutil cannot say, and the row
     /// is hidden.
     disk: Option<Disk>,
+    /// The running version, the last update check, and an update waiting for a restart.
+    update: UpdateView,
 }
 
 /// The status as the popover shows it: targets by their labels, and where the sweep is.
@@ -330,7 +340,7 @@ const MAX_MARKED_TARGETS: usize = 12;
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
-fn overview(runner: State<'_, Runner>) -> Overview {
+fn overview(app: AppHandle, runner: State<'_, Runner>) -> Overview {
     // diskutil takes about 0.3 seconds, so it runs while the reports are read, not after.
     thread::scope(|scope| {
         let disk = scope.spawn(startup_disk);
@@ -357,6 +367,7 @@ fn overview(runner: State<'_, Runner>) -> Overview {
             disk: disk
                 .join()
                 .expect("startup_disk returns None on failure and does not panic"),
+            update: update::view(&app),
         }
     })
 }

@@ -13,7 +13,9 @@ import {
 
 import { Icon } from "./icons.tsx";
 import type { IconName } from "./icons.tsx";
+import type { UpdateView } from "./overview.ts";
 import type { Section, SectionLine, Setting, SettingsView } from "./settings.ts";
+import { UpdateAbout } from "./Update.tsx";
 
 /** Each section's icon and the line under its title. Copy only: what a section holds and
  * whether it needs the user come from Rust. */
@@ -31,7 +33,12 @@ const PAGES: Record<Section, { readonly icon: IconName; readonly blurb: string }
 
 /** Settings inside the popover: grouped sections, each opening on its own page with Back.
  * Every value and choice comes from Rust; a change returns the settings as they now are. */
-export function Settings(props: { start: Section | null; onClose: () => void }) {
+export function Settings(props: {
+  start: Section | null;
+  update: UpdateView;
+  now: Date;
+  onClose: () => void;
+}) {
   const [view, { mutate }] = createResource(() => invoke<SettingsView>("settings_data"));
   const [section, setSection] = createSignal<Section | null>(props.start);
   const [error, setError] = createSignal<string | null>(null);
@@ -128,7 +135,10 @@ export function Settings(props: { start: Section | null; onClose: () => void }) 
           <Show
             when={line()}
             fallback={
-              <Overview view={v()} looking={looking()} onOpen={setSection} onLook={lookAgain} />
+              <>
+                <Overview view={v()} looking={looking()} onOpen={setSection} onLook={lookAgain} />
+                <UpdateAbout update={props.update} now={props.now} />
+              </>
             }
           >
             {(l) => (

@@ -1,0 +1,309 @@
+# Builds, signs, notarizes and publishes Vigil.app from a version tag `v*`, after the pattern of
+# ourovoros-io/oikonomia's release workflow.
+#
+# One macOS job: a universal app (Apple Silicon and Intel in one binary, so one download and one
+# latest.json entry serve every Mac), signed with the owner's Developer ID and notarized by Tauri,
+# a .dmg notarized and stapled here, and the updater package (.app.tar.gz) with its minisign
+# signature and latest.json. tauri-action uploads them to a draft release; the last step
+# publishes it once every check passed, so the updater's endpoint
+# (releases/latest/download/latest.json) never points at a release that is half uploaded.
+#
+# workflow_dispatch is the dry run: the same build, signing, notarization and checks, with no
+# release (RELEASE_TAG is empty, so tauri-action uploads nothing).
+#
+# Secrets live only in the GitHub Environment `release` (required reviewer: the owner; deployment
+# policy: branch main and tags v*), never at repository level, and each reaches only the steps
+# that use it. Their names, after Tauri's documented variables
+# (https://v2.tauri.app/distribute/sign/macos/, https://v2.tauri.app/plugin/updater/):
+#
+#   APPLE_CERTIFICATE           base64 of the Developer ID Application .p12
+#   APPLE_CERTIFICATE_PASSWORD  its password
+#   APPLE_SIGNING_IDENTITY      "Developer ID Application: Name (TEAMID)"
+#   APPLE_TEAM_ID               the 10-character team id
+#   APPLE_API_ISSUER            App Store Connect issuer id, for notarytool
+#   APPLE_API_KEY               App Store Connect key id (Tauri's name; not the .p8 itself)
+#   APPLE_API_KEY_P8            the AuthKey_<id>.p8 text, written to a runner file below
+#   TAURI_SIGNING_PRIVATE_KEY           the updater's minisign private key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  its password
+#
+# The public half of the updater key is plugins.updater.pubkey in app/src-tauri/tauri.conf.json:
+# it is what every installed app trusts, and GitHub only hosts the files.
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+permissions:
+  contents: read
+# One release at a time per ref; a second run waits rather than cancel one that is uploading.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    name: macos / release
+    runs-on: macos-latest
+    environment: release
+    permissions:
+      contents: write # creates the draft release, uploads to it and publishes it
+    timeout-minutes: 120
+    env:
+      # The tag to release, or empty on a dry run.
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+      BUNDLE: target/universal-apple-darwin/release/bundle
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Require the signing secrets (fail-closed)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY APPLE_API_KEY_P8 \
+            TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              missing+=("${name}")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Environment 'release' lacks these secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      # rust-toolchain.toml names the exact toolchain, which rustup installs with no argument.
+      # No build cache in this workflow, for pnpm or cargo: an entry another run wrote must not
+      # reach a signed app.
+      - name: Install the pinned Rust toolchain for both Mac architectures
+        run: |
+          rustup toolchain install --profile minimal --no-self-update
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Check that the tag is the app's version
+        if: env.RELEASE_TAG != ''
+        run: |
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "vigil-app") | .version')"
+          if [ "${RELEASE_TAG}" != "v${version}" ]; then
+            echo "::error::tag ${RELEASE_TAG} is not v${version}, the version in Cargo.toml"
+            exit 1
+          fi
+          # tauri.conf.json has no version, so Tauri takes Cargo's; one there would be a second
+          # source that could disagree.
+          if jq -e 'has("version")' app/src-tauri/tauri.conf.json > /dev/null; then
+            echo "::error::app/src-tauri/tauri.conf.json sets a version; remove it"
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # tag=v6.1.0
+        with:
+          package_json_file: app/ui/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # tag=v7.1.0
+        with:
+          # The Active LTS line, as app.yml.
+          node-version: "26"
+          package-manager-cache: false
+      - name: pnpm install --frozen-lockfile
+        working-directory: app/ui
+        run: pnpm install --frozen-lockfile
+
+      # Tauri reads APPLE_API_KEY as the key id and APPLE_API_KEY_PATH as the .p8 file. Written
+      # after the dependency installs and removed after notarization, so the steps without a
+      # use for it never find it on disk.
+      - name: Write the App Store Connect key to a runner file
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          key_dir="${RUNNER_TEMP}/private_keys"
+          mkdir -p "${key_dir}"
+          key_path="${key_dir}/AuthKey_${APPLE_API_KEY}.p8"
+          umask 077
+          printf '%s\n' "${APPLE_API_KEY_P8}" > "${key_path}"
+          echo "APPLE_API_KEY_PATH=${key_path}" >> "${GITHUB_ENV}"
+
+      # The official Tauri action. tauriScript is the CLI pnpm installed from app/ui's lockfile:
+      # without it the action runs `npm install -g @tauri-apps/cli@v2`, an unpinned CLI that
+      # would hold the signing keys. tauri.release.conf.json adds the .dmg and the updater
+      # artifacts, which need the private key, so local builds without it keep working. With
+      # `--target universal-apple-darwin` Tauri builds both architectures and joins them; after
+      # `--`, the arguments go to cargo.
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # tag=action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ env.APPLE_API_KEY_PATH }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app/src-tauri
+          tauriScript: node ${{ github.workspace }}/app/ui/node_modules/@tauri-apps/cli/tauri.js
+          args: --target universal-apple-darwin --config tauri.release.conf.json -- --locked
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: ${{ env.RELEASE_TAG && format('Vigil {0}', env.RELEASE_TAG) || '' }}
+          releaseBody: Download the .dmg, open it and drag Vigil to Applications. An installed Vigil updates itself.
+          releaseDraft: true
+          prerelease: false
+          uploadUpdaterJson: true
+          uploadUpdaterSignatures: true
+
+      # Tauri signs the app, notarizes it and staples the ticket, and signs the .dmg, but does not
+      # notarize the .dmg. This proves the app is Developer ID signed by this team, with the
+      # hardened runtime, notarized and stapled, for both architectures; that the updater package
+      # holds that same stapled app; then notarizes and staples the .dmg and replaces the copy
+      # tauri-action put on the draft. Any failed check fails the job before anything is public.
+      - name: Verify the signed app, notarize and staple the disk image (fail-closed)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          app="${BUNDLE}/macos/Vigil.app"
+          shopt -s nullglob
+          dmgs=("${BUNDLE}"/dmg/*.dmg)
+          if [ ! -d "${app}" ]; then
+            echo "::error::${app} is missing"
+            exit 1
+          fi
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "::error::expected one .dmg in ${BUNDLE}/dmg, found ${#dmgs[@]}"
+            exit 1
+          fi
+          dmg="${dmgs[0]}"
+
+          check_app() {
+            codesign --verify --deep --strict --verbose=2 "$1"
+            codesign --display --verbose=2 "$1" 2> signature.txt
+            cat signature.txt
+            grep -q '^Authority=Developer ID Application: ' signature.txt \
+              || { echo "::error::$1 is not signed with a Developer ID Application certificate"; exit 1; }
+            grep -Fqx "TeamIdentifier=${APPLE_TEAM_ID}" signature.txt \
+              || { echo "::error::$1 is not signed by team APPLE_TEAM_ID"; exit 1; }
+            grep -q '^CodeDirectory .*flags=.*runtime' signature.txt \
+              || { echo "::error::$1 is not signed with the hardened runtime"; exit 1; }
+            spctl --assess --type exec --verbose=2 "$1" 2>&1 | tee gatekeeper.txt
+            grep -q 'source=Notarized Developer ID' gatekeeper.txt \
+              || { echo "::error::Gatekeeper does not see $1 as notarized"; exit 1; }
+            xcrun stapler validate "$1"
+            # One architecture per call: this lipo refuses two after -verify_arch.
+            for arch in x86_64 arm64; do
+              lipo "$1/Contents/MacOS/vigil-app" -verify_arch "${arch}" \
+                || { echo "::error::$1 lacks ${arch}"; exit 1; }
+            done
+          }
+
+          # The app, and the app inside the updater package that installed copies download.
+          check_app "${app}"
+          unpacked="${RUNNER_TEMP}/updater-package"
+          mkdir -p "${unpacked}"
+          tar -xzf "${BUNDLE}/macos/Vigil.app.tar.gz" -C "${unpacked}"
+          check_app "${unpacked}/Vigil.app"
+
+          # The disk image.
+          codesign --verify --strict --verbose=2 "${dmg}"
+          if ! xcrun notarytool submit "${dmg}" \
+              --key "${APPLE_API_KEY_PATH}" --key-id "${APPLE_API_KEY}" \
+              --issuer "${APPLE_API_ISSUER}" \
+              --wait --timeout 1h --output-format json > notary.json; then
+            cat notary.json
+            echo "::error::notarytool could not notarize ${dmg}"
+            exit 1
+          fi
+          cat notary.json
+          status="$(jq -r '.status // ""' notary.json)"
+          if [ "${status}" != "Accepted" ]; then
+            echo "::error::notarization of ${dmg} ended '${status}', not 'Accepted'"
+            exit 1
+          fi
+          xcrun stapler staple "${dmg}"
+          xcrun stapler validate "${dmg}"
+          spctl --assess --type open --context context:primary-signature --verbose=2 "${dmg}" \
+            2>&1 | tee dmg-gatekeeper.txt
+          grep -q 'source=Notarized Developer ID' dmg-gatekeeper.txt \
+            || { echo "::error::Gatekeeper does not see the disk image as notarized"; exit 1; }
+
+          # Replace the unstapled disk image on the draft. Refuse if the draft holds it under
+          # another name: publishing would ship the old one.
+          if [ -n "${RELEASE_TAG}" ]; then
+            name="$(basename "${dmg}")"
+            gh release view "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+              --json assets --jq '.assets[].name' > draft-assets.txt
+            grep -Fqx -- "${name}" draft-assets.txt \
+              || { echo "::error::the draft for ${RELEASE_TAG} has no asset named ${name}"; exit 1; }
+            gh release upload "${RELEASE_TAG}" "${dmg}" --repo "${GITHUB_REPOSITORY}" --clobber
+          fi
+
+      - name: Remove the App Store Connect key file
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/private_keys"
+
+      # The updater installs only a package whose signature verifies with the public key in
+      # tauri.conf.json and names the version announced (requireSignedVersion). Prove both here
+      # with the same verifier, so a mismatched TAURI_SIGNING_PRIVATE_KEY fails this run instead
+      # of every user's update.
+      - name: Verify the updater package with the app's public key
+        run: |
+          set -euo pipefail
+          package="${BUNDLE}/macos/Vigil.app.tar.gz"
+          base64 -d -i "${package}.sig" -o "${RUNNER_TEMP}/package.sig"
+          jq -r '.plugins.updater.pubkey' app/src-tauri/tauri.conf.json \
+            | base64 -d -o "${RUNNER_TEMP}/updater.pub"
+          comment="$(cargo run --locked --quiet -p vigil-app --example verify_update -- \
+            "${package}" "${RUNNER_TEMP}/package.sig" "${RUNNER_TEMP}/updater.pub")"
+          echo "trusted comment: ${comment}"
+          version="$(cargo metadata --locked --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "vigil-app") | .version')"
+          # The trusted comment's fields are tab separated ("timestamp:... file:... version:..."):
+          # compare the whole field, so 0.1.1 does not match a signature of 0.1.10.
+          printf '%s\n' "${comment}" | tr '\t' '\n' | grep -Fqx "version:${version}" \
+            || { echo "::error::the signature does not name version ${version}"; exit 1; }
+
+      - name: Publish the release
+        if: env.RELEASE_TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # What installed apps will read: the draft's latest.json must announce this version,
+          # with the signature checked above under the keys the updater looks up.
+          feed="${RUNNER_TEMP}/feed"
+          mkdir -p "${feed}"
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern latest.json --dir "${feed}"
+          signature="$(cat "${BUNDLE}/macos/Vigil.app.tar.gz.sig")"
+          jq -e --arg v "${RELEASE_TAG#v}" --arg s "${signature}" '
+            .version == $v and all(
+              .platforms["darwin-aarch64-app", "darwin-x86_64-app", "darwin-aarch64",
+                "darwin-x86_64"];
+              .signature == $s and (.url | startswith("https://")))
+          ' "${feed}/latest.json" > /dev/null \
+            || { echo "::error::the draft's latest.json does not match this build"; exit 1; }
+
+          # The updater reads releases/latest, so only a version above the current latest may
+          # take its place; a re-run of an older tag publishes without moving it back.
+          current="$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName \
+            --jq .tagName 2> /dev/null || true)"
+          newest="$(printf '%s\n%s\n' "${current#v}" "${RELEASE_TAG#v}" | sort -V | tail -n 1)"
+          latest=--latest=false
+          if [ -z "${current}" ] || [ "${newest}" = "${RELEASE_TAG#v}" ]; then
+            latest=--latest
+          fi
+          gh release edit "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --draft=false "${latest}"

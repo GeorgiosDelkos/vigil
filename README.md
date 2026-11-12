@@ -185,12 +185,29 @@ More of the design:
   stopping halfway could leave a change half made; quitting during one stops it and records
   its outcome as unknown.
 - **Secrets stay put.** The NVD API key is stored only in the macOS Keychain.
+- **Verified updates.** An update installs only when its signature verifies with the public
+  key built into the app and names the version offered, and only when you click Restart to
+  update. The popover's web view cannot check for, download or install updates itself.
 - **Escaped output.** Agent text is escaped in reports, so it cannot forge Markdown or send
   terminal escape sequences.
 
 ## Getting started
 
-Vigil is built from source for now. A signed and notarized DMG is planned.
+### Install
+
+Download the `.dmg` from the [latest release](https://github.com/GeorgiosDelkos/vigil/releases/latest),
+open it and drag Vigil to Applications. The app is signed with a Developer ID and notarized by
+Apple, so it opens normally, and it runs on Apple Silicon and Intel Macs.
+
+An installed Vigil updates itself. It checks GitHub for a new release when it starts and every 12
+hours, downloads it in the background and checks its signature against the key built into the
+app. Then the popover shows **Update ready** and one notification says so; the update installs
+when you click **Restart to update**, never during a sweep or fix. Settings shows the version and
+when Vigil last checked.
+
+To build it yourself instead, read on. The binary built below, a debug build and `cargo tauri dev`
+never check for updates; only a release build running as an app bundle does (`cargo tauri build`
+makes one, and it offers the official releases like a downloaded Vigil).
 
 ### Requirements
 
@@ -383,13 +400,33 @@ dependencies change and daily. Tests use a fake agent on `PATH` to exercise swee
 and failures without a real one.
 See [`docs/spec.md`](docs/spec.md) for the full design.
 
+### Releasing
+
+The version is set once, in the root `Cargo.toml` (`[workspace.package] version`); every crate
+and the app take it from there.
+
+1. Bump `version` in `Cargo.toml`, run `cargo check` so `Cargo.lock` follows, and merge that
+   change to `main`.
+2. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+3. Approve the `release` environment's deployment in the Actions run.
+
+`release.yml` then checks that the tag is `v` plus that version, builds a universal app, signs
+it with the Developer ID, notarizes it and the `.dmg`, signs the updater package with the updater
+key, verifies all of it, and publishes the GitHub Release with the `.dmg`, the updater package
+(`Vigil_<version>_universal.app.tar.gz`), its `.sig` and `latest.json`. Installed apps find the new version within 12 hours. Running the
+workflow by hand (workflow_dispatch) is a dry run: the same build, signing and checks, with no
+release.
+
+The signing secrets live only in the `release` environment. A local `cargo tauri build` needs
+none: the updater artifacts are added only by `tauri.release.conf.json`, which the workflow
+passes.
+
 ## Status
 
 Vigil is under active development. It is complete enough for daily use on one Mac:
 sweeps, findings, dismissals, confirmed fixes and fix history all work across the three
 target types. Next on the list:
 
-- A signed and notarized DMG, which needs an Apple Developer account
 - Lockfiles not read yet: `pnpm-lock.yaml`, `yarn.lock`, `bun.lock`, `Pipfile.lock` and
   `go.sum`
 - Global npm packages under Node.js versions a version manager keeps, beyond the `npm` on

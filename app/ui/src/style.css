@@ -249,6 +249,13 @@ select:focus-visible {
 .banner .x {
   margin-left: auto;
 }
+/* Update ready: the button sits on the line's centre, not its text baseline. */
+.banner.update {
+  align-items: center;
+}
+.about-problem {
+  display: block;
+}
 
 /* Summary: its own lines sit at the headings' edge; its groups are cards like the others. */
 .summary {

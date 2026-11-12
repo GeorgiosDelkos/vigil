@@ -158,6 +158,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     config: "/Users/me/Library/Application Support/io.github.georgiosdelkos.vigil/config.toml",
     problem: null,
     disk: null,
+    update: { version: "0.1.0", checks: true, checked: null, problem: null, ready: null },
     ...changes,
   };
 }

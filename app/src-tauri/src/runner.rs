@@ -1,10 +1,10 @@
 //! Runs sweeps off the UI thread, one at a time, and on the configured schedule.
 //!
-//! [`Runner`] holds the one piece of shared state behind a single lock: the status, and when
-//! the app last started a sweep. [`start`] takes it to check and claim the sweeping state in
-//! one step, so two clicks, or a click and the schedule, cannot start two sweeps. The core's
-//! own lock on the sweeps folder still guards against a sweep from the CLI; that one surfaces
-//! as a failed sweep.
+//! [`Runner`] holds the one piece of shared state behind a single lock: the status, when the
+//! app last started a sweep, and the update state (`crate::update`). [`start`] takes it to
+//! check and claim the sweeping state in one step, so two clicks, or a click and the schedule,
+//! cannot start two sweeps. The core's own lock on the sweeps folder still guards against a
+//! sweep from the CLI; that one surfaces as a failed sweep.
 //!
 //! Each sweep or fix gets its own [`Cancel`]. The user can cancel a sweep from the popover
 //! ([`cancel_sweep`]); quitting ([`quit`]) cancels whatever runs and exits once it has ended,
@@ -59,6 +59,8 @@ use vigil_core::target_label;
 use vigil_core::target_names;
 
 use crate::tray;
+use crate::update::Ready;
+use crate::update::Updates;
 
 /// How often the schedule is checked. Arbitrary: a sweep is due every few hours, so a minute
 /// late is nothing, and a Mac that wakes after a missed sweep runs it within a minute.
@@ -93,6 +95,9 @@ struct Shared {
     cancel: Cancel,
     /// How far quitting has got.
     quit: Quit,
+    /// The last update check, and an update waiting for a restart. Under this lock so that
+    /// installing one is refused in the same step that sees whether a sweep or fix runs.
+    updates: Updates,
     /// The plan of the last confirmation shown, which Run fix or Fix all runs.
     previews: Previews<Previewed>,
 }
@@ -150,6 +155,11 @@ enum Quit {
     No,
     /// It is waiting for the sweep or fix to end; nothing new starts, and only this wait exits.
     Waiting,
+    /// An update is being installed ([`Runner::install_update`]): nothing new starts, no update
+    /// check runs, and an exit request waits, since the install may be between moving the old
+    /// app out and the new one in. A quit asked for meanwhile is dropped (accepted: the app
+    /// restarts in a moment, or the install fails and the user can quit again).
+    Installing,
     /// It may exit now.
     Ready,
 }
@@ -233,7 +243,7 @@ impl Status {
 fn must_wait(quit: Quit, status: &Status) -> bool {
     match quit {
         Quit::No => status.is_busy(),
-        Quit::Waiting => true,
+        Quit::Waiting | Quit::Installing => true,
         Quit::Ready => false,
     }
 }
@@ -248,6 +258,7 @@ impl Runner {
                 started: None,
                 cancel: Cancel::new(),
                 quit: Quit::No,
+                updates: Updates::default(),
                 previews: Previews::new(),
             }),
         }
@@ -307,6 +318,62 @@ impl Runner {
             Status::Fixed { run, .. } => Ok(run.log_tail().clone()),
             _ => Err("no fix's results are showing"),
         }
+    }
+
+    /// Reads or changes the update state under the lock. `f` must not block: every command
+    /// and the schedule wait on this lock.
+    pub(crate) fn updates<R>(&self, f: impl FnOnce(&mut Updates) -> R) -> R {
+        f(&mut self.lock().updates)
+    }
+
+    /// Whether an update check is due at `now`: never while an update installs or the app
+    /// quits, when the waiting update is out of [`Updates`] and a check would fetch it again.
+    pub(crate) fn update_due(&self, now: Timestamp) -> bool {
+        let shared = self.lock();
+        shared.quit == Quit::No && shared.updates.due(now)
+    }
+
+    /// Installs the waiting update ([`Ready::install`]), unless a sweep or fix runs or the app
+    /// is quitting. While it installs, outside the lock, nothing new starts, no check runs and
+    /// exits wait ([`Quit::Installing`]). Then the restart's exit may pass, or, when the install
+    /// fails or panics, the update waits again with why, and runs may start.
+    ///
+    /// # Errors
+    ///
+    /// Why it was refused, or why the install failed.
+    pub(crate) fn install_update(&self) -> Result<(), String> {
+        let ready = self.claim_restart()?;
+        // A panic would otherwise leave the runner installing for good: no run could start and
+        // every exit would wait.
+        let installed = panic::catch_unwind(AssertUnwindSafe(|| ready.install()))
+            .unwrap_or_else(|_| Err("the install stopped unexpectedly".to_owned()));
+        let mut shared = self.lock();
+        match installed {
+            Ok(()) => {
+                shared.quit = Quit::Ready;
+                Ok(())
+            }
+            Err(problem) => {
+                shared.quit = Quit::No;
+                shared.updates.put_back(ready, problem.clone());
+                Err(problem)
+            }
+        }
+    }
+
+    /// Takes the waiting update to install it, unless a sweep or fix runs or the app is
+    /// quitting, and marks it installing: one check and one write under one lock.
+    fn claim_restart(&self) -> Result<Ready, &'static str> {
+        let mut shared = self.lock();
+        if shared.quit != Quit::No {
+            return Err("the app is quitting");
+        }
+        if shared.status.is_busy() {
+            return Err("a sweep or fix is running; restart once it ends");
+        }
+        let ready = shared.updates.take_ready().ok_or("no update is ready")?;
+        shared.quit = Quit::Installing;
+        Ok(ready)
     }
 
     fn set(&self, status: Status) {
@@ -1029,6 +1096,72 @@ mod tests {
             runner.fix_log().unwrap().text,
             "checked sqlite",
             "the run's own log, kept in memory"
+        );
+    }
+
+    #[test]
+    fn an_update_never_installs_while_a_sweep_or_fix_runs() {
+        let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
+        runner.claim(fixing()).unwrap();
+        assert_eq!(
+            runner.claim_restart().unwrap_err(),
+            "a sweep or fix is running; restart once it ends"
+        );
+        runner.set(Status::Sweeping {
+            step: "starting".to_owned(),
+            current: None,
+            done: Vec::new(),
+            pending: Vec::new(),
+            thousandths: 0,
+            open_ended: false,
+            stopping: false,
+            started: Timestamp::UNIX_EPOCH,
+            step_started: Timestamp::UNIX_EPOCH,
+        });
+        assert_eq!(
+            runner.claim_restart().unwrap_err(),
+            "a sweep or fix is running; restart once it ends"
+        );
+
+        runner.set(Status::Idle);
+        assert_eq!(runner.claim_restart().unwrap_err(), "no update is ready");
+        assert_eq!(
+            runner.lock().quit,
+            Quit::No,
+            "a refused restart leaves the app running"
+        );
+        runner.claim(fixing()).expect("and runs still start");
+
+        runner.set(Status::Idle);
+        runner.lock().quit = Quit::Waiting;
+        assert_eq!(runner.claim_restart().unwrap_err(), "the app is quitting");
+    }
+
+    #[test]
+    fn while_an_update_installs_nothing_starts_no_check_runs_and_exits_wait() {
+        let runner = Runner::new(DataDir::new("/nowhere"), PathBuf::from("/nowhere"));
+        let now = Timestamp::UNIX_EPOCH;
+        assert!(runner.update_due(now), "no check has run yet");
+        runner.lock().quit = Quit::Installing;
+        assert!(
+            !runner.update_due(now),
+            "the taken update would be fetched again"
+        );
+        assert_eq!(runner.claim(fixing()).unwrap_err(), "the app is quitting");
+        assert_eq!(runner.claim_restart().unwrap_err(), "the app is quitting");
+        assert!(
+            must_wait(Quit::Installing, &Status::Idle),
+            "an exit could cut the install short"
+        );
+        runner.lock().quit = Quit::No;
+        assert_eq!(
+            runner.install_update(),
+            Err("no update is ready".to_owned())
+        );
+        assert_eq!(
+            runner.lock().quit,
+            Quit::No,
+            "a refused install changes nothing"
         );
     }
 
