@@ -92,7 +92,8 @@ pub enum Setting {
 /// # Errors
 ///
 /// Fails when the config cannot be read or is not TOML, when the change would make it invalid
-/// (the error lists every problem, and nothing is written), or when it cannot be written.
+/// (the error lists every problem, and nothing is written), when it is a symlink to a file that
+/// does not exist, or when it cannot be written.
 pub fn save_setting(
     data_dir: &DataDir,
     home: &Path,
@@ -340,23 +341,43 @@ fn lock(path: &Path) -> Result<fs::File, SaveSettingError> {
     Ok(file)
 }
 
-/// Writes `text` to a temporary name, syncs it, and renames it over `path`, so neither a
-/// reader nor a crash sees half a config.
+/// Writes `text` to a temporary name with the file's permissions, syncs it, renames it over
+/// `path` and syncs the folder, so neither a reader nor a crash sees half a config.
+///
+/// A `path` that is a symlink (into a dotfiles repository, say) is written through: the file it
+/// names is replaced and the link stays. A dangling link is refused rather than replaced by a
+/// regular file, which would cut the user's link without a word.
 fn write(path: &Path, text: &str) -> Result<(), SaveSettingError> {
+    let target = match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_symlink() => {
+            fs::canonicalize(path).map_err(|source| SaveSettingError::Link {
+                path: path.to_owned(),
+                source,
+            })?
+        }
+        _ => path.to_owned(),
+    };
     let write_err = |source| SaveSettingError::Write {
-        path: path.to_owned(),
+        path: target.clone(),
         source,
     };
-    // `lock` created the folder.
-    let dir = path.parent().expect("the config file has a folder");
+    // `lock` created the folder of `path`; a link's target is in a folder that exists.
+    let dir = target.parent().expect("the config file has a folder");
     // One name is enough: saves hold the lock from `save_setting` while writing it.
     let partial = dir.join(".config.toml.partial");
+    // None for a new file, which gets the default permissions.
+    let permissions = fs::metadata(&target).ok().map(|meta| meta.permissions());
     fs::File::create(&partial)
         .and_then(|mut file| {
+            if let Some(permissions) = permissions {
+                file.set_permissions(permissions)?;
+            }
             file.write_all(text.as_bytes())?;
             file.sync_data()
         })
-        .and_then(|()| fs::rename(&partial, path))
+        .and_then(|()| fs::rename(&partial, &target))
+        // The rename is durable only once the folder's entry is.
+        .and_then(|()| fs::File::open(dir)?.sync_all())
         .inspect_err(|_| drop(fs::remove_file(&partial)))
         .map_err(write_err)
 }
@@ -399,6 +420,18 @@ pub enum SaveSettingError {
     /// The change would make the config invalid; nothing was written.
     #[error(transparent)]
     Invalid(#[from] LoadConfigError),
+    /// The config is a symlink to a file that does not exist; nothing was written.
+    #[error(
+        "{} is a symlink to a file that cannot be found; point it at a config or remove it",
+        path.display()
+    )]
+    Link {
+        /// The link.
+        path: PathBuf,
+        /// Why its target cannot be found.
+        #[source]
+        source: io::Error,
+    },
     /// The config could not be written.
     #[error("cannot write {}", path.display())]
     Write {
@@ -753,5 +786,44 @@ mod tests {
         fs::write(data_dir.config_file(), "agent = ").unwrap();
         let err = save(&data_dir, Setting::Agent { agent: None }).unwrap_err();
         assert!(matches!(err, SaveSettingError::Edit { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn a_symlinked_config_is_written_through_with_its_permissions() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let dotfiles = tmp.path().join("dotfiles");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::create_dir_all(data_dir.config_file().parent().unwrap()).unwrap();
+        let real = dotfiles.join("vigil.toml");
+        fs::write(&real, "").unwrap();
+        fs::set_permissions(&real, fs::Permissions::from_mode(0o600)).unwrap();
+        std::os::unix::fs::symlink(&real, data_dir.config_file()).unwrap();
+
+        save(&data_dir, repo_added("o/r")).unwrap();
+
+        let link = fs::symlink_metadata(data_dir.config_file()).unwrap();
+        assert!(link.is_symlink(), "the link stays");
+        assert!(fs::read_to_string(&real).unwrap().contains("o/r"));
+        let mode = fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn a_dangling_symlink_is_refused_not_replaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let gone = tmp.path().join("gone.toml");
+        std::os::unix::fs::symlink(&gone, data_dir.config_file()).unwrap();
+
+        let err = save(&data_dir, repo_added("o/r")).unwrap_err();
+
+        assert!(matches!(err, SaveSettingError::Link { .. }), "{err:?}");
+        assert!(err.to_string().contains("point it at a config"), "{err}");
+        let link = fs::symlink_metadata(data_dir.config_file()).unwrap();
+        assert!(link.is_symlink(), "the link stays");
+        assert!(!gone.exists());
     }
 }
