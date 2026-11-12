@@ -2,7 +2,9 @@
 
 use std::fs;
 use std::io;
+use std::io::Read as _;
 use std::io::Write as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -144,6 +146,40 @@ pub(crate) fn replace_file(path: &Path, text: &str) -> io::Result<()> {
         // Best effort: the write's error is what matters, and a leftover partial file is
         // harmless, since readers open files by their own names.
         .inspect_err(|_| drop(fs::remove_file(&partial)))
+}
+
+/// Opens `path` for reading only when it is a regular file, not a link: every file an agent
+/// may have written is opened through this, the fix agent's while it runs (the activity and
+/// step polls) and after, and each agent's log once it exits. The fix agent has full access in
+/// its folder and can put a link or a FIFO in a file's place: a link shows nothing it could
+/// not have written, but opening a FIFO would block the reading thread for good, and the
+/// threads that read after the agent exits hold the sweeps lock.
+///
+/// The open itself refuses both, so a file swapped after the first check gains nothing:
+/// `O_NOFOLLOW` fails on a link, and `O_NONBLOCK` makes opening a FIFO return at once (POSIX
+/// `open`), after which the open file's own metadata is checked. The first check only gives a
+/// clear error for the common case.
+pub(crate) fn open_regular(path: &Path) -> io::Result<fs::File> {
+    let not_regular = || io::Error::new(io::ErrorKind::InvalidInput, "not a regular file");
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(not_regular());
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(not_regular());
+    }
+    Ok(file)
+}
+
+/// At most `limit` bytes from the start of `path`, a file an agent wrote, opened with
+/// [`open_regular`].
+pub(crate) fn read_capped(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    open_regular(path)?.take(limit).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 #[cfg(test)]

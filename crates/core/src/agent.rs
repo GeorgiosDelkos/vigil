@@ -33,6 +33,7 @@ use crate::cancel::Ended;
 use crate::config::ModelName;
 use crate::inventory::InventoryError;
 use crate::inventory::command;
+use crate::paths;
 
 /// The one line every agent is given; the real instructions are in the bundle's `PROMPT.md`.
 pub(crate) const PROMPT_LINE: &str =
@@ -65,6 +66,10 @@ fn opencode_sweep_config() -> String {
         commands.concat()
     )
 }
+
+/// How many bytes of an agent's log [`AgentKind::run`] reads to tell an agent that did not
+/// start: the watchdog's message is one line at the very start. Arbitrary, far above a line.
+const NOT_RUN_HEAD: u64 = 4096;
 
 /// Marks the lines of the login shell's answer, so nothing its startup files print is mistaken
 /// for the answer.
@@ -291,7 +296,10 @@ impl AgentKind {
             })?;
         match cancel::watch(child, cancel) {
             Ok(Ended::Exited(status)) => {
-                let head = fs::read(log).unwrap_or_default();
+                // Only the start, and only from a regular file: a fix agent has full access in
+                // its folder and could leave a FIFO here, whose open would block this thread,
+                // which holds the sweeps lock, for good. An unreadable log means the agent ran.
+                let head = paths::read_capped(log, NOT_RUN_HEAD).unwrap_or_default();
                 match cancel::not_run(status, &head) {
                     Some(reason) => Err(AgentError::Start {
                         agent: self,
@@ -739,5 +747,23 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, AgentError::Start { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn an_agent_that_leaves_a_fifo_for_its_log_does_not_hang_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let swap = script(
+            tmp.path(),
+            "swap",
+            "rm -f agent.log && /usr/bin/mkfifo agent.log",
+        );
+        let status = AgentKind::Claude
+            .run(
+                &AgentKind::Claude.fix_command(&located(&swap), tmp.path(), "P"),
+                &tmp.path().join("agent.log"),
+                &Cancel::new(),
+            )
+            .unwrap();
+        assert_eq!(status.code(), Some(0), "it ran, and the run returned");
     }
 }

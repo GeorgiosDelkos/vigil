@@ -424,7 +424,7 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
         yes,
         &format!(
             "Run this fix now with {}, with full access? [y/N]",
-            plan.agent()
+            plan.agent_and_model()
         ),
     )?;
     let (record, log) = run_fix(
@@ -520,7 +520,7 @@ fn fix_all(data_dir: &DataDir, config: &Config, target: &str, yes: bool) -> anyh
         &format!(
             "Run these {} fixes now with {}, with full access, in one run? [y/N]",
             plan.items().len(),
-            plan.agent()
+            plan.agent_and_model()
         ),
     )?;
     let labels = plan.labels();

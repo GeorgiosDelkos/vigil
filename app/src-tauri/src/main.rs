@@ -467,7 +467,7 @@ fn fix_preview(runner: State<'_, Runner>, key: String) -> Result<FixPreview, Str
         summary: plan.fix().summary.clone(),
         steps: plan.fix().steps.clone(),
         commands: plan.fix().commands.clone(),
-        agent: plan.agent().to_string(),
+        agent: plan.agent_and_model(),
         notes: plan.notes(),
     };
     shown.preview = runner.keep_preview(Previewed::One(plan));
@@ -532,7 +532,7 @@ fn fix_all_preview(runner: State<'_, Runner>, target: String) -> Result<FixAllPr
         notes: plan.notes(),
         destination: plan.destination().to_owned(),
         found: plan.found(),
-        agent: plan.agent().to_string(),
+        agent: plan.agent_and_model(),
         confirm: format!("Fix all {}", plan.items().len()),
         items: plan
             .items()
@@ -560,9 +560,8 @@ fn close_fix(app: AppHandle) {
     runner::close_fix(&app);
 }
 
-/// The end of the last fix's agent log, while its results show. Async, so reading the file
-/// never stalls the UI.
-#[tauri::command(async)]
+/// The end of the last fix's agent log, while its results show; the run kept it in memory.
+#[tauri::command]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"

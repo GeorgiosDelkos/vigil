@@ -1235,13 +1235,13 @@ describe("a finished fix", () => {
     expect(screen.getByText("Pull request: https://github.com/me/app/pull/7")).toBeTruthy();
   });
 
-  it("shows the log's end on Show log, and why when it cannot be read", async () => {
+  it("shows the log's end on Show log, and why when it cannot be shown", async () => {
     shown = { ...two(), status: fixRun() };
     let missing = false;
     answer({
       fix_log: () =>
         missing
-          ? Promise.reject("cannot read /fixes/x/agent.log: No such file or directory")
+          ? Promise.reject("no fix's results are showing")
           : {
               text: "reading fixes.json\nno newer sqlite release",
               note: "The last 64 KB of 196 KB.",
@@ -1262,9 +1262,7 @@ describe("a finished fix", () => {
 
     missing = true;
     fireEvent.click(screen.getByRole("button", { name: "Show log" }));
-    expect((await screen.findByRole("alert")).textContent).toBe(
-      "cannot read /fixes/x/agent.log: No such file or directory",
-    );
+    expect((await screen.findByRole("alert")).textContent).toBe("no fix's results are showing");
     expect(screen.queryByLabelText("Agent log")).toBeNull();
   });
 

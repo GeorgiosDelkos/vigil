@@ -122,7 +122,7 @@ pub(crate) fn render(data_dir: &DataDir, kind: Prompt, target: &str) -> Result<S
 }
 
 /// A prompt template as [`load`] found it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum Template {
     /// The current built-in prompt: the copy is missing, current, or a version some build
     /// shipped, which the next sweep's [`update`] replaces with the current one.
@@ -324,25 +324,27 @@ mod tests {
     fn load_tells_an_edited_copy_from_a_built_in_one() {
         let tmp = tempfile::tempdir().unwrap();
         let data = DataDir::new(tmp.path());
-        let built_in = Template::BuiltIn(Prompt::Fix.default_text());
-        assert_eq!(load(&data, Prompt::Fix).unwrap(), built_in, "no copy yet");
+        let built_in = |data: &DataDir| {
+            matches!(load(data, Prompt::Fix).unwrap(),
+                Template::BuiltIn(text) if text == Prompt::Fix.default_text())
+        };
+        assert!(built_in(&data), "no copy yet");
         assert!(!data.prompts_dir().exists(), "loading writes nothing");
 
         let old = versions_in_git(Prompt::Fix)
             .pop()
             .expect("fix.md has a first version");
         let (_tmp, data) = with_copy(Prompt::Fix, &old);
-        assert_eq!(
-            load(&data, Prompt::Fix).unwrap(),
-            built_in,
+        assert!(
+            built_in(&data),
             "an unedited old copy reads as the current built-in prompt"
         );
 
         let (_tmp, data) = with_copy(Prompt::Fix, b"Mine: {{target}}");
-        assert_eq!(
+        assert!(matches!(
             load(&data, Prompt::Fix).unwrap(),
-            Template::Edited("Mine: {{target}}".to_owned())
-        );
+            Template::Edited(text) if text == "Mine: {{target}}"
+        ));
         let (_tmp, data) = with_copy(Prompt::Fix, b"\xff");
         assert!(matches!(
             load(&data, Prompt::Fix),

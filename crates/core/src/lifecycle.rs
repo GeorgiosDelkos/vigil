@@ -892,7 +892,8 @@ pub enum StateError {
     /// Two targets' reports have the key, so which finding it names is unclear.
     #[error(
         "finding {key} is in the reports of two targets, {} and {}, so nothing was done; \
-         fix or dismiss it after the next sweep, or by hand",
+         fix or dismiss it after the next sweep of either target, or delete the older report \
+         if its target is gone",
         first.display(),
         second.display()
     )]

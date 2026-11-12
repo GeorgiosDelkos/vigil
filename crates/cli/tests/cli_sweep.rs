@@ -57,6 +57,7 @@ case "$FAKE_AGENT_MODE:$n" in
   push-main:*)
     echo 2222222222222222222222222222222222222222 > "$FAKE_AGENT_COUNTER.main"
     echo '{"outcome": "fixed", "summary": "pinned the action"}' > result.json ;;
+  no-pr:*) echo '{"outcome": "fixed", "summary": "pinned the action"}' > result.json ;;
   crash:*) exit 3 ;;
   hang:*|second-hangs:2) sleep 60 & echo $! > "$FAKE_AGENT_COUNTER.child"; wait ;;
   second-hangs:*) echo '{"findings": [], "issues": []}' > findings.json ;;
@@ -99,9 +100,10 @@ for last; do :; done
 refuse() { echo "{\"message\":\"$2\",\"status\":\"$1\"}"; exit 1; }
 case "$last" in
   repos/o/r) echo '{"default_branch":"main","private":false,"owner":{"type":"User"}}' ;;
-  repos/o/r/branches/main)
-    sha=$(cat "$FAKE_AGENT_COUNTER.main" 2>/dev/null || echo 0000000000000000000000000000000000000001)
-    echo "{\"commit\":{\"sha\":\"$sha\"}}" ;;
+  repos/o/r/git/ref/heads/main)
+    sha=0000000000000000000000000000000000000001
+    if [ -f "$FAKE_AGENT_COUNTER.main" ]; then sha=$(cat "$FAKE_AGENT_COUNTER.main"); fi
+    echo "{\"object\":{\"sha\":\"$sha\"}}" ;;
   repos/o/r/pulls/7)
     printf '{"state":"open","head":{"ref":"%s","repo":{"full_name":"o/r"}},' \
       "$(cat "$FAKE_AGENT_COUNTER.branch")"
@@ -810,6 +812,23 @@ fn an_agent_that_pushed_to_the_default_branch_did_not_fix_it() {
     let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
     assert!(history.contains(r#""outcome":"unknown""#), "{history}");
     assert!(history.contains(r#""pull_request":null"#), "{history}");
+    fs::remove_file(sandbox.path().join("counter.main")).unwrap();
+
+    // A change to files reported done without a pull request is not a fix either.
+    let no_pr = sandbox
+        .command("no-pr")
+        .args(["fix", &key, "--yes"])
+        .output()
+        .unwrap();
+    assert!(!no_pr.status.success());
+    assert!(
+        text(&no_pr.stdout).contains(
+            "unknown: the agent reported the fix done without a pull request, which a change to \
+             files needs; the agent reported fixed: pinned the action"
+        ),
+        "{}",
+        text(&no_pr.stdout)
+    );
 }
 
 #[test]

@@ -613,7 +613,8 @@ pub(crate) fn close_fix(app: &AppHandle) {
 ///
 /// # Errors
 ///
-/// Fails when no fix's results show, or when the log is missing or cannot be read.
+/// Fails when no fix's results show. The log is kept in memory: the run read it before it
+/// deleted its folder.
 pub(crate) fn fix_log(app: &AppHandle) -> Result<LogTail, &'static str> {
     app.state::<Runner>().fix_log()
 }
