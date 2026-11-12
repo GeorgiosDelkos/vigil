@@ -13,6 +13,10 @@ publish = false
 jiff = { version = "0.2.39", default-features = false, features = ["serde", "std"] }
 # derive: config, feed and cache types. std: `PathBuf` and `String` impls.
 serde = { version = "1.0.229", default-features = false, features = ["derive", "std"] }
+# Only the `O_NOFOLLOW`, `O_NONBLOCK` and `ELOOP` constants, for opening the agent's findings.json
+# and log without following a link or waiting on a FIFO. Already in the tree through
+# security-framework.
+libc = { version = "0.2.191", default-features = false }
 # raw_value: advisory records kept byte-for-byte as served, for the agent.
 serde_json = { version = "1.0.154", default-features = false, features = ["std", "raw_value"] }
 # Stores the NVD key in the Keychain without putting it on a command line. Already in the
