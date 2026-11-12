@@ -381,7 +381,8 @@ use ssh.
   path under `repos/<this repository>`; every other subcommand names the repository with
   `--repo` (or `gh repo edit <repo>`), as `gh` otherwise takes it from the folder it runs in.
   `cd` and `pushd`, and `git -C`, `--git-dir` and `--work-tree`, go only to a relative folder
-  with no `..`. Other programs and interpreters are not checked: `go get github.com/<module>`
+  with no `..`, and git takes no `-c` or `--config-env`, which can make it run a shell. Other
+  programs and interpreters are not checked: `go get github.com/<module>`
   names a module, not a repository to change, and a script or `python -c` reaching GitHub is
   the accepted risk of a full-access agent; the rule is defence in depth around what the user
   reads, not a sandbox. A fix it refuses wrongly (a package named `gh`, say) is for the user

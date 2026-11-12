@@ -83,10 +83,32 @@ pub(super) fn foreign_command(command: &str, repo: &str) -> Option<String> {
     if let Some(word) = words().find(|w| is_shell(w)) {
         return Some(format!("it runs {word}, whose input cannot be checked"));
     }
-    // `.` is `source` only where a command starts; elsewhere it is a folder (`git add .`).
+    // `.` is `source` only where a command starts, which is after any of the words that can
+    // lead one; elsewhere it is a folder (`git add .`).
+    let leads = |w: &String| {
+        w.contains('=')
+            || matches!(
+                w.as_str(),
+                "{" | "!"
+                    | "if"
+                    | "then"
+                    | "elif"
+                    | "else"
+                    | "do"
+                    | "while"
+                    | "until"
+                    | "time"
+                    | "command"
+                    | "builtin"
+                    | "exec"
+                    | "nohup"
+                    | "sudo"
+                    | "env"
+            )
+    };
     if parts
         .iter()
-        .any(|part| part.first().is_some_and(|w| w == "."))
+        .any(|part| part.iter().find(|w| !leads(w)).is_some_and(|w| w == "."))
     {
         return Some("it runs ., whose input cannot be checked".to_owned());
     }
@@ -118,6 +140,7 @@ fn expands(word: &str) -> bool {
 }
 
 /// Whether `word` runs a shell or makes one read more commands.
+///
 /// `xargs` and `parallel` run the words they read as a command, and `alias` makes a new name
 /// for one.
 fn is_shell(word: &str) -> bool {
@@ -189,6 +212,11 @@ fn outside_clone(target: &str) -> bool {
 /// `--work-tree` must name a folder inside it ([`outside_clone`]).
 fn foreign_git(args: &[String]) -> Option<String> {
     args.iter().enumerate().find_map(|(i, arg)| {
+        // Configuration on the command line can make git run a shell (`alias.x=!...`,
+        // `core.sshCommand`, `credential.helper=!...`), and a fix does not need it.
+        if matches!(arg.as_str(), "-c" | "--config-env") || arg.starts_with("--config-env=") {
+            return Some(format!("it runs git with {arg}, which can run a shell"));
+        }
         let value = match arg.as_str() {
             "-C" | "--git-dir" | "--work-tree" => args.get(i + 1).map_or("", String::as_str),
             _ => arg
@@ -597,6 +625,23 @@ mod tests {
         ("printf 'gh repo delete x/y' | . /dev/stdin", "it runs ."),
         ("alias g=gh", "it runs alias"),
         (
+            "printf 'gh repo delete x/y' | { . /dev/stdin; }",
+            "it runs .",
+        ),
+        (
+            "printf 'gh repo delete x/y' | command . /dev/stdin",
+            "it runs .",
+        ),
+        ("printf x | if . /dev/stdin; then :; fi", "it runs ."),
+        (
+            "git -c 'alias.x=!gh repo delete x/y' x",
+            "it runs git with -c",
+        ),
+        (
+            "git --config-env=core.pager=P log",
+            "it runs git with --config-env",
+        ),
+        (
             "gh api -X POST repos/o/r/transfer -f new_owner=x",
             "moves this one",
         ),
@@ -755,8 +800,8 @@ mod tests {
         fn no_prefix_hides_a_checked_program(
             prefix in proptest::collection::vec(
                 proptest::sample::select(vec![
-                    "sudo", "root", "env", "time", "nohup", "{", "!", "if", "then", "exec",
-                    "command", "nice", "5", "A=b", "git", "cd", "pushd", "curl",
+                    "sudo", "-u", "root", "env", "-i", "time", "nohup", "{", "!", "if", "then",
+                    "exec", "command", "nice", "-n", "5", "A=b", "git", "curl",
                 ]),
                 0..6,
             )
