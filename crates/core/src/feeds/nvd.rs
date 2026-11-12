@@ -31,6 +31,7 @@ use crate::config::History;
 use crate::feeds::Advisory;
 use crate::feeds::FeedError;
 use crate::feeds::Feeds;
+use crate::feeds::NvdCves;
 use crate::feeds::Source;
 use crate::feeds::cache_key;
 use crate::feeds::http::decode;
@@ -306,25 +307,40 @@ pub(super) fn fetch(
     feeds: &Feeds,
     product: &Product,
     history: History,
-) -> Result<Vec<Advisory>, FeedError> {
+) -> Result<NvdCves, FeedError> {
     let name = product.cache_name();
     let key = cache_key(&name)?;
     let mut cached: Option<ProductCache> = feeds.cache.read("nvd", key)?;
     let now = Timestamp::now();
+    let current = |cves| NvdCves {
+        advisories: advisories(cves, history),
+        stale: None,
+    };
     if let Some(fresh) = cached.take_if(|c| is_fresh(c.fetched_at, now)) {
-        return Ok(advisories(fresh.cves, history));
+        return Ok(current(fresh.cves));
     }
     if skip_cve_request(feeds, key, cached.as_ref(), now)? {
-        return Ok(Vec::new());
+        return Ok(current(BTreeMap::new()));
     }
     let window = cached
         .as_ref()
         .and_then(|c| delta_window(c.fetched_at, now));
-    let mut cves = match (cached, window) {
-        (Some(c), Some(_)) => c.cves,
-        _ => BTreeMap::new(),
+    // A delta adds to the cached CVEs; a full fetch starts afresh, so CVEs that no longer name
+    // the product go, and keeps a cache too old for a delta only to fall back on.
+    let (mut cves, fallback) = match (cached, window) {
+        (Some(c), Some(_)) => (c.cves, None),
+        (cached, _) => (BTreeMap::new(), cached.map(|c| c.cves)),
     };
-    let first_page_time = request_all(feeds, product, window, &mut cves)?;
+    let first_page_time = match request_all(feeds, product, window, &mut cves) {
+        Ok(time) => time,
+        // After a failed delta `cves` holds the cache and the pages that arrived, each newer than
+        // its cached copy. The cache is not written, so the next fetch asks for the same window.
+        Err(error) if window.is_some() => return Ok(stale(cves, history, error)),
+        Err(error) => match fallback {
+            Some(cves) => return Ok(stale(cves, history, error)),
+            None => return Err(error),
+        },
+    };
 
     // The next delta starts where this fetch's coverage ends. A delta covers up to `to` on
     // the local clock, but only up to NVD's present when it answered, so the earlier of the
@@ -334,7 +350,15 @@ pub(super) fn fetch(
     let fetched_at = window.map_or(first_page_time, |(_, to)| to.min(first_page_time));
     let entry = ProductCache { fetched_at, cves };
     feeds.cache.write("nvd", key, &entry)?;
-    Ok(advisories(entry.cves, history))
+    Ok(current(entry.cves))
+}
+
+/// The cached `cves`, used because asking NVD failed with `error`.
+fn stale(cves: BTreeMap<String, Box<RawValue>>, history: History, error: FeedError) -> NvdCves {
+    NvdCves {
+        advisories: advisories(cves, history),
+        stale: Some(error),
+    }
 }
 
 /// Requests every page of CVEs for `window` (the full history for `None`), adding them to
@@ -443,13 +467,7 @@ fn request_page(
         query.push(("lastModStartDate", from.as_str()));
         query.push(("lastModEndDate", to.as_str()));
     }
-    let headers: Vec<(&str, &str)> = match &feeds.nvd {
-        NvdAccess::Anonymous => vec![],
-        NvdAccess::ApiKey(key) => vec![("apiKey", key.as_str())],
-    };
-
-    pace(feeds);
-    let text = feeds.http.get(&url, &query, &headers)?;
+    let text = get(feeds, &url, &query)?;
     let page: Page = decode(&url, &text)?;
     // A page that does not start where asked (a proxy dropping the query, say), or an empty
     // page before the end, would otherwise pass for a complete sync and hide the rest.
@@ -508,12 +526,7 @@ pub(super) fn product_known(feeds: &Feeds, product: &Product) -> Result<bool, Fe
         ("cpeMatchString", matcher.as_str()),
         ("resultsPerPage", "1"),
     ];
-    let headers: Vec<(&str, &str)> = match &feeds.nvd {
-        NvdAccess::Anonymous => vec![],
-        NvdAccess::ApiKey(key) => vec![("apiKey", key.as_str())],
-    };
-    pace(feeds);
-    let text = feeds.http.get(&url, &query, &headers)?;
+    let text = get(feeds, &url, &query)?;
     let page: CpePage = decode(&url, &text)?;
     let check = ProductCheck {
         known: page.total_results > 0,
@@ -541,6 +554,30 @@ impl ProductCheck {
 #[serde(rename_all = "camelCase")]
 struct CpePage {
     total_results: usize,
+}
+
+/// GETs `url` with `query` from NVD, with the API key and paced, unless NVD refused a request
+/// through `feeds` before. A 403 or 429 is NVD's rate limit, and every request after one only
+/// extends it, so the rest of the sweep uses what is cached instead. A `Retry-After` header is
+/// not read: the sweep does not wait to ask again either way.
+fn get(feeds: &Feeds, url: &str, query: &[(&str, &str)]) -> Result<String, FeedError> {
+    if let Some(status) = feeds.nvd_refused.get() {
+        return Err(FeedError::NvdRefused { status });
+    }
+    let headers: Vec<(&str, &str)> = match &feeds.nvd {
+        NvdAccess::Anonymous => vec![],
+        NvdAccess::ApiKey(key) => vec![("apiKey", key.as_str())],
+    };
+    pace(feeds);
+    let result = feeds.http.get(url, query, &headers);
+    if let Err(FeedError::Status {
+        status: status @ (403 | 429),
+        ..
+    }) = &result
+    {
+        feeds.nvd_refused.set(Some(*status));
+    }
+    result
 }
 
 /// Sleeps until the pacing interval since the previous NVD request has passed.
@@ -750,7 +787,10 @@ mod tests {
         let ids = |advisories: &[Advisory]| -> Vec<String> {
             advisories.iter().map(|a| a.id.clone()).collect()
         };
-        let first = feeds.nvd(&product("openssl"), History::All).unwrap();
+        let first = feeds
+            .nvd(&product("openssl"), History::All)
+            .unwrap()
+            .advisories;
         assert_eq!(ids(&first), ["CVE-1", "CVE-2", "CVE-3"]);
         assert!(matches!(first[0].source, Source::Nvd));
 
@@ -776,7 +816,7 @@ mod tests {
 
         *round.lock().unwrap() = 1;
         let since = History::Since(Since::new(jiff::civil::date(2025, 1, 1)).unwrap());
-        let second = feeds.nvd(&product("openssl"), since).unwrap();
+        let second = feeds.nvd(&product("openssl"), since).unwrap().advisories;
         assert_eq!(ids(&second), ["CVE-2", "CVE-3"]);
         assert!(second[0].record.get().contains(r#""v":2"#));
 
@@ -823,7 +863,8 @@ mod tests {
 
         let advisories = feeds(&server, tmp.path(), NvdAccess::Anonymous)
             .nvd(&product("curl"), History::All)
-            .unwrap();
+            .unwrap()
+            .advisories;
         let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["CVE-9"]);
         let request = &server.requests()[0];
@@ -850,7 +891,8 @@ mod tests {
 
         let advisories = feeds(&server, tmp.path(), NvdAccess::Anonymous)
             .nvd(&product("curl"), History::All)
-            .unwrap();
+            .unwrap()
+            .advisories;
         let ids: Vec<_> = advisories.iter().map(|a| a.id.as_str()).collect();
         assert_eq!(ids, ["CVE-KEPT"]);
         assert_eq!(
@@ -895,6 +937,7 @@ mod tests {
             feeds
                 .nvd(&product("abseil"), History::All)
                 .unwrap()
+                .advisories
                 .is_empty()
         );
         assert_eq!(
@@ -918,7 +961,10 @@ mod tests {
         // A product with cached CVEs is asked whatever the dictionary said: the two are
         // different answers, and `history.since` may have hidden its CVEs.
         cached(&cache, "zlib", &["CVE-OLD"], days(3), false);
-        let kept = feeds.nvd(&product("zlib"), History::All).unwrap();
+        let kept = feeds
+            .nvd(&product("zlib"), History::All)
+            .unwrap()
+            .advisories;
         assert_eq!(server.requests().len(), 3);
         assert_eq!(kept.len(), 1, "the cached CVE is still returned");
 
@@ -994,7 +1040,10 @@ mod tests {
             .write("nvd", "curl", &at(SignedDuration::from_mins(90)))
             .unwrap();
         let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
-        let advisories = feeds.nvd(&product("curl"), History::All).unwrap();
+        let advisories = feeds
+            .nvd(&product("curl"), History::All)
+            .unwrap()
+            .advisories;
         assert_eq!(advisories.len(), 1);
         assert_eq!(server.requests().len(), 0, "fresh, so NVD is not asked");
 
@@ -1161,7 +1210,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let advisories = feeds(&server, tmp.path(), NvdAccess::Anonymous)
             .nvd(&product("zlib"), History::All)
-            .unwrap();
+            .unwrap()
+            .advisories;
         assert!(advisories.is_empty());
         assert!(tmp.path().join("nvd/zlib.json").exists());
     }
@@ -1185,6 +1235,108 @@ mod tests {
         assert!(!tmp.path().join("nvd/zlib.json").exists());
     }
 
+    #[test]
+    fn a_failed_request_falls_back_to_the_cache_and_leaves_it_as_it_was() {
+        let server = TestServer::start(|_: &Request| (503, "busy".to_owned()));
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(tmp.path().to_owned());
+        let feeds = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+        let ids = |cves: &NvdCves| {
+            cves.advisories
+                .iter()
+                .map(|a| a.id.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // A delta: the cached CVEs, marked stale, and the cache keeps its time.
+        cached(
+            &cache,
+            "curl",
+            &["CVE-1"],
+            SignedDuration::from_hours(3),
+            true,
+        );
+        let before: ProductCache = cache.read("nvd", "curl").unwrap().unwrap();
+        let delta = feeds.nvd(&product("curl"), History::All).unwrap();
+        assert_eq!(ids(&delta), ["CVE-1"]);
+        assert!(
+            matches!(delta.stale, Some(FeedError::Status { status: 503, .. })),
+            "{:?}",
+            delta.stale
+        );
+        let after: ProductCache = cache.read("nvd", "curl").unwrap().unwrap();
+        assert_eq!(
+            after.fetched_at, before.fetched_at,
+            "the next fetch asks again"
+        );
+
+        // A cache too old for a delta is still better than nothing.
+        cached(
+            &cache,
+            "zlib",
+            &["CVE-2"],
+            SignedDuration::from_hours(24 * 200),
+            true,
+        );
+        let full = feeds.nvd(&product("zlib"), History::All).unwrap();
+        assert_eq!(ids(&full), ["CVE-2"]);
+        assert!(full.stale.is_some());
+
+        // Nothing cached: the error.
+        let err = feeds.nvd(&product("openssl"), History::All).unwrap_err();
+        assert!(
+            matches!(err, FeedError::Status { status: 503, .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn after_a_rate_limit_nvd_is_not_asked_again() {
+        let server = TestServer::start(|_: &Request| (429, "slow down".to_owned()));
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = Cache::new(tmp.path().to_owned());
+        let nvd = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+
+        let first = nvd.nvd(&product("openssl"), History::All).unwrap_err();
+        assert!(
+            matches!(first, FeedError::Status { status: 429, .. }),
+            "{first:?}"
+        );
+        assert_eq!(server.requests().len(), 1);
+
+        let next = nvd.nvd(&product("zlib"), History::All).unwrap_err();
+        assert!(
+            matches!(next, FeedError::NvdRefused { status: 429 }),
+            "{next:?}"
+        );
+        cached(
+            &cache,
+            "curl",
+            &["CVE-1"],
+            SignedDuration::from_hours(3),
+            true,
+        );
+        let stale = nvd.nvd(&product("curl"), History::All).unwrap();
+        assert_eq!(stale.advisories.len(), 1, "what is cached is still used");
+        assert!(matches!(stale.stale, Some(FeedError::NvdRefused { .. })));
+        assert!(nvd.nvd_product_known(&product("git")).is_err());
+        assert_eq!(server.requests().len(), 1, "no request after the refusal");
+
+        // A 403, NVD's other answer to too many requests, stops it too; other errors do not.
+        for (status, stops) in [(403, true), (503, false), (404, false)] {
+            let server = TestServer::start(move |_: &Request| (status, String::new()));
+            let tmp = tempfile::tempdir().unwrap();
+            let nvd = feeds(&server, tmp.path(), NvdAccess::Anonymous);
+            assert!(nvd.nvd(&product("a"), History::All).is_err());
+            let second = nvd.nvd(&product("b"), History::All).unwrap_err();
+            assert_eq!(
+                matches!(second, FeedError::NvdRefused { .. }),
+                stops,
+                "{status}: {second:?}"
+            );
+            assert_eq!(server.requests().len(), if stops { 1 } else { 2 });
+        }
+    }
     #[test]
     fn pacing_spaces_requests() {
         let server =

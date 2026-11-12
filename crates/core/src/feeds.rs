@@ -77,6 +77,9 @@ pub struct Feeds {
     // NVD pacing: the minimum gap between requests, and when the last one was sent.
     nvd_interval: Duration,
     nvd_last: Cell<Option<Instant>>,
+    /// The status of NVD's first refusal (403 or 429, its rate limit) through this `Feeds`,
+    /// after which NVD is not asked again: one `Feeds` serves one sweep.
+    nvd_refused: Cell<Option<u16>>,
 }
 
 impl Feeds {
@@ -100,6 +103,7 @@ impl Feeds {
             nvd_interval: nvd_interval(&nvd),
             nvd,
             nvd_last: Cell::new(None),
+            nvd_refused: Cell::new(None),
         }
     }
 
@@ -108,12 +112,13 @@ impl Feeds {
     ///
     /// Sends a version only for queries that carry one (OS packages). Fetches only records that
     /// are new or changed since they were cached. A query matching more than 200 advisories
-    /// keeps only those in `kev` (none without the catalog) and is listed in
-    /// [`OsvAdvisories::crowded`]. OS advisories list their CVE as `upstream`, which is
+    /// keeps only those in `kev` and is listed in [`OsvAdvisories::crowded`]; without the
+    /// catalog it keeps them all. OS advisories list their CVE as `upstream`, which is
     /// returned among the aliases.
     ///
     /// A record that cannot be fetched (a network error, an unsafe id) is reported in
-    /// [`OsvAdvisories::failures`] and the rest are still returned.
+    /// [`OsvAdvisories::failures`] and the rest are still returned; one with a cached copy is
+    /// returned from the cache and reported in [`OsvAdvisories::stale`].
     ///
     /// # Errors
     ///
@@ -136,11 +141,16 @@ impl Feeds {
     /// found not to know in the last week, with nothing cached, returns no CVEs without a
     /// request.
     ///
+    /// When NVD cannot be asked (a network error, an answer that does not decode, or a refusal
+    /// earlier through this `Feeds`), the cached CVEs are returned with the reason in
+    /// [`NvdCves::stale`]. NVD answers 403 or 429 when its rate limit is exceeded, and is not
+    /// asked again through this `Feeds` after that; an API key raises the limit.
+    ///
     /// # Errors
     ///
-    /// Fails on the first network, decoding, or cache read or write error. NVD answers 403 when its
-    /// rate limit is exceeded; an API key raises the limit.
-    pub fn nvd(&self, product: &Product, history: History) -> Result<Vec<Advisory>, FeedError> {
+    /// Fails when NVD cannot be asked and nothing is cached for the product, and on a cache read
+    /// or write error.
+    pub fn nvd(&self, product: &Product, history: History) -> Result<NvdCves, FeedError> {
         nvd::fetch(self, product, history)
     }
 
@@ -152,7 +162,8 @@ impl Feeds {
     ///
     /// # Errors
     ///
-    /// Fails on a network, decoding or cache error.
+    /// Fails on a network, decoding or cache error, and after NVD refused a request through this
+    /// `Feeds`.
     pub(crate) fn nvd_product_known(&self, product: &Product) -> Result<bool, FeedError> {
         nvd::product_known(self, product)
     }
@@ -161,7 +172,9 @@ impl Feeds {
     ///
     /// # Errors
     ///
-    /// Fails on a network or decoding error.
+    /// Fails on a network or decoding error, and with [`FeedError::Unexpected`] for a catalog
+    /// that lacks its version, lists fewer than 1000 vulnerabilities or holds an id that is not
+    /// a CVE.
     pub fn kev(&self) -> Result<Kev, FeedError> {
         kev::fetch(self)
     }
@@ -172,10 +185,30 @@ impl Feeds {
 pub struct OsvAdvisories {
     /// Advisories in the history window, in id order.
     pub advisories: Vec<OsvAdvisory>,
-    /// One error per record that could not be fetched or cached.
-    pub failures: Vec<FeedError>,
+    /// The records that could not be fetched and had no cached copy, so they are missing.
+    pub failures: Vec<RecordFailure>,
+    /// The records that could not be fetched again and are among `advisories` as cached.
+    pub stale: Vec<RecordFailure>,
     /// Queries that matched so many advisories that only the known-exploited ones were kept.
     pub crowded: Vec<Crowded>,
+}
+
+/// An OSV record that could not be fetched.
+#[derive(Debug)]
+pub struct RecordFailure {
+    /// The advisory's id.
+    pub id: String,
+    /// Why.
+    pub error: FeedError,
+}
+
+/// The result of [`Feeds::nvd`]: one product's CVEs.
+#[derive(Debug)]
+pub struct NvdCves {
+    /// The CVEs in the history window, in id order.
+    pub advisories: Vec<Advisory>,
+    /// Why NVD could not be asked, when `advisories` are the CVEs cached by an earlier fetch.
+    pub stale: Option<FeedError>,
 }
 
 /// One OSV lookup: a package, and the installed version for packages whose ecosystem is
@@ -353,6 +386,16 @@ pub enum FeedError {
         /// The underlying error.
         #[source]
         source: io::Error,
+    },
+    /// NVD refused an earlier request through this [`Feeds`] with its rate limit, so it was not
+    /// asked again.
+    #[error(
+        "NVD refused an earlier request ({status}, its rate limit), so it was not asked again \
+         in this sweep; an NVD API key raises the limit"
+    )]
+    NvdRefused {
+        /// The status of the refusal, 403 or 429.
+        status: u16,
     },
     /// A source returned an id that cannot be a cache file name.
     #[error("refusing advisory or product id {id:?}: not a safe file name")]

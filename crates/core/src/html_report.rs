@@ -41,7 +41,7 @@ use crate::popover::popover_view;
 ///
 /// Fails when [`latest`] cannot read the state, or when the file cannot be written.
 pub fn write_html_report(data_dir: &DataDir, config: &Config) -> Result<PathBuf, StateError> {
-    let html = render(latest(data_dir, config)?, Timestamp::now());
+    let html = render(latest(data_dir, config), Timestamp::now());
     let path = data_dir.report_html_file();
     let write_err = |source| StateError::Write {
         path: path.clone(),
@@ -78,6 +78,7 @@ fn render(latest: Vec<Latest>, now: Timestamp) -> String {
     );
     out.push_str(&head(&view, components, now));
     out.push_str(&numbers(&view));
+    out.push_str(&warning(&view));
     out.push_str(&exploited_callout(&view));
     out.push_str(&findings(&view));
     out.push_str(&targets_table(&view));
@@ -179,6 +180,16 @@ fn exploited_callout(view: &PopoverView) -> String {
     )
 }
 
+/// What the targets with a warning could not check or read; nothing when none has one.
+fn warning(view: &PopoverView) -> String {
+    view.warning.as_deref().map_or_else(String::new, |w| {
+        format!(
+            "<section class=\"rep-warn\"><p><b>Not fully checked.</b> {}</p></section>\n",
+            esc(w)
+        )
+    })
+}
+
 /// "Needs you", then "Lower"; or one line saying nothing is open.
 fn findings(view: &PopoverView) -> String {
     if view.items.is_empty() {
@@ -186,6 +197,9 @@ fn findings(view: &PopoverView) -> String {
         let text = match (view.last_swept, view.reported.is_empty(), unswept) {
             (None, _, _) => {
                 "No target has a sweep with a verdict yet, so nothing is known.".to_owned()
+            }
+            (Some(_), true, 0) if view.warning.is_some() => {
+                "Nothing is open in what was checked; see above for what was not.".to_owned()
             }
             (Some(_), true, 0) => "Nothing is open. Every target's newest sweep found nothing \
                                    affected or risky."
@@ -710,6 +724,8 @@ code { font-family: var(--font); }
   box-shadow: 0 0 14px -2px rgba(255,77,109,.8); }
 .rep-clear p { border-radius: 14px; padding: 16px 20px; color: #c9f5dc;
   background: rgba(79,209,139,.08); box-shadow: inset 0 0 0 1px rgba(79,209,139,.35); }
+.rep-warn p { border-radius: 14px; padding: 16px 20px; color: #f8dc8f;
+  background: rgba(245,192,68,.08); box-shadow: inset 0 0 0 1px rgba(245,192,68,.35); }
 h2 { margin: 0 0 12px; font: 600 13px var(--font); letter-spacing: .1em; text-transform: uppercase;
   color: #7f88a3; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -840,11 +856,30 @@ mod tests {
             open,
             fixed: Vec::new(),
             dismissed: 0,
+            unchecked: crate::Unchecked::default(),
+            problem: None,
         }
     }
 
     fn page(latest: Vec<Latest>) -> String {
         render(latest, at("2026-11-09T14:00:00Z"))
+    }
+
+    #[test]
+    fn a_target_not_fully_checked_is_no_clean_result() {
+        let clean = page(vec![mac(Vec::new())]);
+        assert!(clean.contains("Every target's newest sweep found nothing"));
+        assert!(!clean.contains("class=\"rep-warn\""));
+
+        let mut degraded = mac(Vec::new());
+        degraded.unchecked.osv = Some(crate::OsvUnchecked::All);
+        let html = page(vec![degraded]);
+        assert!(
+            html.contains("<b>Not fully checked.</b> This Mac: OSV not checked"),
+            "{html}"
+        );
+        assert!(html.contains("Nothing is open in what was checked"));
+        assert!(!html.contains("Every target's newest sweep found nothing"));
     }
 
     #[test]

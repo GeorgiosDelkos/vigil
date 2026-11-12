@@ -179,6 +179,7 @@ fn plan_finding(data_dir: &DataDir, key: FindingKey) -> Result<Planned, FixError
     let entry = report
         .findings
         .into_iter()
+        .chain(report.carried)
         .chain(report.issues)
         .find(|e| e["key"] == key.to_string())
         .ok_or(StateError::UnknownKey { key })?;
@@ -248,6 +249,9 @@ struct Saved {
     started: Timestamp,
     target: String,
     findings: Vec<Value>,
+    /// Findings carried over from an earlier sweep, open until a sweep checks them again.
+    #[serde(default)]
+    carried: Vec<Value>,
     issues: Vec<Value>,
 }
 

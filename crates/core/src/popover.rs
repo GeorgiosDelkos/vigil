@@ -75,8 +75,12 @@ pub struct PopoverView {
     /// headline already says "Not swept yet", so the line under it does not repeat it. None
     /// once a sweep time is known, when the line says how long ago that was.
     pub first_sweep_hint: Option<String>,
-    /// Whether a sweep ran, nothing is open, and no reported fix waits for the next sweep.
+    /// Whether a sweep ran, nothing is open, no reported fix waits for the next sweep, and no
+    /// target has a [`TargetLine::warning`].
     pub all_clear: bool,
+    /// One line naming each target with a [`TargetLine::warning`], and the warning: "Not fully
+    /// checked: Mac (NVD for 3 products)". `None` when no target has one.
+    pub warning: Option<String>,
     /// How many targets there are: "1 target", "3 targets".
     pub target_count: String,
     /// One line per target, in sweep order.
@@ -262,6 +266,10 @@ pub struct TargetLine {
     /// The label of its Fix all button, "Fix all 3", when [`fix_all_items`] takes two or more
     /// of its items; `None` hides the button, as one item already has its own Fix.
     pub fix_all: Option<String>,
+    /// Why what it shows may be incomplete: the sources that failed in its newest sweep
+    /// ("NVD for 3 products not checked"), or what of its state could not be read. `None` when
+    /// neither.
+    pub warning: Option<String>,
 }
 
 /// What a target is.
@@ -303,6 +311,14 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
     let needs_you = all.iter().filter(|item| item.needs_you).count();
     // One test for both fields, so the centre's number and the tab it opens cannot disagree.
     let only_reported = all.is_empty() && !reported.is_empty();
+    let warnings: Vec<String> = targets
+        .iter()
+        .filter_map(|t| t.warning.as_ref().map(|w| format!("{}: {w}", t.label)))
+        .collect();
+    let warning = (!warnings.is_empty()).then(|| warnings.join("; "));
+    // A failed source is no all-clear: what it would have found is unknown (decided
+    // 2026-11-12, after a sweep with OSV offline read as clear).
+    let clear = all.is_empty() && reported.is_empty() && last_swept.is_some();
     PopoverView {
         list_tab: if only_reported {
             ListTab::Fixed
@@ -316,8 +332,13 @@ pub fn popover_view(latest: Vec<Latest>) -> PopoverView {
         needs_you,
         exploited: all.iter().filter(|item| item.known_exploited).count(),
         counts: Counts::of(&all),
-        headline: headline(needs_you, all.len(), reported.len(), last_swept),
-        all_clear: all.is_empty() && reported.is_empty() && last_swept.is_some(),
+        headline: if clear && warning.is_some() {
+            "Not fully checked".to_owned()
+        } else {
+            headline(needs_you, all.len(), reported.len(), last_swept)
+        },
+        all_clear: clear && warning.is_none(),
+        warning,
         first_sweep_hint: last_swept
             .is_none()
             .then(|| "Sweep checks your targets against the newest advisories.".to_owned()),
@@ -524,7 +545,23 @@ fn target_line(latest: &Latest, items: &Items) -> TargetLine {
             0 | 1 => None,
             n => Some(format!("Fix all {n}")),
         },
+        warning: warning(latest),
     }
+}
+
+/// Why what `latest` shows may be incomplete, in one line: "NVD for 3 products not checked",
+/// then whatever could not be read.
+fn warning(latest: &Latest) -> Option<String> {
+    let unchecked = latest
+        .unchecked
+        .describe()
+        .map(|s| format!("{s} not checked"));
+    let parts: Vec<&str> = unchecked
+        .as_deref()
+        .into_iter()
+        .chain(latest.problem.as_deref())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 /// The open items of `target` that Fix all takes, in the order `open` ranks them: those whose
@@ -619,6 +656,8 @@ mod tests {
             open,
             fixed: Vec::new(),
             dismissed,
+            unchecked: crate::Unchecked::default(),
+            problem: None,
         }
     }
 
@@ -1264,6 +1303,54 @@ mod tests {
         assert!(matches!(open.list_tab, ListTab::Needs));
         assert!(matches!(popover_view(Vec::new()).list_tab, ListTab::Needs));
         assert!(swept.to_confirm.is_none(), "all clear");
+    }
+
+    #[test]
+    fn a_target_not_fully_checked_is_never_all_clear_and_says_why() {
+        let mut mac = target("mac", Some(1), Vec::new(), 0);
+        mac.unchecked = crate::Unchecked {
+            kev: true,
+            nvd: ["curl".to_owned()].into(),
+            ..crate::Unchecked::default()
+        };
+        let mut repo = target("github:o/web", Some(1), Vec::new(), 0);
+        repo.problem = Some("cannot read dismissals.json".to_owned());
+        let clean = target("server:db", Some(1), Vec::new(), 0);
+        let view = popover_view(vec![mac, repo, clean]);
+        assert!(!view.all_clear);
+        assert_eq!(view.headline, "Not fully checked");
+        assert_eq!(
+            view.targets[0].warning.as_deref(),
+            Some("CISA KEV, NVD for 1 product not checked")
+        );
+        assert_eq!(
+            view.targets[1].warning.as_deref(),
+            Some("cannot read dismissals.json")
+        );
+        assert_eq!(view.targets[2].warning, None);
+        assert_eq!(
+            view.warning.as_deref(),
+            Some(
+                "This Mac: CISA KEV, NVD for 1 product not checked; o/web: cannot read dismissals.json"
+            )
+        );
+
+        // With something open the headline counts it; the warning stays.
+        let mut open_mac = target(
+            "mac",
+            Some(1),
+            vec![open(1, Severity::High, false, None)],
+            0,
+        );
+        open_mac.unchecked.kev = true;
+        let view = popover_view(vec![open_mac]);
+        assert_eq!(view.headline, "1 finding needs you");
+        assert_eq!(
+            view.worst(),
+            Some(Severity::High),
+            "a failure hides nothing"
+        );
+        assert!(view.warning.is_some());
     }
 
     #[test]
