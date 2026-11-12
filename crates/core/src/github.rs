@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 use serde_json::Value;
 use serde_json::json;
 
+use crate::cancel::Cancel;
 use crate::config::RepoSlug;
 use crate::feeds::cache_key;
 use crate::inventory::Component;
@@ -312,6 +313,9 @@ pub(crate) enum GitHubError {
 
 /// Collects `repo` with `gh`, the program to run.
 ///
+/// Not cancellable: the sweep checks its cancel before each repository, and each `gh` call is
+/// bounded by the command time limit.
+///
 /// # Errors
 ///
 /// Fails when `gh` is not installed or the repository itself cannot be read; every later part
@@ -486,7 +490,7 @@ fn api(gh: &str, path: &str, paging: Paging) -> Result<Answer, GitHubError> {
         args.extend(["--paginate", "--slurp"]);
     }
     args.push(path);
-    let output = command::run_any_status(gh, &args)?.ok_or(GitHubError::NoGh)?;
+    let output = command::run_any_status(gh, &args, &Cancel::new())?.ok_or(GitHubError::NoGh)?;
     if output.success {
         if output.stdout.trim().is_empty() {
             return Ok(Answer::Ok(json!({ "status": 204 })));
@@ -546,7 +550,7 @@ fn page_items(page: Value) -> Vec<Value> {
 /// Fetches a file's raw text through the contents API.
 fn raw(gh: &str, path: &str) -> Result<String, GitHubError> {
     let args = ["api", "-H", "Accept: application/vnd.github.raw", path];
-    match command::run(gh, &args)? {
+    match command::run(gh, &args, &Cancel::new())? {
         Some(text) => Ok(text),
         None => Err(GitHubError::NoGh),
     }

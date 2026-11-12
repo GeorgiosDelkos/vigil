@@ -19,6 +19,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::agent::AgentKind;
+use crate::cancel::Cancel;
 use crate::config::ModelName;
 use crate::inventory::command;
 
@@ -280,7 +281,7 @@ fn login_shell(shell: &str) -> Option<Answer> {
          \"$b\" \"$(command -v \"$b\")\"; done; printf '%s\\n' {END_MARK}",
         names.join(" ")
     );
-    let output = command::run_any_status(shell, &["-lc", &script]).ok()??;
+    let output = command::run_any_status(shell, &["-lc", &script], &Cancel::new()).ok()??;
     parse_answer(&output.stdout)
 }
 
@@ -308,7 +309,7 @@ fn parse_answer(stdout: &str) -> Option<Answer> {
 
 fn gh_login(gh: &Path) -> Option<String> {
     let gh = gh.to_str()?;
-    let login = command::run(gh, &["api", "user", "--jq", ".login"]).ok()??;
+    let login = command::run(gh, &["api", "user", "--jq", ".login"], &Cancel::new()).ok()??;
     plain_login(&login)
 }
 
@@ -329,7 +330,7 @@ fn gh_repos(gh: &Path) -> Vec<RepoInfo> {
     };
     let fields = "nameWithOwner,isPrivate";
     let args = ["repo", "list", "--limit", REPO_LIMIT, "--json", fields];
-    command::run(gh, &args)
+    command::run(gh, &args, &Cancel::new())
         .ok()
         .flatten()
         .and_then(|text| serde_json::from_str(&text).ok())

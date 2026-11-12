@@ -303,8 +303,9 @@ pub struct ReportIssue {
 /// paced, so the first sweep of a Mac with a hundred Homebrew formulae takes over ten minutes
 /// without an API key), and the agent, which has no time limit. Calls `progress` as it goes.
 ///
-/// Stops when `cancel` is set: between targets, between NVD requests, and while the agent runs
-/// (stopping it and everything it started). The targets already swept keep their reports; the
+/// Stops when `cancel` is set: between targets, between NVD requests, while the Mac inventory
+/// runs a command or walks the project folders, and while the agent runs (stopping it and
+/// everything it started). The targets already swept keep their reports; the
 /// folder of the one it stopped in is removed.
 ///
 /// # Errors
@@ -394,7 +395,9 @@ pub fn sweep(
         if wanted("mac") {
             progress(Progress::Target { target: "mac" });
             progress(Progress::Inventory);
-            let mac = collect_mac(&config.project_dirs);
+            let mac = collect_mac(&config.project_dirs, cancel);
+            // A cancel stops the inventory partway; what it collected is no report.
+            cancel.check()?;
             reports.push(shared.sweep_target(&dir, mac, progress)?);
         }
         for repo in config.repos.iter().filter(|r| wanted(&repo_target(r))) {
@@ -555,8 +558,8 @@ struct Collected {
 }
 
 /// This Mac's inventory as a target.
-fn collect_mac(project_dirs: &[PathBuf]) -> Collected {
-    let inventory = Inventory::collect_mac(project_dirs);
+fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Collected {
+    let inventory = Inventory::collect_mac(project_dirs, cancel);
     let mut problems: Vec<String> = inventory.problems.iter().map(error_chain).collect();
     if !inventory.not_installed.is_empty() {
         let tools = inventory.not_installed.join(", ");

@@ -1,6 +1,7 @@
 //! Runs a listing command and returns its stdout.
 //!
-//! Commands run from `/` with stdin closed and a time limit. From `/`, no project file in
+//! Commands run from `/` with stdin closed and a time limit, and stop when the caller's
+//! [`Cancel`] is set. From `/`, no project file in
 //! the caller's folder (`rust-toolchain.toml`, `.nvmrc`, `.python-version`) changes which tool
 //! version answers, and rustup cannot decide to install a toolchain a project pins. Closed
 //! stdin and the time limit keep a tool that prompts or hangs from stopping the sweep.
@@ -33,6 +34,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::cancel;
+use crate::cancel::Cancel;
 use crate::inventory::InventoryError;
 
 /// How much of a failing command's stderr goes into the error, in characters. Arbitrary.
@@ -64,9 +66,13 @@ pub(crate) struct Output {
 }
 
 /// Runs `program` and returns stdout, or `None` when it is not installed. A non-zero exit is
-/// an error.
-pub(crate) fn run(program: &str, args: &[&str]) -> Result<Option<String>, InventoryError> {
-    let Some(output) = run_any_status(program, args)? else {
+/// an error, and so is a `cancel` that stops it.
+pub(crate) fn run(
+    program: &str,
+    args: &[&str],
+    cancel: &Cancel,
+) -> Result<Option<String>, InventoryError> {
+    let Some(output) = run_any_status(program, args, cancel)? else {
         return Ok(None);
     };
     if output.success {
@@ -80,12 +86,14 @@ pub(crate) fn run(program: &str, args: &[&str]) -> Result<Option<String>, Invent
 }
 
 /// Runs `program` and returns its output whatever the exit status, or `None` when it is not
-/// installed. For tools that print a complete answer and still exit non-zero.
+/// installed. For tools that print a complete answer and still exit non-zero. A `cancel` that
+/// stops it is an error.
 pub(crate) fn run_any_status(
     program: &str,
     args: &[&str],
+    cancel: &Cancel,
 ) -> Result<Option<Output>, InventoryError> {
-    let Some(raw) = run_raw(program, args, b"", TIMEOUT)? else {
+    let Some(raw) = run_raw(program, args, b"", TIMEOUT, cancel)? else {
         return Ok(None);
     };
     let stdout =
@@ -103,13 +111,16 @@ pub(crate) fn run_any_status(
 ///
 /// Stdout is decoded lossily: the caller reads output that mixes many files (a server's
 /// inventory), where one file's bad byte must not discard the rest.
+///
+/// Not cancellable: its one caller, a server's collection, is one command bounded by
+/// `timeout`, and the sweep checks its cancel before it.
 pub(crate) fn run_with_input(
     program: &str,
     args: &[&str],
     input: &[u8],
     timeout: Duration,
 ) -> Result<Option<Output>, InventoryError> {
-    let Some(raw) = run_raw(program, args, input, timeout)? else {
+    let Some(raw) = run_raw(program, args, input, timeout, &Cancel::new())? else {
         return Ok(None);
     };
     Ok(Some(Output {
@@ -149,14 +160,19 @@ fn search_path() -> Option<OsString> {
 }
 
 /// Runs `program` with `input` on stdin, which is closed once it is written (at once when
-/// `input` is empty).
+/// `input` is empty). Does not start it once `cancel` is set, and stops it when `cancel` is set
+/// while it runs.
 fn run_raw(
     program: &str,
     args: &[&str],
     input: &[u8],
     timeout: Duration,
+    cancel: &Cancel,
 ) -> Result<Option<RawOutput>, InventoryError> {
     let command = command_line(program, args);
+    if cancel.is_cancelled() {
+        return Err(InventoryError::Cancelled { what: command });
+    }
     // The watchdog shell always starts, so a program that is nowhere on PATH is found out
     // here: it is "not installed". A path to a file that cannot run is installed, and broken.
     if which(program).is_none() {
@@ -193,7 +209,7 @@ fn run_raw(
         let input = input.to_vec();
         thread::spawn(move || drop(stdin.write_all(&input)));
     }
-    let (status, stdout, stderr) = wait(child, &command, timeout)?;
+    let (status, stdout, stderr) = wait(child, &command, timeout, cancel)?;
     if let Some(reason) = cancel::not_run(status, &stderr) {
         let source = io::Error::other(reason);
         return Err(InventoryError::Spawn { command, source });
@@ -212,12 +228,14 @@ fn run_raw(
 }
 
 /// Waits for `child` and its output up to `timeout`, reading stdout and stderr on their own
-/// threads so a full pipe cannot stall it. A tool still running at the deadline, or a helper
-/// it left behind that keeps its output open, is stopped with its whole process group.
+/// threads so a full pipe cannot stall it. A tool still running at the deadline or when
+/// `cancel` is set, or a helper it left behind that keeps its output open, is stopped with its
+/// whole process group.
 fn wait(
     mut child: Child,
     command: &str,
     timeout: Duration,
+    cancel: &Cancel,
 ) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), InventoryError> {
     // Each reader sends its result once the pipe closes. The channel holds that one message, so
     // the send never blocks. A reader whose pipe is still held by a helper that left the process
@@ -253,7 +271,7 @@ fn wait(
             Ok(polled) => polled,
             Err(source) => {
                 // Stopped first, so a tool that cannot be waited for does not run on.
-                drop(stop(&mut child, command, String::new()));
+                stop(&mut child);
                 return Err(InventoryError::Spawn {
                     command: command.to_owned(),
                     source,
@@ -263,17 +281,24 @@ fn wait(
         if let Some(status) = polled {
             break status;
         }
+        if cancel.is_cancelled() {
+            stop(&mut child);
+            let command = command.to_owned();
+            return Err(InventoryError::Cancelled { what: command });
+        }
         if Instant::now() >= deadline {
+            stop(&mut child);
             let detail = format!("still running after {timeout:?}; stopped");
-            return Err(stop(&mut child, command, detail));
+            return Err(failed(command, detail));
         }
         thread::sleep(POLL);
     };
     let left = || deadline.saturating_duration_since(Instant::now());
     let (Ok(stdout), Ok(stderr)) = (stdout.recv_timeout(left()), stderr.recv_timeout(left()))
     else {
+        stop(&mut child);
         let detail = "exited, but something it started kept its output open; stopped";
-        return Err(stop(&mut child, command, detail.to_owned()));
+        return Err(failed(command, detail.to_owned()));
     };
     // A failed read means the output may be cut short, which would parse as a shorter list.
     let read_err = |source| InventoryError::Spawn {
@@ -283,7 +308,7 @@ fn wait(
     Ok((status, stdout.map_err(read_err)?, stderr.map_err(read_err)?))
 }
 
-/// Stops `child` and everything in its process group, and returns the error to report.
+/// Stops `child` and everything in its process group.
 ///
 /// The group is killed with `kill`, because sending a signal to a group needs `libc` and an
 /// `unsafe` call, and this crate has neither. Every step is best effort: the command is
@@ -296,7 +321,7 @@ fn wait(
 /// the group holds the output; a new group could take the id in that time and be killed.
 /// Accepted: it takes a tool that escapes its own group, and an id reused within a minute is
 /// rare.
-fn stop(child: &mut Child, command: &str, detail: String) -> InventoryError {
+fn stop(child: &mut Child) {
     let group = format!("-{}", child.id());
     let kill = Command::new("/bin/kill")
         .args(["-KILL", &group])
@@ -307,6 +332,9 @@ fn stop(child: &mut Child, command: &str, detail: String) -> InventoryError {
     drop(kill);
     drop(child.kill());
     drop(child.wait());
+}
+
+fn failed(command: &str, detail: String) -> InventoryError {
     InventoryError::Command {
         command: command.to_owned(),
         detail,
@@ -377,7 +405,7 @@ mod tests {
     fn input_reaches_stdin_and_stdout_is_decoded_lossily() {
         let output = run_with_input("sh", &["-s"], b"printf 'a\\377b'", Duration::from_secs(5));
         assert_eq!(output.unwrap().unwrap().stdout, "a\u{fffd}b");
-        let strict = run_any_status("printf", &["a\\377b"]);
+        let strict = run_any_status("printf", &["a\\377b"], &Cancel::new());
         assert!(
             matches!(strict, Err(InventoryError::Parse { .. })),
             "{strict:?}"
@@ -386,23 +414,36 @@ mod tests {
 
     #[test]
     fn returns_stdout() {
-        assert_eq!(run("echo", &["a", "b"]).unwrap().as_deref(), Some("a b\n"));
+        assert_eq!(
+            run("echo", &["a", "b"], &Cancel::new()).unwrap().as_deref(),
+            Some("a b\n")
+        );
     }
 
     #[test]
     fn missing_program_is_none() {
-        assert!(run("vigil-no-such-tool", &[]).unwrap().is_none());
+        assert!(
+            run("vigil-no-such-tool", &[], &Cancel::new())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn runs_from_root_with_stdin_closed() {
-        assert_eq!(run("pwd", &[]).unwrap().as_deref(), Some("/\n"));
-        assert_eq!(run("cat", &[]).unwrap().as_deref(), Some(""));
+        assert_eq!(
+            run("pwd", &[], &Cancel::new()).unwrap().as_deref(),
+            Some("/\n")
+        );
+        assert_eq!(
+            run("cat", &[], &Cancel::new()).unwrap().as_deref(),
+            Some("")
+        );
     }
 
     #[test]
     fn failure_names_the_command_and_stderr() {
-        let err = run("sh", &["-c", "echo boom >&2; exit 3"]).unwrap_err();
+        let err = run("sh", &["-c", "echo boom >&2; exit 3"], &Cancel::new()).unwrap_err();
         let message = err.to_string();
         assert!(
             message.contains("`sh -c echo boom >&2; exit 3` failed"),
@@ -413,9 +454,13 @@ mod tests {
 
     #[test]
     fn any_status_keeps_stdout_of_a_failure() {
-        let output = run_any_status("sh", &["-c", "echo '{}'; echo bad >&2; exit 1"])
-            .unwrap()
-            .unwrap();
+        let output = run_any_status(
+            "sh",
+            &["-c", "echo '{}'; echo bad >&2; exit 1"],
+            &Cancel::new(),
+        )
+        .unwrap()
+        .unwrap();
         assert!(!output.success);
         assert_eq!(output.stdout, "{}\n");
         assert!(output.detail.contains("bad"), "{}", output.detail);
@@ -425,6 +470,34 @@ mod tests {
     fn hung_command_is_stopped() {
         let err = run_with_input("sleep", &["30"], b"", Duration::from_millis(200)).unwrap_err();
         assert!(err.to_string().contains("still running"), "{err}");
+    }
+
+    #[test]
+    fn a_cancel_stops_a_running_command_and_starts_no_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let started = tmp.path().join("started");
+        let script = format!("touch '{}'; sleep 30", started.display());
+        let cancel = Cancel::new();
+        let canceller = {
+            let cancel = cancel.clone();
+            let started = started.clone();
+            thread::spawn(move || {
+                // Waits for the command to run, so the cancel reaches the wait loop.
+                while !started.exists() {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                cancel.cancel();
+            })
+        };
+        // Without the cancel this would be the 60 s limit's "still running" error.
+        let err = run("sh", &["-c", &script], &cancel).unwrap_err();
+        canceller.join().unwrap();
+        assert!(matches!(err, InventoryError::Cancelled { .. }), "{err:?}");
+
+        fs::remove_file(&started).unwrap();
+        let err = run("sh", &["-c", &script], &cancel).unwrap_err();
+        assert!(matches!(err, InventoryError::Cancelled { .. }), "{err:?}");
+        assert!(!started.exists(), "a cancelled sweep starts no command");
     }
 
     /// The tool exits at once, but a helper it started keeps stdout open for 30 s.
@@ -453,7 +526,7 @@ mod tests {
 
     #[test]
     fn non_utf8_output_is_a_parse_error() {
-        let err = run("printf", &["\\377"]).unwrap_err();
+        let err = run("printf", &["\\377"], &Cancel::new()).unwrap_err();
         assert!(matches!(err, InventoryError::Parse { .. }), "{err:?}");
     }
 
@@ -463,7 +536,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("tool");
         std::fs::write(&path, "#!/bin/sh\n").unwrap();
-        let err = run(path.to_str().unwrap(), &[]).unwrap_err();
+        let err = run(path.to_str().unwrap(), &[], &Cancel::new()).unwrap_err();
         assert!(matches!(err, InventoryError::Spawn { .. }), "{err:?}");
     }
 
@@ -472,7 +545,7 @@ mod tests {
     fn broken_shebang_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
         let program = script(tmp.path(), "#!/nonexistent/python3\n");
-        let err = run(&program, &[]).unwrap_err();
+        let err = run(&program, &[], &Cancel::new()).unwrap_err();
         assert!(matches!(err, InventoryError::Spawn { .. }), "{err:?}");
     }
 
