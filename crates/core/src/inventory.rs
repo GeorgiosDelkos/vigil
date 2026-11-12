@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::cancel::Cancel;
 use crate::feeds::Product;
 use crate::package::Package;
 
@@ -46,17 +47,23 @@ impl Inventory {
     /// `python3`, `uv`, `pipx`) found on `PATH`, each from `/` with a one-minute limit, lists
     /// the folders where version managers (nvm, fnm, volta, asdf, pyenv) keep Node.js and
     /// Python versions, and walks `project_dirs`. Blocks until all of them finish; `brew info`
-    /// alone can take several seconds.
-    pub fn collect_mac(project_dirs: &[PathBuf]) -> Self {
+    /// alone can take several seconds, and the walk is limited to ten minutes.
+    ///
+    /// Once `cancel` is set, the running command or walk stops and nothing more is started:
+    /// the result is then incomplete, with [`InventoryError::Cancelled`] in its problems.
+    pub fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Self {
         let mut inventory = Self::default();
-        toolchains::macos(&mut inventory);
-        homebrew::collect(&mut inventory);
-        toolchains::collect(&mut inventory);
-        version_managers::collect(&mut inventory);
-        drop_path_duplicates(&mut inventory.components);
-        for dir in project_dirs {
-            lockfiles::collect(dir, &mut inventory);
+        toolchains::macos(&mut inventory, cancel);
+        homebrew::collect(&mut inventory, cancel);
+        toolchains::collect(&mut inventory, cancel);
+        // Lists a few known folders on this thread, unbounded: a manager's folder on a mount
+        // that does not answer (`NVM_DIR` on a dead share) would hang it, which is rare enough
+        // to accept, unlike a project folder walk. It starts no listing once cancelled.
+        if !cancel.is_cancelled() {
+            version_managers::collect(&mut inventory);
         }
+        drop_path_duplicates(&mut inventory.components);
+        lockfiles::collect(project_dirs, &mut inventory, cancel);
         inventory
     }
 
@@ -85,8 +92,8 @@ impl Inventory {
 
     /// Runs a listing command, recording a failure as a problem and a missing tool in
     /// `not_installed`. Returns stdout only when the command succeeded.
-    fn run(&mut self, program: &'static str, args: &[&str]) -> Option<String> {
-        match command::run(program, args) {
+    fn run(&mut self, program: &'static str, args: &[&str], cancel: &Cancel) -> Option<String> {
+        match command::run(program, args, cancel) {
             Ok(Some(output)) => Some(output),
             Ok(None) => {
                 self.missing(program);
@@ -368,6 +375,51 @@ pub enum InventoryError {
         /// The formula name or cask token.
         name: String,
     },
+    /// The sweep was cancelled, so a command or the project folder walk was stopped or not
+    /// started.
+    #[error("stopped {what}: the sweep was cancelled")]
+    Cancelled {
+        /// The command line, or the project folder walk.
+        what: String,
+    },
+    /// A project folder holds more entries than the walk lists, so the walk stopped there and
+    /// lockfiles past that point are not checked.
+    #[error(
+        "{} holds more than {limit} entries, so the lockfile walk stopped there; choose \
+         narrower project folders in the settings",
+        root.display()
+    )]
+    TooManyEntries {
+        /// The project folder.
+        root: PathBuf,
+        /// How many entries the walk lists in one project folder.
+        limit: usize,
+    },
+    /// The project folder walk did not finish in time: a folder under `root` is not answering,
+    /// such as a network share whose server is gone.
+    #[error(
+        "the lockfile walk did not finish {} in {} minutes and was stopped, so its lockfiles and \
+         those of the project folders after it are not checked; a folder in it is not answering \
+         (a network share whose server is gone?)",
+        root.display(),
+        limit.as_secs() / 60
+    )]
+    WalkTimedOut {
+        /// The project folder it stopped in.
+        root: PathBuf,
+        /// How long the walk may take.
+        limit: std::time::Duration,
+    },
+    /// A lockfile is in iCloud only, so it is not read: reading it would download it.
+    #[error(
+        "{} is in iCloud only and was not read, as reading it would download it; download it \
+         in Finder to have it checked",
+        path.display()
+    )]
+    CloudOnly {
+        /// The lockfile.
+        path: PathBuf,
+    },
 }
 
 impl InventoryError {
@@ -375,10 +427,19 @@ impl InventoryError {
     /// Homebrew name with no NVD product) that the next sweep would report again.
     pub fn is_failure(&self) -> bool {
         match self {
-            Self::Spawn { .. } | Self::Command { .. } | Self::Parse { .. } | Self::Io { .. } => {
-                true
-            }
-            Self::NoProduct { .. } | Self::OtherRegistry { .. } | Self::NpmTree { .. } => false,
+            Self::Spawn { .. }
+            | Self::Command { .. }
+            | Self::Parse { .. }
+            | Self::Io { .. }
+            | Self::Cancelled { .. }
+            | Self::WalkTimedOut { .. } => true,
+            // Each is about one item, and the next sweep reports it again: a project folder
+            // holds as many entries then, and a lockfile in iCloud stays there.
+            Self::NoProduct { .. }
+            | Self::OtherRegistry { .. }
+            | Self::NpmTree { .. }
+            | Self::TooManyEntries { .. }
+            | Self::CloudOnly { .. } => false,
         }
     }
 
@@ -483,11 +544,20 @@ mod tests {
     #[test]
     fn missing_tools_are_listed_once() {
         let mut inventory = Inventory::default();
-        assert_eq!(inventory.run("vigil-no-such-tool", &[]), None);
-        assert_eq!(inventory.run("vigil-no-such-tool", &["x"]), None);
+        assert_eq!(
+            inventory.run("vigil-no-such-tool", &[], &Cancel::new()),
+            None
+        );
+        assert_eq!(
+            inventory.run("vigil-no-such-tool", &["x"], &Cancel::new()),
+            None
+        );
         assert_eq!(inventory.not_installed, ["vigil-no-such-tool"]);
-        assert_eq!(inventory.run("echo", &["hi"]).as_deref(), Some("hi\n"));
-        assert_eq!(inventory.run("false", &[]), None);
+        assert_eq!(
+            inventory.run("echo", &["hi"], &Cancel::new()).as_deref(),
+            Some("hi\n")
+        );
+        assert_eq!(inventory.run("false", &[], &Cancel::new()), None);
         assert!(matches!(
             inventory.problems[..],
             [InventoryError::Command { .. }]

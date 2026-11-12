@@ -38,6 +38,10 @@ copy_vcs = true
 #
 # `FixPlan::target` is a plain accessor whose only caller is the menu-bar app (the place in the
 # fix's headline), and the app's tests are not run against mutants (see `test_package`).
+#
+# `replace | with ^ in entered` changes the mask `UF_HIDDEN | SF_DATALESS` in the lockfile
+# walk. The two flags are separate bits (0x8000 and 0x4000_0000, <sys/stat.h>), so `|` and `^`
+# build the same mask: an equivalent mutant.
 exclude_re = [
     "NvdAccess::has_keychain_key",
     "NvdAccess::save_to_keychain",
@@ -46,6 +50,7 @@ exclude_re = [
     "FixPlan::target",
     "replace - with \\+ in log_tail$",
     "open_in_browser",
+    "replace \\| with \\^ in entered$",
     "findings\\.rs:.*replace \\| with \\^ in read$",
     "replace \\| with \\^ in open_regular$",
 ]

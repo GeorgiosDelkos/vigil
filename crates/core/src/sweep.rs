@@ -71,8 +71,10 @@ use crate::matching::Match;
 use crate::matching::OsvRecord;
 use crate::paths;
 use crate::paths::DataDir;
+use crate::paths::DataDirError;
 use crate::prompts;
 use crate::prompts::Prompt;
+use crate::retention;
 use crate::server;
 use crate::unchecked;
 use crate::unchecked::OsvUnchecked;
@@ -318,15 +320,17 @@ pub struct ReportIssue {
 /// paced, so the first sweep of a Mac with a hundred Homebrew formulae takes over ten minutes
 /// without an API key), and the agent, which has no time limit. Calls `progress` as it goes.
 ///
-/// Stops when `cancel` is set: between targets, between NVD requests, and while the agent runs
-/// (stopping it and everything it started). The targets already swept keep their reports; the
+/// Stops when `cancel` is set: between targets, between NVD requests, while the Mac inventory
+/// runs a command or walks the project folders, and while the agent runs (stopping it and
+/// everything it started). The targets already swept keep their reports; the
 /// folder of the one it stopped in is removed.
 ///
 /// # Errors
 ///
 /// Fails before anything runs when `targets` names no configured target, and before any agent
-/// runs when no agent is configured or found, another sweep is running, or the sweep folder
-/// cannot be written; and stops when a prompt or bundle cannot be
+/// runs when no agent is configured or found, the data folder is not private to this user (see
+/// [`DataDir::ensure_private`]), another sweep is running, or the sweep folder cannot be
+/// written; and stops when a prompt or bundle cannot be
 /// read or written; [`SweepError::Cancelled`] when cancelled. Failures of one target (a
 /// repository that cannot be read, the agent, its findings, the report files) are recorded in
 /// that target's report instead.
@@ -349,6 +353,9 @@ pub fn sweep(
         Targets::Only(only) => only == target,
     };
     let (agent, located) = locate_configured(config)?;
+    // Before anything is written or deleted: the inventory and agent logs are private, and
+    // the folder is checked before the sweep deletes older sweeps in it.
+    data_dir.ensure_private()?;
     let sweeps = data_dir.sweeps_dir();
     let _lock = Lock::acquire(&sweeps)?;
     let mut notes = Vec::new();
@@ -406,7 +413,9 @@ pub fn sweep(
         if wanted("mac") {
             progress(Progress::Target { target: "mac" });
             progress(Progress::Inventory);
-            let mac = collect_mac(&config.project_dirs);
+            let mac = collect_mac(&config.project_dirs, cancel);
+            // A cancel stops the inventory partway; what it collected is no report.
+            cancel.check()?;
             reports.push(shared.sweep_target(&dir, mac, progress)?);
         }
         for repo in config.repos.iter().filter(|r| wanted(&repo_target(r))) {
@@ -568,8 +577,8 @@ struct Collected {
 }
 
 /// This Mac's inventory as a target.
-fn collect_mac(project_dirs: &[PathBuf]) -> Collected {
-    let inventory = Inventory::collect_mac(project_dirs);
+fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Collected {
+    let inventory = Inventory::collect_mac(project_dirs, cancel);
     let mut problems: Vec<String> = inventory.problems.iter().map(error_chain).collect();
     if !inventory.not_installed.is_empty() {
         let tools = inventory.not_installed.join(", ");
@@ -655,6 +664,22 @@ impl Shared<'_> {
         self.sweep_target(sweep_dir, collected, progress)
     }
 
+    /// Saves `report` in `dir` (see [`save_report`]) and, once it is written, removes the
+    /// target's older sweeps (see [`retention::remove_older`]): the comparison with the last
+    /// sweep has been made. A failure to remove them is a problem in the returned report only,
+    /// as the saved one is already written; the next sweep of the target removes them.
+    fn save(&self, dir: &Path, report: &mut Report) {
+        if save_report(dir, report)
+            && let Err(e) = retention::remove_older(&self.data_dir.sweeps_dir(), dir)
+        {
+            report.problems.push(format!(
+                "removing the target's older sweeps: {}; repair or delete the file named, and the \
+                 next sweep removes them",
+                error_chain(&e)
+            ));
+        }
+    }
+
     /// Saves the report of a target that could not be collected: the reason, and no agent run.
     fn uncollected(
         &self,
@@ -669,7 +694,7 @@ impl Shared<'_> {
         })?;
         let mut report = Report::new(started, target, self.agent, dir.to_owned());
         report.failure = Some(plain(&error_chain(error)));
-        save_report(dir, &mut report);
+        self.save(dir, &mut report);
         Ok(report)
     }
 
@@ -761,7 +786,7 @@ impl Shared<'_> {
         report.problems = problems.iter().map(|p| plain(p)).collect();
         report.unchecked = fetched.unchecked;
         report.failure = failure;
-        save_report(&dir, &mut report);
+        self.save(&dir, &mut report);
         Ok(report)
     }
 
@@ -1379,12 +1404,17 @@ fn target_name(inventory: &Inventory) -> String {
 }
 
 /// Writes the report files, or notes in the report why they could not be written: the verdict
-/// is worth more than its files, so a report that cannot be saved is still returned.
-fn save_report(dir: &Path, report: &mut Report) {
-    if let Err(e) = write_report(dir, report) {
-        report
-            .problems
-            .push(format!("report files: {}", error_chain(&e)));
+/// is worth more than its files, so a report that cannot be saved is still returned. Returns
+/// whether they were written.
+fn save_report(dir: &Path, report: &mut Report) -> bool {
+    match write_report(dir, report) {
+        Ok(()) => true,
+        Err(e) => {
+            report
+                .problems
+                .push(format!("report files: {}", error_chain(&e)));
+            false
+        }
     }
 }
 
@@ -1786,6 +1816,9 @@ pub enum SweepError {
     /// The bundle could not be written.
     #[error(transparent)]
     Bundle(#[from] BundleError),
+    /// The data folder could not be made private.
+    #[error(transparent)]
+    DataDir(#[from] DataDirError),
     /// A sweep file could not be read.
     #[error("cannot read {}", path.display())]
     Read {
@@ -2724,6 +2757,9 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
         assert_eq!(json["carried"][0]["carried_from"], "2026-11-05T10:00:00Z");
         assert_eq!(json["unchecked"]["nvd"], json!(["curl"]));
+        // Retention removes the report it was found in: the carried copy holds what is needed.
+        retention::remove_older(&sweeps, &dir).unwrap();
+        assert!(!last.exists());
         let again = lifecycle::carried_over(
             &sweeps,
             "mac",

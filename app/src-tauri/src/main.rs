@@ -59,6 +59,10 @@ compile_error!("a release build of vigil-app needs `--features custom-protocol`"
 fn main() {
     let home = std::env::home_dir().expect("a Mac user has a home directory");
     let data_dir = DataDir::for_home(&home);
+    // Before a settings save can create the folder with the process's umask, which launchd
+    // may set to 002. Ignored here: the app has nowhere to show it yet, and every sweep checks
+    // again and reports the reason.
+    drop(data_dir.ensure_private());
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(

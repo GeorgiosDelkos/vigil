@@ -19,6 +19,7 @@ use std::time::Duration;
 use serde::Deserialize;
 
 use crate::agent::AgentKind;
+use crate::cancel::Cancel;
 use crate::config::ModelName;
 use crate::inventory::command;
 
@@ -47,16 +48,11 @@ const TOOLS: [(&str, &str); 10] = [
 ];
 
 /// Folders people keep projects in, relative to the home folder. Arbitrary: the common names
-/// on macOS; a folder that does not exist is not suggested.
-const PROJECT_FOLDERS: [&str; 7] = [
-    "code",
-    "Code",
-    "Projects",
-    "Developer",
-    "src",
-    "Documents/Github",
-    "Documents/GitHub",
-];
+/// on macOS; a folder that does not exist is not suggested. None is inside `~/Documents`:
+/// detection runs as the app starts, and looking there raises macOS's Documents privacy prompt
+/// before the user has chosen anything. A project folder there is one the user picks, and
+/// macOS asks when Vigil first reads it.
+const PROJECT_FOLDERS: [&str; 5] = ["code", "Code", "Projects", "Developer", "src"];
 
 /// How many of the user's repositories `gh repo list` returns. Arbitrary: enough to pick from
 /// without a long wait.
@@ -280,7 +276,7 @@ fn login_shell(shell: &str) -> Option<Answer> {
          \"$b\" \"$(command -v \"$b\")\"; done; printf '%s\\n' {END_MARK}",
         names.join(" ")
     );
-    let output = command::run_any_status(shell, &["-lc", &script]).ok()??;
+    let output = command::run_any_status(shell, &["-lc", &script], &Cancel::new()).ok()??;
     parse_answer(&output.stdout)
 }
 
@@ -308,7 +304,7 @@ fn parse_answer(stdout: &str) -> Option<Answer> {
 
 fn gh_login(gh: &Path) -> Option<String> {
     let gh = gh.to_str()?;
-    let login = command::run(gh, &["api", "user", "--jq", ".login"]).ok()??;
+    let login = command::run(gh, &["api", "user", "--jq", ".login"], &Cancel::new()).ok()??;
     plain_login(&login)
 }
 
@@ -329,7 +325,7 @@ fn gh_repos(gh: &Path) -> Vec<RepoInfo> {
     };
     let fields = "nameWithOwner,isPrivate";
     let args = ["repo", "list", "--limit", REPO_LIMIT, "--json", fields];
-    command::run(gh, &args)
+    command::run(gh, &args, &Cancel::new())
         .ok()
         .flatten()
         .and_then(|text| serde_json::from_str(&text).ok())

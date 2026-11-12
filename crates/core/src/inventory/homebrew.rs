@@ -8,6 +8,7 @@
 
 use serde::Deserialize;
 
+use crate::cancel::Cancel;
 use crate::feeds::Product;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
@@ -96,8 +97,8 @@ const CASK_ALIASES: &[(&str, &[&str])] = &[
     ("visual-studio-code", &["microsoft:visual_studio_code"]),
 ];
 
-pub(super) fn collect(inventory: &mut Inventory) {
-    if let Some(output) = inventory.run("brew", &["info", "--json=v2", "--installed"]) {
+pub(super) fn collect(inventory: &mut Inventory, cancel: &Cancel) {
+    if let Some(output) = inventory.run("brew", &["info", "--json=v2", "--installed"], cancel) {
         parse(&output, inventory);
     }
 }
