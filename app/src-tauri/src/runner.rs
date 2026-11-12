@@ -3,9 +3,8 @@
 //! [`Runner`] holds the one piece of shared state behind a single lock: the status, when the
 //! app last started a sweep, and the update state (`crate::update`). [`start`] takes it to
 //! check and claim the sweeping state in one step, so two clicks, or a click and the schedule,
-//! cannot start two sweeps. The core's
-//! own lock on the sweeps folder still guards against a sweep from the CLI; that one surfaces
-//! as a failed sweep.
+//! cannot start two sweeps. The core's own lock on the sweeps folder still guards against a
+//! sweep from the CLI; that one surfaces as a failed sweep.
 //!
 //! Each sweep or fix gets its own [`Cancel`]. The user can cancel a sweep from the popover
 //! ([`cancel_sweep`]); quitting ([`quit`]) cancels whatever runs and exits once it has ended,
@@ -104,7 +103,7 @@ enum Quit {
     No,
     /// It is waiting for the sweep or fix to end; nothing new starts, and only this wait exits.
     Waiting,
-    /// An update is being installed ([`Runner::claim_restart`]): nothing new starts, no update
+    /// An update is being installed ([`Runner::install_update`]): nothing new starts, no update
     /// check runs, and an exit request waits, since the install may be between moving the old
     /// app out and the new one in. A quit asked for meanwhile is dropped (accepted: the app
     /// restarts in a moment, or the install fails and the user can quit again).
@@ -275,10 +274,40 @@ impl Runner {
         shared.quit == Quit::No && shared.updates.due(now)
     }
 
+    /// Installs the waiting update with `install`, unless a sweep or fix runs or the app is
+    /// quitting. While it runs, outside the lock, nothing new starts, no check runs and exits
+    /// wait ([`Quit::Installing`]). Then the restart's exit may pass, or, when `install` fails
+    /// or panics, the update waits again with why, and runs may start.
+    ///
+    /// # Errors
+    ///
+    /// Why it was refused, or why the install failed.
+    pub(crate) fn install_update(
+        &self,
+        install: impl FnOnce(&Ready) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let ready = self.claim_restart()?;
+        // A panic would otherwise leave the runner installing for good: no run could start and
+        // every exit would wait.
+        let installed = panic::catch_unwind(AssertUnwindSafe(|| install(&ready)))
+            .unwrap_or_else(|_| Err("the install stopped unexpectedly".to_owned()));
+        let mut shared = self.lock();
+        match installed {
+            Ok(()) => {
+                shared.quit = Quit::Ready;
+                Ok(())
+            }
+            Err(problem) => {
+                shared.quit = Quit::No;
+                shared.updates.put_back(ready, problem.clone());
+                Err(problem)
+            }
+        }
+    }
+
     /// Takes the waiting update to install it, unless a sweep or fix runs or the app is
-    /// quitting, and marks it installing ([`Quit::Installing`]), so nothing new starts and no
-    /// exit cuts the install short: one check and one write under one lock.
-    pub(crate) fn claim_restart(&self) -> Result<Ready, &'static str> {
+    /// quitting, and marks it installing: one check and one write under one lock.
+    fn claim_restart(&self) -> Result<Ready, &'static str> {
         let mut shared = self.lock();
         if shared.quit != Quit::No {
             return Err("the app is quitting");
@@ -289,19 +318,6 @@ impl Runner {
         let ready = shared.updates.take_ready().ok_or("no update is ready")?;
         shared.quit = Quit::Installing;
         Ok(ready)
-    }
-
-    /// Lets the exit that restarts into the installed update pass ([`must_wait_to_quit`]).
-    pub(crate) fn installed(&self) {
-        self.lock().quit = Quit::Ready;
-    }
-
-    /// Undoes [`Self::claim_restart`] after the install failed with `problem`: the update waits
-    /// again, and sweeps and fixes may start.
-    pub(crate) fn restart_failed(&self, ready: Ready, problem: String) {
-        let mut shared = self.lock();
-        shared.quit = Quit::No;
-        shared.updates.put_back(ready, problem);
     }
 
     fn set(&self, status: Status) {
@@ -1085,7 +1101,17 @@ mod tests {
             must_wait(Quit::Installing, &Status::Idle),
             "an exit could cut the install short"
         );
-        runner.installed();
+        runner.lock().quit = Quit::No;
+        assert_eq!(
+            runner.install_update(|_| panic!("nothing waits to install")),
+            Err("no update is ready".to_owned())
+        );
+        assert_eq!(
+            runner.lock().quit,
+            Quit::No,
+            "a refused install changes nothing"
+        );
+        runner.lock().quit = Quit::Ready;
         assert!(
             !must_wait(runner.lock().quit, &Status::Idle),
             "the restart exits"

@@ -9,7 +9,7 @@
 //! to update, and one notification says so.
 //!
 //! Installing replaces the app bundle on disk, so it happens only when the user clicks, and
-//! never while a sweep or fix runs ([`Runner::claim_restart`]): the owner's decision of
+//! never while a sweep or fix runs ([`Runner::install_update`]): the owner's decision of
 //! 2026-11-12. A failed check (offline, GitHub down, a bad signature) is kept as one line that
 //! Settings shows quietly, and written to stderr. It never touches the runner's status, so it
 //! never shows as a failure banner and never holds up a sweep.
@@ -18,8 +18,6 @@
 //! check, download and install run here, and the UI calls only [`restart_to_update`].
 
 use std::fmt;
-use std::panic;
-use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -241,7 +239,8 @@ async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<Ready>> {
     let Some(mut update) = updater.check().await? else {
         return Ok(None);
     };
-    // The plugin does not pass the builder's timeout on to the update it returns.
+    // tauri-plugin-updater 2.14.1 builds the returned update with `timeout: None`
+    // (src/updater.rs:735), whatever the builder's timeout.
     update.timeout = Some(REQUEST_TIMEOUT);
     // `download` checks the signature, and the signed version, before it returns the bytes.
     let package = update.download(|_, _| {}, || {}).await?;
@@ -250,34 +249,30 @@ async fn fetch(app: &AppHandle) -> tauri_plugin_updater::Result<Option<Ready>> {
 
 /// Installs the waiting update and restarts into it, as the user just clicked. Refused while a
 /// sweep or fix runs; nothing new starts once it is accepted. An install that fails keeps the
-/// update waiting, so the user can try again. Async, so installing never stalls the UI.
+/// update waiting, so the user can try again. Async, so installing never stalls the UI; it
+/// holds one of Tauri's async workers while it runs, which is seconds, or as long as macOS's
+/// administrator prompt stays open when the app's folder needs it.
 #[tauri::command(async)]
 #[expect(
     clippy::needless_pass_by_value,
     reason = "Tauri hands command arguments over by value"
 )]
 pub(crate) fn restart_to_update(app: AppHandle) -> Result<(), String> {
-    let runner = app.state::<Runner>();
-    let ready = runner.claim_restart()?;
-    // A panic would otherwise leave the runner installing for good: no sweep could start and
-    // every exit would wait.
-    let installed = panic::catch_unwind(AssertUnwindSafe(|| {
-        ready
-            .update
-            .install(&ready.package)
-            .map_err(|e| error_chain(&e))
-    }))
-    .unwrap_or_else(|_| Err("the install stopped unexpectedly".to_owned()));
-    if let Err(e) = installed {
-        let problem = format!("cannot install Vigil {}: {e}", ready.update.version);
+    let installed = app.state::<Runner>().install_update(|ready| {
+        ready.update.install(&ready.package).map_err(|e| {
+            format!(
+                "cannot install Vigil {}: {}",
+                ready.update.version,
+                error_chain(&e)
+            )
+        })
+    });
+    if let Err(problem) = installed {
         log(&problem);
-        runner.restart_failed(ready, problem.clone());
         runner::changed(&app);
         return Err(problem);
     }
-    // Through the exit request, which `runner::must_wait_to_quit` lets pass once `installed`
-    // says the install is done.
-    runner.installed();
+    // Through the exit request, which `runner::must_wait_to_quit` now lets pass.
     app.request_restart();
     Ok(())
 }

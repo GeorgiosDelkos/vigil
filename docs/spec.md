@@ -923,9 +923,10 @@ The owner's decisions, and why:
   Restart to update, and one notification says so. The click installs it (the plugin replaces
   the bundle on disk) and restarts. It never installs or restarts while a sweep or fix runs: the
   button waits, and Rust refuses it under the runner's lock in the same step that checks its
-  status, then marks it installing: nothing new starts, no check runs, and an exit request (a
-  Cmd-Q, a logout) waits, so no exit lands between the plugin moving the old app out and the
-  new one in. Only then does the restart's exit pass. An install that fails keeps the update
+  status, then marks it installing: nothing new starts, no check runs, and an exit request
+  that reaches the app (Cmd-Q) is held and the tray's Quit does nothing, so neither can land between the plugin
+  moving the old app out and the new one in. A logout or `kill` does not ask first, as for
+  sweeps; the plugin swaps the two bundles in one step where the file system allows (APFS). Only then does the restart's exit pass. An install that fails keeps the update
   waiting. A Quit clicked during the install is dropped (accepted: it lasts a moment).
 - **Failures are quiet.** Offline, GitHub down or a bad signature leave one line under Settings
   ("the last update check failed: ...") and one on stderr. They never set the runner's failed
