@@ -591,16 +591,18 @@ describe("the popover", () => {
 });
 
 describe("a finding", () => {
-  it("runs its fix only after the preview is confirmed", async () => {
+  it("runs its fix only after the preview, steps and notes included, is confirmed", async () => {
     shown = two();
     answer({
       fix_preview: () => ({
+        preview: 7,
         destination: "this Mac",
         found: "2026-11-06T11:00:00Z",
         summary: "Update openssl",
-        steps: [],
+        steps: ["Check nothing pins openssl", "Upgrade it"],
         commands: ["brew upgrade openssl"],
         agent: "claude",
+        notes: ["Uses your edited prompt, prompts/fix.md."],
       }),
       fix: () => null,
     });
@@ -610,12 +612,21 @@ describe("a finding", () => {
     const confirm = await screen.findByText(/with full access\?/);
     expect(within(confirm).getByText("this Mac")).toBeTruthy();
     expect(screen.getByText("Update openssl")).toBeTruthy();
+    // The agent is told the user confirmed the steps, so the question shows them.
+    const steps = screen.getByRole("list", { name: "Steps the fix takes" });
+    expect(
+      within(steps)
+        .getAllByRole("listitem")
+        .map((li) => li.textContent),
+    ).toEqual(["Check nothing pins openssl", "Upgrade it"]);
     expect(screen.getByLabelText("Commands the fix runs").textContent).toContain(
       "brew upgrade openssl",
     );
+    expect(screen.getByText("Uses your edited prompt, prompts/fix.md.")).toBeTruthy();
     expect(invoke).not.toHaveBeenCalledWith("fix", expect.anything());
     fireEvent.click(screen.getByText("Run fix"));
-    expect(invoke).toHaveBeenCalledWith("fix", { key: "a", found: "2026-11-06T11:00:00Z" });
+    // The number Rust gave the preview runs exactly the plan shown.
+    expect(invoke).toHaveBeenCalledWith("fix", { preview: 7 });
 
     // The finding stays selected, but once the fix runs its steps replace the confirmation.
     shown = { ...two(), busy: true, status: fixing() };
@@ -802,12 +813,14 @@ describe("a component", () => {
     shown = grouped();
     answer({
       fix_preview: () => ({
+        preview: 3,
         destination: "this Mac",
         found: "2026-11-06T11:00:00Z",
         summary: "Upgrade ffmpeg.",
         steps: [],
         commands: ["brew upgrade ffmpeg"],
         agent: "claude",
+        notes: [],
       }),
       fix: () => null,
     });
@@ -821,7 +834,8 @@ describe("a component", () => {
     handlers.get("changed")?.({ payload: null });
     await vi.waitFor(() => expect(screen.getByText("2 advisories")).toBeTruthy());
     fireEvent.click(screen.getByText("Run fix"));
-    expect(invoke).toHaveBeenCalledWith("fix", { key: "f2", found: "2026-11-06T11:00:00Z" });
+    expect(invoke).toHaveBeenCalledWith("fix", { preview: 3 });
+    expect(screen.queryByRole("list", { name: "Steps the fix takes" })).toBeNull();
   });
 
   it("marks an advisory whose fix did not hold, not only the lead", async () => {
@@ -1130,12 +1144,14 @@ describe("the detail", () => {
       }
       if (command === "fix_preview") {
         return Promise.resolve({
+          preview: 1,
           destination: "this Mac",
           found: "2026-11-06T11:00:00Z",
           summary: "s",
           steps: [],
           commands: [],
           agent: "claude",
+          notes: [],
         });
       }
       return Promise.reject(`${command} refused`);
@@ -1270,13 +1286,13 @@ describe("a finished fix", () => {
     expect(screen.getByText("Pull request: https://github.com/me/app/pull/7")).toBeTruthy();
   });
 
-  it("shows the log's end on Show log, and why when it cannot be read", async () => {
+  it("shows the log's end on Show log, and why when it cannot be shown", async () => {
     shown = { ...two(), status: fixRun() };
     let missing = false;
     answer({
       fix_log: () =>
         missing
-          ? Promise.reject("cannot read /fixes/x/agent.log: No such file or directory")
+          ? Promise.reject("no fix's results are showing")
           : {
               text: "reading fixes.json\nno newer sqlite release",
               note: "The last 64 KB of 196 KB.",
@@ -1297,9 +1313,7 @@ describe("a finished fix", () => {
 
     missing = true;
     fireEvent.click(screen.getByRole("button", { name: "Show log" }));
-    expect((await screen.findByRole("alert")).textContent).toBe(
-      "cannot read /fixes/x/agent.log: No such file or directory",
-    );
+    expect((await screen.findByRole("alert")).textContent).toBe("no fix's results are showing");
     expect(screen.queryByLabelText("Agent log")).toBeNull();
   });
 
@@ -1831,10 +1845,12 @@ describe("the main view", () => {
       ),
     };
     const preview = {
+      preview: 5,
       destination: "the server web, through `ssh -- web`",
       found: "2026-11-06T11:00:00Z",
       agent: "claude",
       confirm: "Fix all 2",
+      notes: ["The agent runs on this Mac with full access and reads what the server prints."],
       items: [
         {
           key: "g",
@@ -1852,7 +1868,7 @@ describe("the main view", () => {
         },
       ],
     };
-    answer({ fix_all_preview: () => preview, fix_all: () => null });
+    answer({ fix_all_preview: () => preview, fix: () => null });
     render(() => <App />);
 
     // The repository, which Rust gave no label, has no button.
@@ -1880,22 +1896,19 @@ describe("the main view", () => {
       "Hold the old kernel",
     );
     expect(within(fixes).queryByLabelText("Steps for nginx 1.0.0")).toBeNull();
+    expect(asked.textContent).toContain("reads what the server prints");
     // The question replaces the rows and the button until it is answered.
     expect(names()).toEqual([]);
     expect(document.querySelector(".headline .pill")).toBeNull();
 
     fireEvent.click(within(asked).getByRole("button", { name: "Cancel" }));
     expect(names()).toEqual(["glibc", "nginx"]);
-    expect(invoke).not.toHaveBeenCalledWith("fix_all", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("fix", expect.anything());
 
     fireEvent.click(screen.getByRole("button", { name: "Fix all 2" }));
     const again = await screen.findByRole("region", { name: "Fix all" });
     fireEvent.click(within(again).getByRole("button", { name: "Fix all 2" }));
-    expect(invoke).toHaveBeenCalledWith("fix_all", {
-      target: "server:web",
-      keys: ["g", "n"],
-      found: "2026-11-06T11:00:00Z",
-    });
+    expect(invoke).toHaveBeenCalledWith("fix", { preview: 5 });
   });
 
   it("shows why Fix all cannot run, and disables it while something runs", async () => {

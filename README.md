@@ -140,14 +140,41 @@ acts on what it reads. Vigil is built around that.
 | **Where it is told to act** | Its bundle folder | This Mac; for a repository, a clone, a branch and a pull request; for a server, one SSH host |
 
 The fix rules in the last row are instructions in the fix prompt, which the agent runs with
-full access. The app checks what it can afterwards: the result must name a pull request in the
-same repository, and every run is recorded in the fix history.
+full access. The app checks what it can around them:
+
+- **What you confirm is what runs.** The confirmation shows where the fix runs, the agent and
+  its model, the fix's summary, steps and exact commands, and says when your own edited fix prompt is used.
+  The app runs the plan it showed: a change to `config.toml` or the prompt after the question
+  changes nothing that runs. A fix prompt without its "Where to work" rules (`{{access}}`) is
+  refused.
+- **Repository fixes stay in their repository.** A fix whose `gh`, `git`, `curl` or `wget`
+  commands may reach another repository is refused before you are asked: another
+  `owner/name` in a GitHub address, a `gh` call without `--repo <this repository>`, a `gh api`
+  path outside `repos/<this repository>`, a `gh` subcommand a fix does not need, a `cd` or
+  `git -C` out of the clone, a `GH_*`, `GITHUB_*` or `GIT_*` variable, a shell, or anything
+  the shell would expand first (`$`, backquotes, globs). This is a check of what you read,
+  not a sandbox: the agent still has full access. The agent runs with git hooks and npm, pnpm
+  and Yarn lifecycle scripts off, and is told that files in the clone such as `CLAUDE.md` or
+  `AGENTS.md` are data. Each run
+  makes its own branch, `vigil/fix-<key>-<time>`. Afterwards the app asks GitHub: the default
+  branch must be the same branch, with the head it had before the run, and the pull request
+  the agent names must be open from the run's branch into it, in the same repository; a change
+  to files reported done needs that pull request. Otherwise the outcome is recorded as
+  unknown, with why. Pushes to other branches and tags are not checked.
+- **Server fixes read the server.** A server fix runs the full-access agent on this Mac, and
+  the agent reads what the server prints. A compromised server could try to steer it, so the
+  confirmation says so; confirm only fixes you would run yourself.
+- **Nothing kept that is not needed.** Every run is recorded in the fix history. Once it is,
+  its working folder, the clone of a repository included, is deleted; the app keeps the end of
+  the agent's log in memory for the results view, and the CLI prints it when a fix did not
+  finish.
 
 More of the design:
 
 - **Checked before you are asked.** Before the confirmation, the app checks that the finding
   is still in the target's newest report, is not dismissed, and still passes the sweep's text
-  checks, and that the target is still configured.
+  checks, and that the target is still configured. A finding key that two targets' reports
+  share is refused rather than guessed.
 - **Read-only server collection.** The server script never uses `sudo`. SSH runs in batch
   mode with strict host key checking, and with agent and port forwarding off.
 - **Stopping cleanly.** Cancelling a sweep or quitting the app stops the agent and every
@@ -247,9 +274,9 @@ The data folder also holds:
 | `sweeps/<time>/<target>/report.{json,md}` | The target's report |
 | `sweeps/<time>/<target>/bundle/` | What the agent read, and the `findings.json` it wrote |
 | `sweeps/<time>/<target>/agent-<n>.log` | The agent's output, one log per attempt |
-| `fixes/<time>-<key>/` | Each fix's prompt, the agent's log and its result |
+| `fixes/<time>-<key>/` | A running fix's prompt, the agent's log and its result; deleted once the run is recorded |
 | `state/dismissals.json` | Dismissed findings and issues, with reasons |
-| `state/fixes.jsonl` | Every fix run, one line each |
+| `state/fixes.jsonl` | Every fix run, one line each: what was fixed, by which agent, and how it ended |
 | `report.html` | The HTML report from `vigil report` or the app, replaced each time |
 
 ## Command line

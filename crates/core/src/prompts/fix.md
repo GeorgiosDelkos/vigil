@@ -5,8 +5,9 @@ what happened. You have full access, so act with care: change only what the fix 
 
 ## Files
 
-- `fix.json`: the finding or issue from the last sweep: its advisories or subject, severity,
-  evidence, explanation, and the `fix` (summary, steps, exact commands) the user confirmed.
+- `fix.json`: the finding or issue from the last sweep: its `key`, target, advisories or
+  subject, severity, the installed component, and the `fix` (summary, steps, exact commands)
+  the user confirmed.
 - `result.schema.json`: the exact shape of the file you write at the end.
 
 ## Where to work

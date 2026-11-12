@@ -27,9 +27,7 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io;
-use std::io::Read as _;
 use std::io::Write as _;
-use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -46,6 +44,7 @@ use crate::cancel::Ended;
 use crate::config::ModelName;
 use crate::inventory::InventoryError;
 use crate::inventory::command;
+use crate::paths;
 
 /// The one line every agent is given; the real instructions are in the bundle's `PROMPT.md`.
 pub(crate) const PROMPT_LINE: &str =
@@ -692,18 +691,10 @@ const LOG_HEAD: u64 = 4096;
 /// The first [`LOG_HEAD`] bytes of `log`, or none when it cannot be read: the log was just
 /// written, and an unreadable one only means the start failure is reported as the exit status.
 /// A fix runs in the folder that holds its log, so the agent can leave a FIFO or a link there:
-/// the log is opened without following a link and without waiting for a writer.
+/// the log is read through [`paths::read_capped`], which follows no link and waits for no
+/// writer, and reads only a regular file.
 fn log_head(log: &Path) -> Vec<u8> {
-    let mut head = Vec::new();
-    let read = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(log)
-        .and_then(|file| file.take(LOG_HEAD).read_to_end(&mut head));
-    if read.is_err() {
-        head.clear();
-    }
-    head
+    paths::read_capped(log, LOG_HEAD).unwrap_or_default()
 }
 
 /// Error from finding or running an agent.
@@ -1329,6 +1320,27 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_that_leaves_a_fifo_for_its_log_does_not_hang_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let swap = script(
+            tmp.path(),
+            "swap",
+            "rm -f agent.log && /usr/bin/mkfifo agent.log",
+        );
+        // So a regression to a blocking open cannot hang this test; the link tests of the
+        // regular-file open catch it instead.
+        paths::release_fifo(&tmp.path().join("agent.log"));
+        let status = AgentKind::Claude
+            .run(
+                &AgentKind::Claude.fix_command(&located(&swap), tmp.path(), "P"),
+                &tmp.path().join("agent.log"),
+                &Cancel::new(),
+            )
+            .unwrap();
+        assert_eq!(status.code(), Some(0), "it ran, and the run returned");
+    }
+
+    #[test]
     fn only_the_head_of_a_log_is_read() {
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("agent.log");
@@ -1345,13 +1357,7 @@ mod tests {
         std::os::unix::fs::symlink(&log, &link).unwrap();
         assert_eq!(log_head(&link), b"");
         let fifo = tmp.path().join("fifo.log");
-        assert!(
-            Command::new("mkfifo")
-                .arg(&fifo)
-                .status()
-                .unwrap()
-                .success()
-        );
+        paths::releasing_fifo(&fifo);
         assert_eq!(log_head(&fifo), b"");
     }
 }

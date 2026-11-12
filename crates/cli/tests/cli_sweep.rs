@@ -23,6 +23,16 @@ n=$((n + 1))
 echo $n > "$CLAUDE_FAKE_COUNTER"
 test -f PROMPT.md || { echo "no PROMPT.md in $(pwd)" >&2; exit 9; }
 echo "args: $*"
+# What this run was given, kept for the test: a fix's folder is deleted once it is recorded.
+seen="$CLAUDE_FAKE_COUNTER.seen"
+mkdir -p "$seen"
+cp PROMPT.md "$seen/"
+for f in fix.json fixes.json; do if [ -f $f ]; then cp $f "$seen/"; fi; done
+pwd > "$seen/dir"
+env > "$seen/env"
+echo "$*" > "$seen/args"
+# A repository fix's branch, for the fake gh's pull request.
+grep -o 'vigil/fix-[0-9a-f]*-[0-9T.]*Z' PROMPT.md | head -n 1 > "$CLAUDE_FAKE_COUNTER.branch"
 # A Fix all reports each item on a line of results.jsonl.
 report() {
   printf '{"key": "%s", "outcome": "%s", "summary": "%s"}\n' "$1" "$2" "$3" >> results.jsonl
@@ -45,6 +55,10 @@ case "$CLAUDE_FAKE_MODE:$n" in
   fix:*)
     echo '{"outcome": "fixed", "summary": "pinned the action",
       "pull_request": "https://github.com/o/r/pull/7"}' > result.json ;;
+  push-main:*)
+    echo 2222222222222222222222222222222222222222 > "$CLAUDE_FAKE_COUNTER.main"
+    echo '{"outcome": "fixed", "summary": "pinned the action"}' > result.json ;;
+  no-pr:*) echo '{"outcome": "fixed", "summary": "pinned the action"}' > result.json ;;
   crash:*) exit 3 ;;
   hang:*|second-hangs:2) sleep 60 & echo $! > "$CLAUDE_FAKE_COUNTER.child"; wait ;;
   second-hangs:*) echo '{"findings": [], "issues": []}' > findings.json ;;
@@ -78,12 +92,23 @@ esac
 "#;
 
 /// A fake `gh`: `o/r` is a public repository with one npm dependency and one workflow;
-/// `o/missing` does not exist. Answers by the API path, its last argument.
+/// `o/missing` does not exist. Answers by the API path, its last argument. The head of `main`
+/// is the one the fake agent wrote to `$CLAUDE_FAKE_COUNTER.main`, if any, and pull request 7
+/// is open from the branch it read from its prompt into `main`.
 const FAKE_GH: &str = r#"#!/bin/sh
+PATH=/usr/bin:/bin
 for last; do :; done
 refuse() { echo "{\"message\":\"$2\",\"status\":\"$1\"}"; exit 1; }
 case "$last" in
   repos/o/r) echo '{"default_branch":"main","private":false,"owner":{"type":"User"}}' ;;
+  repos/o/r/git/ref/heads/main)
+    sha=0000000000000000000000000000000000000001
+    if [ -f "$CLAUDE_FAKE_COUNTER.main" ]; then sha=$(cat "$CLAUDE_FAKE_COUNTER.main"); fi
+    echo "{\"object\":{\"sha\":\"$sha\"}}" ;;
+  repos/o/r/pulls/7)
+    printf '{"state":"open","head":{"ref":"%s","repo":{"full_name":"o/r"}},' \
+      "$(cat "$CLAUDE_FAKE_COUNTER.branch")"
+    echo '"base":{"ref":"main","repo":{"full_name":"o/r"}}}' ;;
   repos/o/r/dependency-graph/sbom) echo '{"sbom":{"packages":[{"versionInfo":"4.17.20",
     "externalRefs":[{"referenceType":"purl","referenceLocator":"pkg:npm/lodash@4.17.20"}]}]}}' ;;
   repos/o/r/*alerts*) echo '[[]]' ;;
@@ -228,6 +253,18 @@ impl Sandbox {
             .args(args)
             .output()
             .expect("the test binary was built by cargo")
+    }
+
+    /// The file `name` the fake agent's last run was given, or what it noted: `dir` (its
+    /// working folder) or `env` (its environment).
+    fn seen(&self, name: &str) -> String {
+        fs::read_to_string(self.path().join(format!("counter.seen/{name}")))
+            .expect("the fake agent ran and kept what it was given")
+    }
+
+    /// The fix folders left in the data folder: none once each run was recorded.
+    fn fix_folders(&self) -> usize {
+        fs::read_dir(self.path().join("data/fixes")).map_or(0, Iterator::count)
     }
 
     /// The path of `report.json` of `target` in the newest sweep folder.
@@ -625,6 +662,20 @@ fn dismissals_hold_across_sweeps_and_changes_are_counted() {
     );
 }
 
+/// Checks that `env`, a repository fix agent's environment, turns git hooks and package
+/// lifecycle scripts off.
+fn assert_hooks_and_scripts_off(env: &str) {
+    for line in [
+        "GIT_CONFIG_COUNT=1",
+        "GIT_CONFIG_KEY_0=core.hooksPath",
+        "GIT_CONFIG_VALUE_0=/dev/null",
+        "npm_config_ignore_scripts=true",
+        "YARN_ENABLE_SCRIPTS=false",
+    ] {
+        assert!(env.lines().any(|l| l == line), "{line} in {env}");
+    }
+}
+
 #[test]
 fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
     let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
@@ -678,45 +729,138 @@ fn a_fix_runs_only_after_it_is_confirmed_and_is_recorded() {
     assert_eq!(record["target"], "github:o/r");
     assert_eq!(record["outcome"], "fixed");
     assert_eq!(record["confirmed"], "asked");
-    let dir = PathBuf::from(record["dir"].as_str().unwrap());
     assert!(
-        dir.starts_with(sandbox.path().join("data/fixes")),
+        record.get("dir").is_none(),
+        "the folder is not kept: {record}"
+    );
+    let dir = PathBuf::from(sandbox.seen("dir").trim());
+    assert!(
+        dir.starts_with(fs::canonicalize(sandbox.path()).unwrap().join("data/fixes")),
         "{}",
         dir.display()
     );
-    let log = fs::read_to_string(dir.join("agent.log")).unwrap();
-    assert!(log.contains("--permission-mode bypassPermissions"), "{log}");
-    let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap();
-    assert!(prompt.contains(&format!("vigil/fix-{key}")), "{prompt}");
+    assert!(!dir.exists(), "the recorded run's folder is deleted");
+    assert_eq!(sandbox.fix_folders(), 0);
+    let args = sandbox.seen("args");
+    assert!(
+        args.contains("--permission-mode bypassPermissions"),
+        "{args}"
+    );
+    let prompt = sandbox.seen("PROMPT.md");
+    let branch = format!("vigil/fix-{key}-");
+    assert!(
+        prompt.contains(&format!("create the branch `{branch}")),
+        "{prompt}"
+    );
     assert!(
         !prompt.contains("{{"),
         "every placeholder is filled: {prompt}"
     );
-    let brief: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(dir.join("fix.json")).unwrap()).unwrap();
+    assert_hooks_and_scripts_off(&sandbox.seen("env"));
+    let brief: serde_json::Value = serde_json::from_str(&sandbox.seen("fix.json")).unwrap();
     assert_eq!(brief["subject"]["file"], "github/workflows/ci.yml");
     assert!(
         brief.get("evidence").is_none(),
         "the sweep's prose stays out: {brief}"
     );
+    let first_branch = fs::read_to_string(sandbox.path().join("counter.branch")).unwrap();
 
-    // `--yes` asks nothing; a second run in the same second gets its own folder.
+    // `--yes` asks nothing; a second run, often in the same second, gets its own branch.
     let again = sandbox.fix(&[&key, "--yes"], "");
     assert!(again.status.success(), "{}", text(&again.stderr));
     assert!(!text(&again.stderr).contains("[y/N]"));
     let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
-    let dirs: Vec<String> = history
-        .lines()
-        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["dir"].to_string())
-        .collect();
-    assert_eq!(dirs.len(), 2);
+    assert_eq!(history.lines().count(), 2);
     let last: serde_json::Value = serde_json::from_str(history.lines().last().unwrap()).unwrap();
     assert_eq!(last["confirmed"], "yes_flag");
-    assert_ne!(dirs[0], dirs[1]);
+    let second_branch = fs::read_to_string(sandbox.path().join("counter.branch")).unwrap();
+    assert!(second_branch.starts_with(&branch), "{second_branch}");
+    assert_ne!(first_branch, second_branch);
 
     let unknown = sandbox.fix(&["0123456789abcdef", "--yes"], "");
     assert!(!unknown.status.success());
     assert!(text(&unknown.stderr).contains("no report has finding 0123456789abcdef"));
+}
+
+#[test]
+fn an_agent_that_pushed_to_the_default_branch_did_not_fix_it() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    assert!(sandbox.sweep("issue").status.success());
+    let key = sandbox.newest_report("github-o--r")["issues"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let pushed = sandbox
+        .command("push-main")
+        .args(["fix", &key, "--yes"])
+        .output()
+        .unwrap();
+    assert!(!pushed.status.success());
+    let stdout = text(&pushed.stdout);
+    assert!(
+        stdout.contains(
+            "unknown: the default branch main of o/r moved during the fix, from 0000000 to \
+             2222222; check what was pushed to it; the agent reported fixed: pinned the action"
+        ),
+        "{stdout}"
+    );
+    let stderr = text(&pushed.stderr);
+    assert!(
+        stderr.contains("The agent's log:\n"),
+        "the log is shown: {stderr}"
+    );
+    assert!(stderr.contains("args: -p"), "{stderr}");
+    let history = fs::read_to_string(sandbox.path().join("data/state/fixes.jsonl")).unwrap();
+    assert!(history.contains(r#""outcome":"unknown""#), "{history}");
+    assert!(history.contains(r#""pull_request":null"#), "{history}");
+    fs::remove_file(sandbox.path().join("counter.main")).unwrap();
+
+    // A change to files reported done without a pull request is not a fix either.
+    let no_pr = sandbox
+        .command("no-pr")
+        .args(["fix", &key, "--yes"])
+        .output()
+        .unwrap();
+    assert!(!no_pr.status.success());
+    assert!(
+        text(&no_pr.stdout).contains(
+            "unknown: the agent reported the fix done without a pull request, which a change to \
+             files needs; the agent reported fixed: pinned the action"
+        ),
+        "{}",
+        text(&no_pr.stdout)
+    );
+}
+
+#[test]
+fn an_edited_fix_prompt_is_named_and_one_without_its_rules_refused() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n\n[github]\nrepos = [\"o/r\"]\n");
+    assert!(sandbox.sweep("issue").status.success());
+    let key = sandbox.newest_report("github-o--r")["issues"][0]["key"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let prompts = sandbox.path().join("data/prompts");
+    fs::create_dir_all(&prompts).unwrap();
+
+    fs::write(prompts.join("fix.md"), "Mine: {{target}}\n\n{{access}}\n").unwrap();
+    let edited = sandbox.fix(&[&key], "n\n");
+    let stdout = text(&edited.stdout);
+    assert!(
+        stdout.contains("\nUses your edited prompt, prompts/fix.md.\n"),
+        "{stdout}"
+    );
+
+    fs::write(prompts.join("fix.md"), "Mine: {{target}}, anywhere\n").unwrap();
+    let runs = sandbox.runs();
+    let refused = sandbox.fix(&[&key, "--yes"], "");
+    assert!(!refused.status.success());
+    let stderr = text(&refused.stderr);
+    assert!(
+        stderr.contains("prompts/fix.md has no {{access}} line"),
+        "{stderr}"
+    );
+    assert_eq!(sandbox.runs(), runs, "the agent did not run");
 }
 
 #[test]
@@ -851,6 +995,12 @@ fn fix_all_asks_once_runs_one_agent_and_records_each_item() {
     assert!(first < second, "{stdout}");
     assert!(stdout.contains("  - bind it locally\n  $ sudo systemctl stop redis\n"));
     assert!(stdout.contains("  $ sudo apt-get install --only-upgrade openssl\n"));
+    assert!(
+        stdout.contains(
+            "\nThe agent runs on this Mac with full access and reads what the server prints"
+        ),
+        "a server fix says what reaches the agent: {stdout}"
+    );
     let stderr = text(&declined.stderr);
     assert!(
         stderr.contains("Run these 2 fixes now with claude, with full access, in one run? [y/N]"),
@@ -892,15 +1042,22 @@ fn fix_all_asks_once_runs_one_agent_and_records_each_item() {
         assert_eq!(record["target"], "server:web");
         assert_eq!(record["confirmed"], "yes_flag");
         assert_eq!(record["exit_code"], 0);
-        assert_eq!(record["dir"], records[0]["dir"], "one fix folder");
+        assert_eq!(record["started"], records[0]["started"], "one run");
     }
-    let dir = PathBuf::from(records[0]["dir"].as_str().unwrap());
-    let prompt = fs::read_to_string(dir.join("PROMPT.md")).unwrap();
+    assert_eq!(
+        sandbox.fix_folders(),
+        0,
+        "the recorded run's folder is deleted"
+    );
+    let prompt = sandbox.seen("PROMPT.md");
     assert!(prompt.starts_with("# Fix all: server:web"), "{prompt}");
     assert!(prompt.contains("sh -s <<'VIGIL_END'"), "{prompt}");
     assert!(!prompt.contains("{{"), "every placeholder is filled");
-    let briefs: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(dir.join("fixes.json")).unwrap()).unwrap();
+    assert!(
+        !sandbox.seen("env").contains("GIT_CONFIG_COUNT="),
+        "only a repository fix turns git hooks off"
+    );
+    let briefs: serde_json::Value = serde_json::from_str(&sandbox.seen("fixes.json")).unwrap();
     assert_eq!(briefs[0]["key"], keys[0].as_str());
     assert!(
         briefs[0].get("evidence").is_none(),
@@ -912,8 +1069,12 @@ fn fix_all_asks_once_runs_one_agent_and_records_each_item() {
     let findings = text(&sandbox.run(&["findings"]).stdout);
     assert!(findings.contains("server:web (swept "), "{findings}");
     assert!(findings.contains("1 open, 1 fix reported"), "{findings}");
+}
 
-    // With one item left Fix all still runs it from the CLI; a repository is refused.
+#[test]
+fn fix_all_refuses_a_repository_a_target_without_fixes_and_an_unknown_one() {
+    let sandbox = Sandbox::new(WEB);
+    assert!(sandbox.sweep("server-issues").status.success());
     let repo = sandbox.fix(&["all", "github:o/r", "--yes"], "");
     assert!(
         text(&repo.stderr).contains("each fix opens its own pull request"),

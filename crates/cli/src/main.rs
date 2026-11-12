@@ -20,6 +20,7 @@ use vigil_core::Inventory;
 use vigil_core::Latest;
 use vigil_core::Listed;
 use vigil_core::LoadConfigError;
+use vigil_core::LogTail;
 use vigil_core::NvdAccess;
 use vigil_core::OsvQuery;
 use vigil_core::Outcome;
@@ -426,15 +427,18 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
     for command in &plan.fix().commands {
         text.push_str(&format!("  $ {command}\n"));
     }
+    for note in plan.notes() {
+        text.push_str(&format!("{note}\n"));
+    }
     print(&text);
     let confirmed = confirm(
         yes,
         &format!(
             "Run this fix now with {}, with full access? [y/N]",
-            plan.agent()
+            plan.agent_and_model()
         ),
     )?;
-    let record = run_fix(
+    let (record, log) = run_fix(
         data_dir,
         &plan,
         confirmed,
@@ -449,18 +453,28 @@ fn fix(data_dir: &DataDir, config: &Config, key: FindingKey, yes: bool) -> anyho
         .as_ref()
         .map_or(String::new(), |url| format!("\npull request: {url}"));
     print(&format!(
-        "{}: {}{pull_request}\n(log and files in {})",
-        record.outcome,
-        record.summary,
-        record.dir.display()
+        "{}: {}{pull_request}",
+        record.outcome, record.summary
     ));
     if record.outcome != Outcome::Fixed || record.exit_code != Some(0) {
+        print_log(&log);
         let exit = record
             .exit_code
             .map_or("no exit code".to_owned(), |c| format!("exit code {c}"));
         anyhow::bail!("the fix did not finish: {}, agent {exit}", record.outcome);
     }
     Ok(())
+}
+
+/// Shows the end of a fix's agent log on stderr, for a fix that did not finish: the run's
+/// folder is deleted once it is recorded, so this is the only copy left.
+fn print_log(log: &LogTail) {
+    let mut text = "The agent's log".to_owned();
+    if let Some(note) = &log.note {
+        text.push_str(&format!(" ({note})"));
+    }
+    text.push_str(&format!(":\n{}", log.text));
+    status(&text);
 }
 
 /// Asks `question` on stderr unless `yes`, and says how the run was confirmed. Fails when the
@@ -508,17 +522,20 @@ fn fix_all(data_dir: &DataDir, config: &Config, target: &str, yes: bool) -> anyh
             text.push_str(&format!("  $ {command}\n"));
         }
     }
+    for note in plan.notes() {
+        text.push_str(&format!("{note}\n"));
+    }
     print(&text);
     let confirmed = confirm(
         yes,
         &format!(
             "Run these {} fixes now with {}, with full access, in one run? [y/N]",
             plan.items().len(),
-            plan.agent()
+            plan.agent_and_model()
         ),
     )?;
     let labels = plan.labels();
-    let records = run_fix_all(
+    let (records, log) = run_fix_all(
         data_dir,
         &plan,
         confirmed,
@@ -539,12 +556,10 @@ fn fix_all(data_dir: &DataDir, config: &Config, target: &str, yes: bool) -> anyh
             record.summary
         ));
     }
-    if let Some(record) = records.first() {
-        out.push_str(&format!("(log and files in {})", record.dir.display()));
-    }
     print(&out);
     let (outcome, summary) = fix_all_outcome(&records);
     if outcome != Outcome::Fixed {
+        print_log(&log);
         anyhow::bail!("not every fix finished: {summary}");
     }
     Ok(())
