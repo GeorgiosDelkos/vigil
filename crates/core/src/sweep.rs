@@ -897,12 +897,14 @@ impl Shared<'_> {
     }
 }
 
-/// The most problems the retry prompt lists, and the most characters of each. The prompt is one
-/// command-line argument, and macOS allows 1 MiB for all of them (`getconf ARG_MAX`), which a
-/// file at every cap could exceed with every problem listed, and one problem could alone, since
-/// some quote what the agent wrote (a 2 MB component id). Bound: 50 problems of at most 500
+/// The most problems the retry prompt lists. The prompt is one command-line argument, and macOS
+/// allows 1 MiB for all of them (`getconf ARG_MAX`), which a file at every cap could exceed with
+/// every problem listed. Bound, with [`RETRY_PROBLEM_CHARS`]: 50 problems of at most 500
 /// characters, each at most 4 bytes, is 100 kB. Arbitrary otherwise: enough to see what to fix.
 const RETRY_PROBLEMS: usize = 50;
+
+/// The most characters of each listed problem, since one problem alone could pass `ARG_MAX`:
+/// some quote what the agent wrote (a 2 MB component id). See [`RETRY_PROBLEMS`] for the bound.
 const RETRY_PROBLEM_CHARS: usize = 500;
 
 /// The prompt of the second attempt: the first one's file `previous` (a phrase such as "was
@@ -1628,10 +1630,10 @@ mod tests {
 
         let long = vec![format!("component {}", "c".repeat(2_000_000))];
         let prompt = retry_prompt("was rejected", &long);
+        let kept = RETRY_PROBLEM_CHARS - "component ".len();
         assert!(
-            prompt.len() < 1000,
-            "one problem is cut: {} bytes",
-            prompt.len()
+            prompt.ends_with(&format!("again:\n- component {}", "c".repeat(kept))),
+            "one problem is cut to exactly {RETRY_PROBLEM_CHARS} characters"
         );
     }
 

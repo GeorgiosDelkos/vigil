@@ -469,7 +469,7 @@ and command rules under "Bundle and findings". Concretely:
   and the agents (`.git-credentials`, `.codex/auth.json`, ...), in any folder: the home folder
   has other spellings (`/System/Volumes/Data/Users/<name>`) that a rule anchored at `~/` would
   miss. Not covered: another letter case (`~/.SSH`), which APFS accepts and no CLI's rules fold.
-  Gemini CLI gets them as a policy rule over its file reads' arguments; Codex cannot deny reads
+  Gemini CLI gets them as a policy rule over its tools' path arguments; Codex cannot deny reads
   inside its sandbox, which is accepted because it has no way to send them out of the run.
 - The environment is an allowlist: `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `TMPDIR`,
   `TERM`, proxies and their certificate files, `LC_*`, `XDG_*`, and the agent's own prefixes
@@ -523,10 +523,10 @@ Why each CLI needs what it gets:
 - Gemini CLI's `--admin-policy` loads a policy at the admin tier, above the user's own; it is
   ignored when policy files exist in `/Library/Application Support/GeminiCli/policies`, an
   administrator's choice. Its file tools reach only the workspace unless the user's settings
-  add folders, so the policy also denies a `read_file`, `glob` or `list_directory` call whose
-  arguments name a credential path, and denies content search and `read_many_files` outright,
-  since a search or a glob such as `.ss[h]` gets past a rule on names (writes are left out:
-  `findings.json` may name `~/.ssh/config`).
+  add folders, so the policy also denies any tool call (writes included) whose path argument
+  names a credential path, matching only path arguments so `findings.json` text may still name
+  `~/.ssh/config`, and denies content search and `read_many_files` outright, since a search or
+  a glob such as `.ss[h]` gets past a rule on names.
   The app writes it into the bundle before each run, replacing whatever is there (a link
   included), since Gemini CLI can edit bundle files but reads the policy only at start.
   `--extensions none` turns every extension off.

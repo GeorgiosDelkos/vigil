@@ -989,7 +989,8 @@ mod tests {
         fs::write(&path, " ".repeat(limit + 1)).unwrap();
         let err = read(&path).unwrap_err();
         assert!(err.to_string().contains("byte limit"), "{err}");
-        // The limit falls inside the last character: still reported as too large.
+        // The read stops at limit + 1 bytes, inside the last character: still reported as too
+        // large, not as invalid UTF-8, because the size is checked before reading.
         fs::write(&path, format!("{}\u{e9}", " ".repeat(limit))).unwrap();
         let err = read(&path).unwrap_err();
         assert!(err.to_string().contains("byte limit"), "{err}");

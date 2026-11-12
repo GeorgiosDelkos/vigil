@@ -155,26 +155,31 @@ fn opencode_sweep_config() -> String {
 const GEMINI_POLICY: &str = "gemini-policy.toml";
 
 /// Gemini CLI's sweep policy: no shell, web, memory or MCP tools, no content search or
-/// multi-file read, and no file read, glob or listing whose arguments name one of
-/// [`CREDENTIAL_PATHS`]. Its file tools reach only its workspace, the bundle, unless the user's
-/// settings add folders (`context.includeDirectories`), hence the credential rule. Content search
-/// (`grep_search`, formerly `search_file_content`) and `read_many_files` (which takes globs such
-/// as `.ss[h]`) would get past a rule on the names in their arguments, so they are denied
-/// outright; `read_file` is enough for a sweep. Writes are left out of the credential rule:
-/// `findings.json` may name `~/.ssh/config` in its text. Admin tier, so the user's own policies
-/// cannot allow them again. Format and tool names: `docs/reference/policy-engine.md` and
-/// `docs/reference/tools.md` of google-gemini/gemini-cli at v0.68.0 (5a5c718), checked
-/// 2026-11-12: `argsPattern` is a regular expression over the call's arguments as JSON.
-/// `save_memory` is from older releases; a name no tool has matches nothing. The pattern is
-/// built by escaping only `.`, and sits in a TOML literal string: a test holds every entry to
-/// letters, digits and `._/-` with an optional trailing `*`.
+/// multi-file read, and no tool call whose path argument names one of [`CREDENTIAL_PATHS`]. Its
+/// file tools reach only its workspace, the bundle, unless the user's settings add folders
+/// (`context.includeDirectories`), hence the credential rule; it covers every tool, writes too
+/// (`replace` on `~/.ssh/config` could add a `ProxyCommand`). It matches only path arguments
+/// (`file_path`, `dir_path`, `path`, glob `pattern`), not text such as a `content` that may name
+/// `~/.ssh/config`, so writing `findings.json` is never refused. Content search (`grep_search`,
+/// formerly `search_file_content`) and `read_many_files` (which takes globs such as `.ss[h]`)
+/// would get past a rule on names, so they are denied outright; `read_file` is enough for a
+/// sweep. Admin tier, so the user's own policies cannot allow them again. Format, tool names and
+/// argument keys: `docs/reference/policy-engine.md` and `docs/reference/tools.md` of
+/// google-gemini/gemini-cli at v0.68.0 (5a5c718), checked 2026-11-12: `argsPattern` is a
+/// regular expression over the arguments as a stable JSON string, written `"key":"value"` as in
+/// its own `"file_path":".*\.env"` example. `save_memory` is from older releases; a name no tool
+/// has matches nothing. The pattern is built by escaping only `.`, and sits in a TOML literal
+/// string: a test holds every entry to letters, digits and `._/-` with an optional trailing `*`.
 fn gemini_policy() -> String {
     let names: Vec<String> = CREDENTIAL_PATHS
         .iter()
         .map(|p| p.trim_end_matches('*').replace('.', r"\."))
         .collect();
-    // A path in the JSON starts after a quote or a folder separator.
-    let pattern = format!(r#"["/](?:{})"#, names.join("|"));
+    // The name is the whole value or follows a folder separator in it.
+    let pattern = format!(
+        r#""(?:file_path|dir_path|path|pattern)":"(?:[^"]*/)?(?:{})"#,
+        names.join("|")
+    );
     format!(
         r#"# Written by Vigil before each sweep; edits are overwritten.
 [[rule]]
@@ -192,7 +197,7 @@ decision = "deny"
 priority = 999
 
 [[rule]]
-toolName = ["read_file", "glob", "list_directory"]
+toolName = "*"
 argsPattern = '{pattern}'
 decision = "deny"
 priority = 999
@@ -1198,10 +1203,9 @@ mod tests {
             assert!(denied.iter().any(|t| t.as_str() == Some(tool)), "{tool}");
         }
         assert_eq!(rules[1]["mcpName"].as_str(), Some("*"));
-        // The credential rule covers reads only: findings.json may name `~/.ssh/config`.
-        let read_tools = rules[2]["toolName"].as_array().unwrap();
-        assert!(read_tools.iter().all(|t| t.as_str() != Some("write_file")));
-        assert!(read_tools.iter().any(|t| t.as_str() == Some("read_file")));
+        // The credential rule covers every tool, writes included, but only path arguments, so
+        // findings.json may still name `~/.ssh/config` in its text.
+        assert_eq!(rules[2]["toolName"].as_str(), Some("*"));
         // The pattern escapes only `.` and is written into a TOML literal string.
         let plain = |p: &str| {
             p.trim_end_matches('*')
@@ -1213,7 +1217,12 @@ mod tests {
             "{CREDENTIAL_PATHS:?}"
         );
         let pattern = rules[2]["argsPattern"].as_str().unwrap();
-        assert!(pattern.starts_with(r#"["/](?:\.ssh|\.aws|"#), "{pattern}");
+        assert!(
+            pattern.starts_with(
+                r#""(?:file_path|dir_path|path|pattern)":"(?:[^"]*/)?(?:\.ssh|\.aws|"#
+            ),
+            "{pattern}"
+        );
         assert!(pattern.contains(r"|Library/Keychains|"), "{pattern}");
         assert!(pattern.contains(r"|\.env|\.git-credentials|"), "{pattern}");
         assert!(
