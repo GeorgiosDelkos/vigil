@@ -21,6 +21,7 @@ mod github;
 mod html_report;
 mod inventory;
 mod lifecycle;
+mod login_shell;
 mod matching;
 mod package;
 mod paths;

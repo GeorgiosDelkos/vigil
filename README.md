@@ -358,11 +358,13 @@ fixes are not affected. Gemini CLI still loads your `~/.gemini/settings.json` (i
 its MCP servers start, though their tools are denied), and ignores Vigil's sweep policy when an
 administrator has put policy files in `/Library/Application Support/GeminiCli/policies`.
 
-Agents are found through your login shell's `PATH` (`$SHELL -lc`), so an agent installed with
-npm or Homebrew usually starts as it does in a terminal. With zsh that reads `.zprofile`, not
-`.zshrc`: an agent whose `PATH` entry is only in `.zshrc`, as nvm often sets it, is not found
-until the entry is also in `.zprofile`. The model each agent uses is set in Settings or in
-`[models]`.
+Agents and tools are found on the `PATH` your shell sets up as an interactive login shell
+(`$SHELL -ilc` for zsh and bash, `-lc` for other shells), so an agent installed with npm,
+Homebrew or its own installer starts as it does in a terminal, whether its `PATH` entry is in
+`.zprofile` or `.zshrc`. This runs your shell startup files, as opening a terminal does. If
+they fail or take more than 10 seconds, a login shell without `.zshrc` (`-lc`) is used
+instead. The CLI run from a terminal already has your terminal's `PATH` and uses `-lc`. The
+model each agent uses is set in Settings or in `[models]`.
 
 ## Project layout
 

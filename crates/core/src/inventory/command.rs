@@ -42,7 +42,7 @@ const STDERR_LIMIT: usize = 300;
 
 /// How long one listing command may run. Arbitrary: `brew info --installed` takes a few
 /// seconds with a hundred formulae; a minute means the tool is stuck.
-const TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The most bytes read from a command's stdout or stderr. Arbitrary: far above any listing seen
 /// (`brew info` prints a few MB, a server's inventory tens), and low enough that a command
@@ -109,11 +109,12 @@ pub(crate) fn run_any_status(
 /// Runs `program` with `input` on stdin and returns its output whatever the exit status, or
 /// `None` when it is not installed. Waits up to `timeout`.
 ///
-/// Stdout is decoded lossily: the caller reads output that mixes many files (a server's
-/// inventory), where one file's bad byte must not discard the rest.
+/// Stdout is decoded lossily: the callers read output that mixes many files (a server's
+/// inventory, the user's shell startup files), where one file's bad byte must not discard the
+/// rest.
 ///
-/// Not cancellable: its one caller, a server's collection, is one command bounded by
-/// `timeout`, and the sweep checks its cancel before it.
+/// Not cancellable: each caller runs one command bounded by `timeout`. A sweep checks its
+/// cancel before a server's collection; finding an agent was not cancellable before either.
 pub(crate) fn run_with_input(
     program: &str,
     args: &[&str],
