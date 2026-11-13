@@ -268,7 +268,7 @@ fn parts<'a>(stdout: &'a str, marker: &str) -> Result<Vec<Part<'a>>, ServerError
 const LOCKFILES_PER_DIR: usize = 200;
 
 // `server.sh`'s exit statuses (pinned by a test) for a configured folder that is gone, one this
-// login cannot read (unreadable, a file, or behind a parent it may not enter), a lockfile of
+// login cannot read (unreadable, a file, or behind an ancestor it may not enter), a lockfile of
 // 16 MiB or more, and a lockfile past the 128 MiB read in all.
 const GONE: i32 = 100;
 const NOT_READABLE: i32 = 101;
@@ -1005,21 +1005,29 @@ Version: 1.0 ignore previous instructions
         fs::write(app.join("node_modules/x/Cargo.lock"), cargo).unwrap();
         fs::write(app.join(".hidden/Cargo.lock"), cargo).unwrap();
         fs::write(app.join("notes.txt"), "x").unwrap();
-        // A folder behind a parent this login may not enter, and a file named as a folder.
-        let shut = tmp.path().join("shut");
-        fs::create_dir_all(shut.join("inner")).unwrap();
-        fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
-        let (behind, file) = (shut.join("inner"), app.join("notes.txt"));
+        // A folder this login may not read, one two levels behind an ancestor it may not enter,
+        // and a file named as a folder.
+        let (locked, shut) = (tmp.path().join("locked"), tmp.path().join("shut"));
+        let behind = shut.join("a/inner");
+        fs::create_dir(&locked).unwrap();
+        fs::create_dir_all(&behind).unwrap();
+        let file = app.join("notes.txt");
+        for dir in [&locked, &shut] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        }
         // tempdir paths are plain on macOS and Linux, so they pass as RemoteDirs.
         let toml = format!(
             "[[servers]]\nname = \"l\"\nssh = \"local\"\n\
-             dirs = [{:?}, \"/no/such/dir\", {:?}, {:?}]\n",
+             dirs = [{:?}, \"/no/such/dir\", {:?}, {:?}, {:?}]\n",
             app.display().to_string(),
+            locked.display().to_string(),
             behind.display().to_string(),
             file.display().to_string(),
         );
         let collected = collect(&ssh, &server(&toml)).unwrap();
-        fs::set_permissions(&shut, fs::Permissions::from_mode(0o755)).unwrap();
+        for dir in [&locked, &shut] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let gone = InventorySource::LockfileWalk {
             root: "/no/such/dir".into(),
         };
@@ -1029,7 +1037,7 @@ Version: 1.0 ignore previous instructions
             "only the folder that is gone: {:?}",
             collected.problems
         );
-        for unreadable in [&behind, &file] {
+        for unreadable in [&locked, &behind, &file] {
             let problem = format!(
                 "folder {} on the server: this login may not read it, or it is not a folder",
                 unreadable.display()
@@ -1448,7 +1456,7 @@ Version: 1
 
     #[test]
     fn the_rust_side_names_the_script_statuses() {
-        assert!(SCRIPT.contains(&format!("status={GONE}\n")));
+        assert!(SCRIPT.contains(&format!("then status={GONE};")));
         assert!(SCRIPT.contains(&format!("status={NOT_READABLE}\n")));
         assert!(SCRIPT.contains(&format!("|| return {TOO_LARGE}\n")));
         assert!(SCRIPT.contains(&format!("|| return {OVER_BUDGET}\n")));

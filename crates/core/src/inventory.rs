@@ -38,9 +38,7 @@ pub struct Inventory {
     /// sources that were still read (see [`InventoryError::is_failure`]).
     ///
     /// A collector adds a failure only through `fail` (or `run` and `absorb`), which also names
-    /// its source in `failed`; only notes are pushed here directly. The one exception is a
-    /// project folder that cannot be listed, which fails whatever the cause
-    /// (`lockfiles::unopened_root` says why).
+    /// its source in `failed`; only notes are pushed here directly.
     pub problems: Vec<InventoryError>,
     /// The sources a failure in `problems` left unread or partly read, so the sweep keeps the
     /// findings they gave last time (see `unchecked`).
@@ -561,6 +559,15 @@ pub enum InventoryError {
         /// The lockfile.
         path: PathBuf,
     },
+    /// A project folder the user chose could not be listed, whatever the cause.
+    #[error("cannot list the project folder {}", root.display())]
+    ProjectFolder {
+        /// The project folder.
+        root: PathBuf,
+        /// The underlying error.
+        #[source]
+        source: std::io::Error,
+    },
     /// A file named as a lockfile is larger than any real one, so it is not read.
     #[error(
         "{} is {len} bytes, over the {limit}-byte limit for a lockfile, so it is not read",
@@ -585,13 +592,17 @@ impl InventoryError {
             | Self::Command { .. }
             | Self::Parse { .. }
             | Self::Cancelled { .. }
-            | Self::WalkTimedOut { .. } => true,
+            | Self::WalkTimedOut { .. }
+            // A project folder fails whatever the cause, permission included: the user chose
+            // it, and losing access to it is a change (privacy access to `~/Documents` taken
+            // away), not a lasting fact found on the way. As a note, every finding under it would
+            // read as resolved and its fix as confirmed.
+            | Self::ProjectFolder { .. } => true,
             // A file or folder this user may not read (a privacy-protected folder, another
             // user's `0700` one) stays so on every sweep; counting it would keep this Mac from
             // ever being clear. Accepted downside: nothing behind it is carried, so when access
             // to it is taken away, the findings of its lockfiles or version-manager versions
-            // read as resolved and their fixes as confirmed. A project folder itself is the
-            // exception (`lockfiles::unopened_root`).
+            // read as resolved and their fixes as confirmed.
             Self::Io { source, .. } => source.kind() != std::io::ErrorKind::PermissionDenied,
             // Each is about one item, and the next sweep reports it again: a project folder
             // holds as many entries then, a lockfile is as large, and one in iCloud stays there.

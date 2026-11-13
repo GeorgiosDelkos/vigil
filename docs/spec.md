@@ -163,7 +163,7 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   does not know reads as `unknown`, not fully checked, so a report a later build wrote still
   reads. A tool that is not installed, a graph turned off, a file or folder under a project
   folder this user may not read, a lockfile over a size limit, a server folder this login
-  cannot read (unreadable, a file, or behind a parent it may not enter), a server folder walk
+  cannot read (unreadable, a file, or behind an ancestor it may not enter), a server folder walk
   that exits non-zero (`find` does not say why, and the usual cause is a folder it may not
   read; an I/O error that would pass is then missed), a server lockfile that cannot be read,
   and the notes (`NoProduct`, another Cargo registry, an npm tree problem, too many entries,

@@ -314,16 +314,16 @@ fn unwalked(inventory: &mut Inventory, path: &Path, error: std::io::Error) {
 }
 
 /// Records that the project folder `root` could not be listed: a failed source whatever the
-/// cause, permission included, unlike a folder under it. The user chose this folder, and losing
-/// access to it is a change (privacy access to `~/Documents` revoked), not a lasting fact found
-/// on the way: as a note, every finding under it would read as resolved and its fix confirmed.
-/// It stays not fully checked until access is back or the folder leaves the settings.
-fn unopened_root(inventory: &mut Inventory, root: &Path, error: std::io::Error) {
-    let source = InventorySource::LockfileWalk {
+/// cause, permission included, unlike a folder under it ([`InventoryError::ProjectFolder`]).
+fn unopened_root(inventory: &mut Inventory, root: &Path, source: std::io::Error) {
+    let error = InventoryError::ProjectFolder {
+        root: root.to_owned(),
+        source,
+    };
+    let unwalked = InventorySource::LockfileWalk {
         root: root.to_owned(),
     };
-    inventory.failed.insert(source);
-    inventory.problems.push(InventoryError::io(root, error));
+    inventory.fail(unwalked, error);
 }
 
 /// Returns whether the walk may enter the folder at `path` by its name: not hidden by a dot,
@@ -1138,7 +1138,7 @@ mod tests {
         let inventory = walked(root, &[]);
         assert!(matches!(
             inventory.problems[..],
-            [InventoryError::Io { .. }]
+            [InventoryError::ProjectFolder { .. }]
         ));
         let unwalked = InventorySource::LockfileWalk { root: root.into() };
         assert_eq!(inventory.failed, [unwalked].into());
@@ -1155,7 +1155,7 @@ mod tests {
         let inventory = walked(&root, &[]);
         fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(
-            matches!(&inventory.problems[..], [InventoryError::Io { source, .. }]
+            matches!(&inventory.problems[..], [InventoryError::ProjectFolder { source, .. }]
                 if source.kind() == std::io::ErrorKind::PermissionDenied),
             "{:?}",
             inventory.problems
