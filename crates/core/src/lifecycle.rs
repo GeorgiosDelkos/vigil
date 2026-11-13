@@ -32,8 +32,6 @@ use crate::findings::is_forging;
 use crate::fix;
 use crate::inventory::FoundIn;
 use crate::paths::DataDir;
-use crate::popover;
-use crate::popover::TargetKind;
 use crate::sweep;
 use crate::unchecked::Unchecked;
 
@@ -617,7 +615,7 @@ impl FixKind {
     pub(crate) fn of(target: &str, commands: &[String], no_fixed_release: bool) -> Self {
         if no_fixed_release {
             Self::NoRelease
-        } else if commands.is_empty() && !matches!(popover::target_kind(target), TargetKind::Repo) {
+        } else if commands.is_empty() && !target.starts_with("github:") {
             Self::Manual
         } else {
             Self::Run

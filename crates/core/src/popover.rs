@@ -522,8 +522,7 @@ pub fn target_label(target: &str) -> &str {
         .unwrap_or(target)
 }
 
-/// What `target`, as configured, is.
-pub(crate) fn target_kind(target: &str) -> TargetKind {
+fn target_kind(target: &str) -> TargetKind {
     if target.starts_with("github:") {
         TargetKind::Repo
     } else if target.starts_with("server:") {
