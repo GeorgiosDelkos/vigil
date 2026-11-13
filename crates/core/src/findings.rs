@@ -106,7 +106,11 @@ pub struct Fix {
     /// do until one is released, and there are no commands: upgrading to the newest version
     /// would change nothing, and a fix that runs it would read "Still found after a fix" at the
     /// next sweep. Absent, so false, in findings and reports written before it existed.
-    #[serde(default)]
+    ///
+    /// Written only when true: `Fix` denies unknown fields, so a `vigil` from before this field
+    /// that plans a fix from a newer report fails on it. Leaving out `false` limits that to the
+    /// fixes it would have run for nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_fixed_release: bool,
 }
 

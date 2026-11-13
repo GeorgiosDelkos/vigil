@@ -567,11 +567,9 @@ const SEVERITY_COLOURS: Readonly<Record<Severity, string>> = {
 };
 
 /** What a target's last sweep checked, when, and how many findings are dismissed there:
- * "139 components checked · swept 1 h ago · 2 dismissed", and "not fully checked" when a
- * source failed or a file could not be read. On the target's own screen, `named` adds what was
- * not checked: "not fully checked: pipx". No box says it again (the owner's decision,
- * 2026-11-13). */
-function sweptLine(t: TargetLine, now: Date, named: "named" | "short" = "short"): string {
+ * "139 components checked · swept 1 h ago · 2 dismissed", then `unchecked` when a source
+ * failed or a file could not be read. */
+function sweptLine(t: TargetLine, now: Date, unchecked: string): string {
   const parts =
     t.swept === null ? ["not swept yet"] : [t.checked, `swept ${since(t.swept, now)} ago`];
   if (t.dismissed > 0) {
@@ -579,7 +577,7 @@ function sweptLine(t: TargetLine, now: Date, named: "named" | "short" = "short")
   }
   // Whatever is open: a failed source may hide more.
   if (t.warning !== null) {
-    parts.push(named === "named" ? `not fully checked: ${t.warning}` : "not fully checked");
+    parts.push(unchecked);
   }
   return parts.filter((part) => part !== null).join(" · ");
 }
@@ -599,7 +597,7 @@ function Targets(props: {
           <button type="button" class="trow target" onClick={() => props.onOpen(t.key)}>
             <Icon name={t.kind} />
             <span class="tname">{t.label}</span>
-            <span class="tsub">{sweptLine(t, props.now)}</span>
+            <span class="tsub">{sweptLine(t, props.now, "not fully checked")}</span>
             <TargetFigures target={t} colours={SEVERITY_COLOURS} />
             {/* TargetFigures says the open count in its sentence, so it is not read twice. */}
             <span class="open" aria-hidden="true">
@@ -661,7 +659,11 @@ function TargetFindings(props: {
         <div class="headline">
           <div class="headline-text">
             <h1>{props.line.label}</h1>
-            <p class="sub">{sweptLine(props.line, props.now, "named")}</p>
+            {/* The target's own screen names what was not checked, in no box (the owner's
+                decision, 2026-11-13): "not fully checked: pipx". */}
+            <p class="sub">
+              {sweptLine(props.line, props.now, `not fully checked: ${props.line.warning ?? ""}`)}
+            </p>
           </div>
           <Show when={asked() === null && props.line.fix_all}>
             {(label) => (

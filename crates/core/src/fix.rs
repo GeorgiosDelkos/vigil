@@ -278,9 +278,9 @@ impl Place {
 /// # Errors
 ///
 /// Fails when no report has `key`, a newer sweep of its target no longer has it, it is
-/// dismissed, its fix is malformed or may address another repository, its target is no longer
-/// configured, no agent is configured or found, or the fix prompt cannot be read or lacks its
-/// `{{access}}` line.
+/// dismissed, its fix is malformed or may address another repository, it has nothing to run
+/// ([`FixError::Manual`], [`FixError::NoRelease`]), its target is no longer configured, no agent
+/// is configured or found, or the fix prompt cannot be read or lacks its `{{access}}` line.
 pub fn plan_fix(data_dir: &DataDir, config: &Config, key: FindingKey) -> Result<FixPlan, FixError> {
     let finding = plan_finding(data_dir, key)?;
     let setup = setup(data_dir, config, &finding.target, Prompt::Fix)?;

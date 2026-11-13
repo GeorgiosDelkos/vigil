@@ -94,6 +94,7 @@ impl Prompt {
                 0xd7b9_24a3_0c7b_42b5, // On #57's branch only; its squash merge left it out.
                 0x40f6_3d88_cb2d_afb9,
                 0xd04f_fdc4_f024_d6bd,
+                0xfee7_d752_b460_89ca,
             ],
             Self::GitHub => &[
                 0x61c0_4d78_7cf2_cfd0,
@@ -107,6 +108,7 @@ impl Prompt {
                 0xfc5a_c134_c485_6303,
                 0x5c7d_edd4_9b6a_483b,
                 0x8551_3ab3_8a52_f638,
+                0xdc58_bfde_fb59_0880,
             ],
             Self::Server => &[
                 0xf408_6f27_d0ec_3536,
@@ -116,6 +118,7 @@ impl Prompt {
                 0x7204_4cf2_d0b2_ddbe, // On #57's branch only; its squash merge left it out.
                 0x9723_54ab_1f75_134c,
                 0x9fb6_3e5f_22b6_84ca,
+                0xd2f1_ad5a_04c5_0446,
             ],
             Self::Fix => &[
                 0x77ef_cded_9b10_794c,

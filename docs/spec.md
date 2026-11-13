@@ -565,6 +565,10 @@ The owner asked for a Fix all button on a target's screen and chose "one run, on
   such a label (the owner's report, 2026-11-13: "Fix all 2" over three rows, the third a
   manual fix). The button reads "Fix all N" (Rust's label) and shows only when it takes two or
   more items: one item already has Fix.
+- An item's kind is its lead's, as its fix is (decided 2026-11-10): a component whose worst
+  finding has no fixed release reads "No fix released yet" even when an upgrade would close a
+  lesser advisory in it, which shows in its detail. Leading with the runnable finding instead
+  was weighed and not done: it would rank by fixability over risk.
 - An item whose last fix ran but changed nothing keeps "Still found after a fix": that is what
   happened, and once a sweep with the current prompt marks it "No fix released yet", the two
   labels together say why. A new item with no fixed release never gets it, as nothing runs.
@@ -810,8 +814,16 @@ finding yet, the agent sets `"no_fixed_release": true` in its `fix`, leaves `com
 and gives what to do until a release in `summary` and `steps`. A fix with the field and a
 command is an error. The field is optional and false when absent, so older prompts and
 `findings.json` files still validate. `report.json` keeps it in each fix (`fix.no_fixed_release`,
-always written; a report saved before it reads as false), `report.md` heads such a fix "No fix
-released yet" instead of "Fix", and the app, the CLI and the HTML report label it the same way.
+written only when true, so a `vigil` from before it, whose fix planning denies unknown fields,
+still plans every other fix; a report saved before it reads as false), `report.md` heads such a
+fix "No fix released yet" instead of "Fix", and the app, the CLI and the HTML report label it the
+same way. The prompts ask for it only on positive evidence: an OSV range with neither a `fixed`
+nor a `last_affected` version, an NVD configuration with no end bound, a distribution advisory
+listing the package as not fixed, or advisory text saying so. A `versionEndIncluding` or
+`last_affected` bound names the last affected version, not whether a newer one is out, and the
+sweep agent cannot look that up (no network, no commands), so then it writes the upgrade as
+usual. Telling "Homebrew has nothing newer" apart needs the newest version in the inventory
+(`brew info` reports `versions.stable`), which is not collected yet.
 
 The app validates strictly (unknown fields, unknown ids, an advisory not fetched for the finding's
 component, a repeated advisory and component pair, empty text, control and invisible formatting

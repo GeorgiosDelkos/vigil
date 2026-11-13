@@ -522,7 +522,8 @@ pub fn target_label(target: &str) -> &str {
         .unwrap_or(target)
 }
 
-fn target_kind(target: &str) -> TargetKind {
+/// What `target`, as configured, is.
+pub(crate) fn target_kind(target: &str) -> TargetKind {
     if target.starts_with("github:") {
         TargetKind::Repo
     } else if target.starts_with("server:") {
@@ -1419,20 +1420,5 @@ mod tests {
             ["curl", "ffmpeg"],
             "ranked, the manual fix and the one with no release left out"
         );
-    }
-
-    #[test]
-    fn a_fix_is_run_manual_or_not_released_by_its_commands_and_target() {
-        let brew = ["brew upgrade curl".to_owned()];
-        assert_eq!(FixKind::of("mac", &brew, false), FixKind::Run);
-        assert_eq!(FixKind::of("server:web", &[], false), FixKind::Manual);
-        assert_eq!(FixKind::of("mac", &[], false), FixKind::Manual);
-        assert_eq!(
-            FixKind::of("github:o/r", &[], false),
-            FixKind::Run,
-            "a repository's agent opens a pull request from the steps"
-        );
-        assert_eq!(FixKind::of("mac", &[], true), FixKind::NoRelease);
-        assert_eq!(FixKind::of("github:o/r", &[], true), FixKind::NoRelease);
     }
 }

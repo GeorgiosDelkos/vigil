@@ -2597,7 +2597,12 @@ mod tests {
 
         let saved = serde_json::to_value(&report).unwrap();
         assert_eq!(saved["findings"][0]["fix"]["no_fixed_release"], true);
-        assert_eq!(saved["findings"][1]["fix"]["no_fixed_release"], false);
+        assert!(
+            saved["findings"][1]["fix"]
+                .get("no_fixed_release")
+                .is_none(),
+            "false is left out, so an older vigil still plans the fix"
+        );
         let text = report_markdown(&report);
         assert!(
             text.contains("No fix released yet: Do not parse untrusted input\n"),

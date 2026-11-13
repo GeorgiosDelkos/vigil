@@ -152,15 +152,13 @@ fn exploited_callout(view: &PopoverView) -> String {
         .map(|item| {
             let lead = &item.lead;
             // A command reads as code; a manual fix's summary reads as prose.
-            let first = match (lead.commands.first(), lead.fix.is_empty()) {
-                _ if lead.fix_kind == FixKind::NoRelease => {
+            let first = match (lead.fix_kind, lead.commands.first()) {
+                (FixKind::NoRelease, _) => {
                     format!(" No fix is released yet; until then: {}.", esc(&lead.fix))
                 }
-                (Some(command), _) => {
-                    format!(" Fix it first: <code>{}</code>", esc(command))
-                }
-                (None, false) => format!(" Fix it first: {}.", esc(&lead.fix)),
-                (None, true) => String::new(),
+                (_, Some(command)) => format!(" Fix it first: <code>{}</code>", esc(command)),
+                (_, None) if !lead.fix.is_empty() => format!(" Fix it first: {}.", esc(&lead.fix)),
+                (_, None) => String::new(),
             };
             let exploited: Vec<String> = item
                 .findings()

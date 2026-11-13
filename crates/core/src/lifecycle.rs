@@ -32,6 +32,8 @@ use crate::findings::is_forging;
 use crate::fix;
 use crate::inventory::FoundIn;
 use crate::paths::DataDir;
+use crate::popover;
+use crate::popover::TargetKind;
 use crate::sweep;
 use crate::unchecked::Unchecked;
 
@@ -600,8 +602,9 @@ pub enum FixKind {
     /// Vigil's agent carries it out: it has commands, or it is a repository's, where the agent
     /// opens a pull request from the steps.
     Run,
-    /// On this Mac or a server with no commands: advice the user follows, such as using another
-    /// installed version. The agent would get nothing to run, so Vigil offers no Fix for it.
+    /// On this Mac or a server with no commands, or any entry saved without a fix: advice the
+    /// user follows, such as using another installed version. The agent would get nothing to
+    /// run, so Vigil offers no Fix for it.
     Manual,
     /// No released version fixes it yet ([`Fix::no_fixed_release`](crate::Fix)): its summary
     /// and steps say what to do until one is, and there is nothing to run.
@@ -614,7 +617,7 @@ impl FixKind {
     pub(crate) fn of(target: &str, commands: &[String], no_fixed_release: bool) -> Self {
         if no_fixed_release {
             Self::NoRelease
-        } else if commands.is_empty() && !target.starts_with("github:") {
+        } else if commands.is_empty() && !matches!(popover::target_kind(target), TargetKind::Repo) {
             Self::Manual
         } else {
             Self::Run
@@ -879,6 +882,7 @@ fn open_entry(target: &str, entry: &SavedEntry, new: bool, fix_state: Option<Fix
         commands: entry.fix.as_ref().map_or(Vec::new(), |f| {
             f.commands.iter().map(|c| plain(c)).collect()
         }),
+        // Without a fix there is nothing to plan on any target, a repository's included.
         fix_kind: entry.fix.as_ref().map_or(FixKind::Manual, |f| {
             FixKind::of(target, &f.commands, f.no_fixed_release)
         }),
@@ -1765,6 +1769,21 @@ mod tests {
     }
 
     #[test]
+    fn a_fix_is_run_manual_or_not_released_by_its_commands_and_target() {
+        let brew = ["brew upgrade curl".to_owned()];
+        assert_eq!(FixKind::of("mac", &brew, false), FixKind::Run);
+        assert_eq!(FixKind::of("server:web", &[], false), FixKind::Manual);
+        assert_eq!(FixKind::of("mac", &[], false), FixKind::Manual);
+        assert_eq!(
+            FixKind::of("github:o/r", &[], false),
+            FixKind::Run,
+            "a repository's agent opens a pull request from the steps"
+        );
+        assert_eq!(FixKind::of("mac", &[], true), FixKind::NoRelease);
+        assert_eq!(FixKind::of("github:o/r", &[], true), FixKind::NoRelease);
+    }
+
+    #[test]
     fn latest_reads_whether_a_fix_runs_is_manual_or_has_no_release() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = DataDir::new(tmp.path().join("data"));
@@ -1772,7 +1791,10 @@ mod tests {
         fs::write(&config_path, "").unwrap();
         let config = Config::load(&config_path, tmp.path()).unwrap();
         let [run, manual, unreleased, bare] = [1, 2, 3, 4].map(FindingKey);
-        let entry = |key: FindingKey, fix: serde_json::Value| json!({"key": key, "severity": "high", "title": "t", "fix": fix});
+        let entry = |key: FindingKey, fix: serde_json::Value| {
+            json!({"key": key, "severity": "high",
+                "title": "t", "fix": fix})
+        };
         let report = json!({
             "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
             "findings": [
