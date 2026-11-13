@@ -2,9 +2,10 @@
 //!
 //! Each source (macOS, Homebrew, toolchains, project lockfiles) is collected on its own. A
 //! source that fails is reported in [`Inventory::problems`] and named in [`Inventory::failed`],
-//! and the others still count, so one broken tool never hides the rest. A tool that is not installed is listed in
-//! [`Inventory::not_installed`], so an inventory taken with a bare `PATH` (an app started by
-//! launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`) shows what it did not check.
+//! and the others still count, so one broken tool never hides the rest. A tool that is not
+//! installed is listed in [`Inventory::not_installed`], so an inventory taken with a bare
+//! `PATH` (an app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`) shows what it did
+//! not check.
 //!
 //! Collecting only reads: it runs listing commands, lists version managers' folders and parses
 //! lockfiles, never project code.
@@ -35,6 +36,10 @@ pub struct Inventory {
     pub components: Vec<Component>,
     /// Sources or files that could not be read, names that cannot be looked up, and notes on
     /// sources that were still read (see [`InventoryError::is_failure`]).
+    ///
+    /// A collector adds a failure only through `fail` (or `run` and `absorb`), which also names
+    /// its source in `failed`; only notes, and a lockfile walk's folders this user may not
+    /// read (`lockfiles::unwalked` says why), are pushed here directly.
     pub problems: Vec<InventoryError>,
     /// The sources a failure in `problems` left unread or partly read, so the sweep keeps the
     /// findings they gave last time (see `unchecked`).
@@ -140,7 +145,10 @@ impl Inventory {
 ///
 /// The accepted downside: a separate install at the same version (the nodejs.org installer's
 /// `/usr/local/bin/node` next to Homebrew's `node` at that version) is reported only once the
-/// other copy is gone or upgraded.
+/// other copy is gone or upgraded. Also accepted: when Homebrew or the version managers fail,
+/// the other entry is missing, so the `PATH` one stays and its findings show as new next to the
+/// carried ones of the other place, for that one sweep. Dropping it too would hide a separate
+/// install whenever Homebrew fails.
 fn drop_path_duplicates(components: &mut Vec<Component>) {
     let is_path_runtime = |c: &Component| matches!(c.found_in, FoundIn::Node | FoundIn::Python);
     let product_version = |c: &Component| match &c.lookup {
@@ -378,6 +386,10 @@ pub enum InventorySource {
     OsPackages,
     /// A GitHub repository's dependency graph.
     DependencyGraph,
+    /// A kind a later build saved, read back by this one: the report then still reads, as not
+    /// fully checked, instead of failing to parse after a downgrade. Never collected.
+    #[serde(other)]
+    Unknown,
 }
 
 impl InventorySource {
@@ -407,6 +419,7 @@ impl InventorySource {
             }
             Self::OsPackages => matches!(place, FoundIn::OsPackage { .. }),
             Self::DependencyGraph => matches!(place, FoundIn::DependencyGraph { .. }),
+            Self::Unknown => false,
         }
     }
 
@@ -434,6 +447,7 @@ impl std::fmt::Display for InventorySource {
             Self::LockfileWalk { root } => write!(f, "lockfiles under {}", root.display()),
             Self::OsPackages => f.write_str("OS packages"),
             Self::DependencyGraph => f.write_str("the dependency graph"),
+            Self::Unknown => f.write_str("a source this version does not know"),
         }
     }
 }

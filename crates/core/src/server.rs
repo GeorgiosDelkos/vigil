@@ -362,7 +362,9 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
     // A release whose packages are looked up, without its package database read: the packages
     // a past sweep looked up are left out this time. A host with no `os-release`, or one of a
     // distribution that is not looked up, stays so, which is no failure: counting it would
-    // keep such a server from ever being clear.
+    // keep such a server from ever being clear. A database cut at its size limit (`capped`) is
+    // read and noted, not failed: like a project folder with too many entries, it is as large
+    // on the next sweep.
     if ecosystem.is_some() && !matches!(packages, OsPackages::Read { .. }) {
         collected.failed.insert(InventorySource::OsPackages);
     }
@@ -452,8 +454,12 @@ fn optional_file(collected: &mut Collected, part: &Part<'_>, file: &str, what: &
 fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
     for part in parts {
         if let Some(dir) = part.name.strip_prefix("dir ") {
-            // Which folders under it failed is not said, so all its lockfiles count as unread.
-            if part.status != 0 {
+            // A configured folder that is gone fails its lockfiles. One whose walk met a folder it
+            // may not read (`find` exits 1, as for a root-only `lost+found`) does not: that stays
+            // so on every sweep, and counting it would keep the server from ever being clear. A
+            // lockfile that cannot be read or is over a size limit is the same, so below only one
+            // that does not parse fails.
+            if part.status == NOT_A_DIR {
                 let root = dir.into();
                 collected
                     .failed
@@ -482,9 +488,7 @@ fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
                 OVER_BUDGET => Some("the lockfiles read on the server reached 128 MiB"),
                 _ => Some("it could not be read"),
             };
-            let source = InventorySource::Lockfile { path: file.into() };
             if let Some(why) = skipped {
-                collected.failed.insert(source);
                 collected
                     .problems
                     .push(format!("{file} on the server is not checked: {why}"));
@@ -496,7 +500,8 @@ fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
                 Some(Ok(components)) => collected.components.extend(components),
                 Some(Err(e)) => {
                     if e.is_failure() {
-                        collected.failed.insert(source);
+                        let path = file.into();
+                        collected.failed.insert(InventorySource::Lockfile { path });
                     }
                     problems.push(e);
                 }
@@ -1494,16 +1499,9 @@ Version: 1
         let walk = |root: &str| InventorySource::LockfileWalk { root: root.into() };
         assert_eq!(
             collected.failed,
-            [
-                walk("/srv/none"),
-                walk("/srv/part"),
-                lockfile("/srv/bad/Cargo.lock"),
-                lockfile("/srv/gone/uv.lock"),
-                lockfile("/srv/big/uv.lock"),
-                lockfile("/srv/late/uv.lock"),
-            ]
-            .into(),
-            "not /srv/ok, whose other registry is a note"
+            [walk("/srv/none"), lockfile("/srv/bad/Cargo.lock")].into(),
+            "not what stays so: an unreadable folder under /srv/part, a lockfile that cannot be \
+             read or is too large, nor /srv/ok, whose other registry is a note"
         );
     }
 

@@ -25,6 +25,7 @@ use serde_json::Value;
 
 use crate::inventory::FoundIn;
 use crate::inventory::InventorySource;
+use crate::sweep;
 
 /// The sources that failed for one target in one sweep. Empty when everything was checked.
 ///
@@ -96,7 +97,9 @@ impl Unchecked {
             1 => parts.push("NVD for 1 product".to_owned()),
             n => parts.push(format!("NVD for {n} products")),
         }
-        (!parts.is_empty()).then(|| parts.join(", "))
+        // Plain: an inventory source names a path from a cloned repository or a server, which
+        // may hold control characters meant for the terminal it is printed in.
+        (!parts.is_empty()).then(|| sweep::plain(&parts.join(", ")))
     }
 
     /// Whether a source that failed could have produced a finding of the component looked up
@@ -237,6 +240,40 @@ mod tests {
             ..Unchecked::default()
         };
         assert_eq!(one.describe().unwrap(), "lockfile /a/Cargo.lock");
+        let forged = Unchecked {
+            inventory: [lockfile("/a/\u{1b}]52;c;x\u{7}\n/Cargo.lock")].into(),
+            ..Unchecked::default()
+        };
+        assert_eq!(
+            forged.describe().unwrap(),
+            "lockfile /a/\u{fffd}]52;c;x\u{fffd} /Cargo.lock",
+            "a path cannot reach the terminal with its control characters"
+        );
+    }
+
+    #[test]
+    fn a_source_a_later_build_saved_still_reads_and_is_not_clear() {
+        let later: Unchecked = serde_json::from_value(
+            json!({"inventory": [{"kind": "homebrew"}, {"kind": "flatpak", "app": "x"}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            later.inventory,
+            [InventorySource::Homebrew, InventorySource::Unknown].into()
+        );
+        assert_eq!(
+            later.describe().unwrap(),
+            "Homebrew, a source this version does not know"
+        );
+        let unknown = Unchecked {
+            inventory: [InventorySource::Unknown].into(),
+            ..Unchecked::default()
+        };
+        assert!(!unknown.is_empty(), "never read as clear");
+        assert!(
+            !unknown.covers(&Value::Null, Some(&FoundIn::MacOs)),
+            "what it held is not known, so it carries nothing"
+        );
     }
 
     #[test]

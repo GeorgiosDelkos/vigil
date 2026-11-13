@@ -303,11 +303,21 @@ fn list(
 
 /// Records that `path`, a folder or an entry the walk could not tell, could not be read, so
 /// no lockfile at or under it was.
+///
+/// A folder this user may not read (a privacy-protected one, another user's `0700` folder) is
+/// only a problem, not a failed source: it is as unreadable on the next sweep, and counting it
+/// would keep this Mac from ever being clear. A lockfile only behind it is then never carried.
 fn unwalked(inventory: &mut Inventory, path: &Path, error: std::io::Error) {
+    let denied = error.kind() == std::io::ErrorKind::PermissionDenied;
+    let error = InventoryError::io(path, error);
+    if denied {
+        inventory.problems.push(error);
+        return;
+    }
     let source = InventorySource::LockfileWalk {
         root: path.to_owned(),
     };
-    inventory.fail(source, InventoryError::io(path, error));
+    inventory.fail(source, error);
 }
 
 /// Returns whether the walk may enter the folder at `path` by its name: not hidden by a dot,
@@ -1100,8 +1110,11 @@ mod tests {
             "{:?}",
             inventory.problems
         );
-        let unlisted = InventorySource::LockfileWalk { root: locked };
-        assert_eq!(inventory.failed, [unlisted].into());
+        assert!(
+            inventory.failed.is_empty(),
+            "a folder this user may not read stays so: {:?}",
+            inventory.failed
+        );
     }
 
     #[test]
@@ -1124,7 +1137,8 @@ mod tests {
             unwalked(
                 &mut found,
                 Path::new("/a/x"),
-                std::io::ErrorKind::PermissionDenied.into(),
+                // EIO, as from a disk or share that fails while read: it may pass.
+                std::io::Error::from_raw_os_error(5),
             );
             found
         };
