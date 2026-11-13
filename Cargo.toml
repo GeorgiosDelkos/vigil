@@ -6,7 +6,7 @@ default-members = ["crates/core", "crates/cli"]
 [workspace.package]
 # The one place Vigil's version is set: every crate inherits it, and the app's tauri.conf.json
 # has no version, so Tauri takes the app crate's. A release tag `v<version>` must match it.
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 
