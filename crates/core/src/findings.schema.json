@@ -113,7 +113,7 @@
           "items": { "type": "string", "pattern": "^[ -~]*$" }
         },
         "no_fixed_release": {
-          "description": "true when no released version fixes the issue yet, so upgrading to the newest version changes nothing. commands is then empty, and summary and steps say what to do until a fix is released. Leave it out otherwise.",
+          "description": "Findings only: true when no released version fixes the advisory yet, so upgrading to the newest version changes nothing. commands is then empty, and summary and steps say what to do until a fix is released. Leave it out otherwise, and always on an issue.",
           "type": "boolean"
         }
       }

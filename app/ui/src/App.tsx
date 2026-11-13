@@ -481,7 +481,7 @@ const UNRUN_NOTES: Readonly<Record<Exclude<FixKind, "run">, string>> = {
   manual: "Vigil has no commands to run for this fix; do what it says yourself.",
   no_release:
     "No released version fixes this yet, so there is nothing to run. Until one is, do what " +
-    "the fix says; the first sweep after a release offers the upgrade.",
+    "the fix says.",
 };
 
 /** The fix kind of an item Vigil does not fix, or null when Vigil runs its fix. */

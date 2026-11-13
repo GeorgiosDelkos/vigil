@@ -126,7 +126,8 @@ pub(crate) fn hide_on_blur(window: &Window) {
 ///
 /// The owner clarified the same day that a failure must not hide an open critical: with a
 /// critical or high finding open in the last reports, the icon stays red or orange after a
-/// failure, and only the tooltip and the popover's banner tell of it. The
+/// failure, and only the tooltip and the popover tell of it: a failed run's banner, or a
+/// target row's "not fully checked" (no box for those since 2026-11-13). The
 /// missing arm shows only when nothing critical or high is open, which is why `Clear` carries
 /// no [`Health`]: a failure with nothing to show in colour is `Failed`.
 #[derive(Debug, Clone, Copy)]

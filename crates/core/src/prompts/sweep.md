@@ -72,7 +72,10 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   `steps` what to do until a fix is released (a setting to change, input to avoid). A
   `versionEndIncluding` or `last_affected` bound names the last affected version, not whether
   a newer one is out: write the upgrade as usual. Never make a fix depend on a newer version
-  existing ("upgrade when the formula is newer than 3.54.1").
+  existing ("upgrade when the formula is newer than 3.54.1"). The flag also holds for a
+  version found in a version manager: with no fixed version to install, removing it as below
+  is not a fix, so leave `commands` empty and name in `steps` any installed version that is not
+  affected.
 - For a version found in a version manager (`found_in.manager`, `found_in.path`), the fix
   removes that version with the manager: `fnm uninstall 22.22.2`,
   `asdf uninstall nodejs 22.22.2` (the plugin is the folder under `installs/`: `nodejs` or

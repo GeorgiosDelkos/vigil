@@ -303,6 +303,13 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Verdict, Vec<String>
             &issue.fix,
             &mut problems,
         );
+        // An issue is a setting or a file, which a release does not fix.
+        if issue.fix.no_fixed_release {
+            problems.push(format!(
+                "{at}.fix.no_fixed_release: only a finding has a release that fixes it; leave \
+                 it out of an issue"
+            ));
+        }
     }
     if problems.is_empty() {
         Ok(Verdict {
@@ -701,6 +708,17 @@ mod tests {
         assert_eq!(
             validate(&text.to_string(), &known).unwrap_err(),
             ["issues[1].subject: file \"github/workflows/ci.yml\" is already an issue; merge them"]
+        );
+
+        let mut unreleased = issue(&ci);
+        unreleased["fix"]["no_fixed_release"] = json!(true);
+        let text = json!({"findings": [], "issues": [unreleased]});
+        assert_eq!(
+            validate(&text.to_string(), &known).unwrap_err(),
+            [
+                "issues[0].fix.no_fixed_release: only a finding has a release that fixes it; \
+                 leave it out of an issue"
+            ]
         );
 
         let older = validate(r#"{"findings": []}"#, &known).unwrap();
