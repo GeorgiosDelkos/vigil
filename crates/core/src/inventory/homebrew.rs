@@ -13,6 +13,7 @@ use crate::feeds::Product;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::InventoryError;
+use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
 
 /// Formula names whose NVD products differ, as (name without `@version`, NVD products), sorted
@@ -98,7 +99,8 @@ const CASK_ALIASES: &[(&str, &[&str])] = &[
 ];
 
 pub(super) fn collect(inventory: &mut Inventory, cancel: &Cancel) {
-    if let Some(output) = inventory.run("brew", &["info", "--json=v2", "--installed"], cancel) {
+    let args = ["info", "--json=v2", "--installed"];
+    if let Some(output) = inventory.run(InventorySource::Homebrew, "brew", &args, cancel) {
         parse(&output, inventory);
     }
 }
@@ -108,9 +110,8 @@ fn parse(json: &str, inventory: &mut Inventory) {
     let info: Info = match serde_json::from_str(json) {
         Ok(info) => info,
         Err(e) => {
-            inventory
-                .problems
-                .push(InventoryError::parse("brew info --json=v2", &e));
+            let error = InventoryError::parse("brew info --json=v2", &e);
+            inventory.fail(InventorySource::Homebrew, error);
             return;
         }
     };
@@ -282,15 +283,17 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["gtk+3", "c++-gtk-utils"]);
+        assert!(inventory.failed.is_empty(), "Homebrew was still read");
     }
 
     #[test]
-    fn bad_json_is_a_parse_problem() {
+    fn bad_json_is_a_parse_problem_of_homebrew() {
         let inventory = parsed("not json");
         assert!(matches!(
             inventory.problems[..],
             [InventoryError::Parse { .. }]
         ));
+        assert_eq!(inventory.failed, [InventorySource::Homebrew].into());
     }
 
     fn names(name: &str, aliases: &[(&str, &[&str])]) -> Option<Vec<String>> {

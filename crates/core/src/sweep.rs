@@ -57,6 +57,7 @@ use crate::github;
 use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
+use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
 use crate::lifecycle;
 use crate::lifecycle::CarriedFinding;
@@ -574,6 +575,8 @@ struct Collected {
     /// The settings an issue may name.
     settings: Vec<String>,
     problems: Vec<String>,
+    /// The inventory sources that failed, for the report's `unchecked`.
+    failed: BTreeSet<InventorySource>,
 }
 
 /// This Mac's inventory as a target.
@@ -593,6 +596,7 @@ fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Collected {
         files: Vec::new(),
         settings: Vec::new(),
         problems,
+        failed: inventory.failed,
     }
 }
 
@@ -629,6 +633,7 @@ impl Shared<'_> {
             files: collected.files,
             settings: collected.settings,
             problems: collected.problems,
+            failed: collected.failed,
         };
         self.sweep_target(sweep_dir, collected, progress)
     }
@@ -660,6 +665,7 @@ impl Shared<'_> {
             files: collected.files,
             settings: Vec::new(),
             problems: collected.problems,
+            failed: collected.failed,
         };
         self.sweep_target(sweep_dir, collected, progress)
     }
@@ -712,6 +718,10 @@ impl Shared<'_> {
         problems.extend(collected.problems);
         let fetched = fetch(self.sources, &collected.components, &mut problems, progress);
         self.sources.cancel.check()?;
+        let unchecked = Unchecked {
+            inventory: collected.failed,
+            ..fetched.unchecked
+        };
         let entries: Vec<_> = fetched
             .linked
             .iter()
@@ -764,7 +774,7 @@ impl Shared<'_> {
             (Vec::new(), None, false)
         } else {
             let dir_name = &collected.dir_name;
-            let carried = self.carry_over(dir_name, &fetched.unchecked, &findings, &mut problems);
+            let carried = self.carry_over(dir_name, &unchecked, &findings, &mut problems);
             let shown: Vec<(FindingKey, bool)> = (findings.iter())
                 .map(|f| (f.key, f.dismissed.is_some()))
                 .chain(carried.iter().map(|c| (c.key, c.dismissed.is_some())))
@@ -784,7 +794,7 @@ impl Shared<'_> {
         report.changes = changes;
         report.first_verdict = first_verdict;
         report.problems = problems.iter().map(|p| plain(p)).collect();
-        report.unchecked = fetched.unchecked;
+        report.unchecked = unchecked;
         report.failure = failure;
         self.save(&dir, &mut report);
         Ok(report)
@@ -1134,7 +1144,7 @@ struct Fetched {
     linked: Vec<Linked>,
     /// How many advisories the version comparison left out.
     out_of_range: usize,
-    /// The sources that failed.
+    /// The advisory feeds that failed; its `inventory` is empty.
     unchecked: Unchecked,
 }
 
@@ -1179,6 +1189,8 @@ fn fetch(
             kev: sources.kev.is_none(),
             osv,
             nvd,
+            // The collector knows these; the caller adds them.
+            inventory: BTreeSet::new(),
         },
     }
 }
@@ -2145,6 +2157,7 @@ mod tests {
                 kev: false,
                 osv: Some(OsvUnchecked::All),
                 nvd: names(&["curl", "openssl", "zlib"]),
+                inventory: BTreeSet::new(),
             }
         );
         assert_eq!(problems.len(), 4, "{problems:?}");
@@ -2664,6 +2677,7 @@ mod tests {
                 files: Vec::new(),
                 settings: Vec::new(),
                 problems: Vec::new(),
+                failed: BTreeSet::new(),
             };
             let dir = data_dir.sweeps_dir().join(stamp);
             fs::create_dir_all(&dir).unwrap();
@@ -2714,6 +2728,112 @@ mod tests {
         assert!(done.open.is_empty());
         assert_eq!(done.fixed.len(), 1);
         assert_eq!(done.fixed[0].key, key);
+    }
+
+    /// Three sweeps of one Mac with lodash in a lockfile: read, then the lockfile failing, then
+    /// Homebrew failing with lodash gone.
+    #[test]
+    fn a_finding_of_a_failed_inventory_source_stays_open_and_only_that_source_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let server = feeds_server();
+        let endpoints = Endpoints {
+            osv: server.url.clone(),
+            nvd: server.url.clone(),
+            kev: server.url.clone(),
+        };
+        let feeds = Feeds::with_endpoints(data_dir.feeds_dir(), NvdAccess::Anonymous, endpoints);
+        let located = ghsa_agent(&tmp.path().join("agent"), &tmp.path().join("never"));
+        let kev = Kev::from_ids(&[]);
+        let cancel = Cancel::new();
+        let dismissals = Dismissals::default();
+        let shared = Shared {
+            data_dir: &data_dir,
+            dismissals: &dismissals,
+            sources: Sources {
+                feeds: &feeds,
+                history: Config::default_for_tests().history,
+                kev: Some(&kev),
+                cancel: &cancel,
+            },
+            agent: AgentKind::Claude,
+            located: &located,
+            notes: &[],
+        };
+        let lockfile = PathBuf::from("/p/web/package-lock.json");
+        let sweep = |stamp: &str, components, failed| {
+            let collected = Collected {
+                target: "mac".to_owned(),
+                dir_name: "mac".to_owned(),
+                title: "this Mac".to_owned(),
+                prompt: Prompt::Mac,
+                components,
+                files: Vec::new(),
+                settings: Vec::new(),
+                problems: Vec::new(),
+                failed,
+            };
+            let dir = data_dir.sweeps_dir().join(stamp);
+            fs::create_dir_all(&dir).unwrap();
+            shared.sweep_target(&dir, collected, &mut |_| {}).unwrap()
+        };
+        let config = Config::default_for_tests();
+        let mac = || lifecycle::latest(&data_dir, &config).remove(0);
+
+        let lodash = Component {
+            found_in: FoundIn::Lockfile {
+                path: lockfile.clone(),
+            },
+            ..component("npm:lodash", "4.17.20")
+        };
+        let first = sweep("20261105T100000Z", vec![lodash], BTreeSet::new());
+        let [found] = &first.findings[..] else {
+            panic!("{:?}", first.findings)
+        };
+        let key = found.key;
+        assert!(first.unchecked.is_empty());
+        let run = json!({"key": key, "title": "lodash", "found": first.started, "target": "mac",
+            "agent": "claude", "started": first.started, "finished": first.started,
+            "exit_code": 0, "outcome": "fixed", "summary": "upgraded lodash",
+            "pull_request": null, "confirmed": "asked", "dir": "/x"});
+        fs::create_dir_all(data_dir.state_dir()).unwrap();
+        fs::write(data_dir.state_dir().join("fixes.jsonl"), format!("{run}\n")).unwrap();
+
+        // The lockfile does not parse: its finding is carried, open, its fix unconfirmed.
+        let unread = InventorySource::Lockfile { path: lockfile };
+        let second = sweep("20261105T130000Z", Vec::new(), [unread.clone()].into());
+        assert_eq!(second.unchecked.inventory, [unread].into());
+        let carried: Vec<FindingKey> = second.carried.iter().map(|c| c.key).collect();
+        assert_eq!(carried, [key]);
+        assert_eq!(second.changes.as_ref().unwrap().resolved, []);
+        let open = mac();
+        assert_eq!(open.open.len(), 1, "still open");
+        assert!(open.fixed.is_empty(), "not confirmed");
+        let view = crate::popover::popover_view(vec![open]);
+        assert!(!view.all_clear);
+        assert_eq!(
+            view.warning.as_deref(),
+            Some("This Mac: lockfile /p/web/package-lock.json not checked")
+        );
+
+        // Homebrew fails, which lists no lockfile: the finding is resolved and the fix confirmed,
+        // but the Mac is still not clear.
+        let third = sweep(
+            "20261105T160000Z",
+            Vec::new(),
+            [InventorySource::Homebrew].into(),
+        );
+        assert!(third.carried.is_empty());
+        assert_eq!(third.changes.as_ref().unwrap().resolved, [key]);
+        let done = mac();
+        assert!(done.open.is_empty());
+        assert_eq!(done.fixed.len(), 1);
+        let view = crate::popover::popover_view(vec![done]);
+        assert!(!view.all_clear, "Homebrew was not read");
+        assert_eq!(
+            view.warning.as_deref(),
+            Some("This Mac: Homebrew not checked")
+        );
     }
 
     #[test]

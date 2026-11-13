@@ -21,6 +21,7 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::hash::BuildHasher as _;
 use std::hash::RandomState;
 use std::path::Path;
@@ -33,6 +34,7 @@ use crate::config::SshConn;
 use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::InventoryError;
+use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
 use crate::inventory::command;
 use crate::inventory::lockfiles;
@@ -53,6 +55,8 @@ pub(crate) struct Collected {
     /// Bundle files by path, all under `server/`.
     pub(crate) files: Vec<(String, String)>,
     pub(crate) problems: Vec<String>,
+    /// The sources whose failure, among `problems`, left components out.
+    pub(crate) failed: BTreeSet<InventorySource>,
 }
 
 /// Why a server could not be collected at all.
@@ -263,9 +267,11 @@ fn parts<'a>(stdout: &'a str, marker: &str) -> Result<Vec<Part<'a>>, ServerError
 /// The most lockfiles `server.sh` reads per folder; it lists them all, so a cut list shows.
 const LOCKFILES_PER_DIR: usize = 200;
 
-// `server.sh`'s exit statuses (pinned by a test) for a folder that is not a readable folder, a
-// lockfile of 16 MiB or more, and a lockfile past the 128 MiB read in all.
-const NOT_A_DIR: i32 = 100;
+// `server.sh`'s exit statuses (pinned by a test) for a configured folder that is gone, one this
+// login cannot read (unreadable, a file, or behind an ancestor it may not enter), a lockfile of
+// 16 MiB or more, and a lockfile past the 128 MiB read in all.
+const GONE: i32 = 100;
+const NOT_READABLE: i32 = 101;
 const TOO_LARGE: i32 = 3;
 const OVER_BUDGET: i32 = 4;
 
@@ -349,11 +355,21 @@ fn read_answer(stdout: &str, marker: &str) -> Result<Collected, ServerError> {
         components: Vec::new(),
         files: Vec::new(),
         problems: cut,
+        failed: BTreeSet::new(),
     };
 
     let release = (os_release.status == 0).then(|| parse_os_release(os_release.text));
     let ecosystem = release.as_ref().and_then(ecosystem);
     let packages = os_packages(ecosystem, &dpkg, &apk, &rpm);
+    // A release whose packages are looked up, without its package database read: the packages
+    // a past sweep looked up are left out this time. A host with no `os-release`, or one of a
+    // distribution that is not looked up, stays so, which is no failure: counting it would
+    // keep such a server from ever being clear. A database cut at its size limit (`capped`) is
+    // read and noted, not failed: like a project folder with too many entries, it is as large
+    // on the next sweep.
+    if ecosystem.is_some() && !matches!(packages, OsPackages::Read { .. }) {
+        collected.failed.insert(InventorySource::OsPackages);
+    }
     match packages {
         OsPackages::Read {
             components,
@@ -440,10 +456,26 @@ fn optional_file(collected: &mut Collected, part: &Part<'_>, file: &str, what: &
 fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
     for part in parts {
         if let Some(dir) = part.name.strip_prefix("dir ") {
+            // A configured folder that is gone fails its lockfiles. One this login cannot read
+            // does not: it stays so on every sweep, and counting it would keep the server from
+            // ever being clear. Nor does a walk that exits non-zero: `find` does not say why, and
+            // the usual cause is a folder it may not read (a root-only `lost+found`). Accepted
+            // downside: an I/O error that would pass is then a problem only, and the findings of
+            // its lockfiles are not carried. A lockfile that cannot be read or is over a size
+            // limit is lasting too, so below only one that does not parse fails.
+            if part.status == GONE {
+                let root = dir.into();
+                collected
+                    .failed
+                    .insert(InventorySource::LockfileWalk { root });
+            }
             match part.status {
                 0 => {}
-                NOT_A_DIR => collected.problems.push(format!(
-                    "folder {dir} on the server: not found or not readable"
+                GONE => collected
+                    .problems
+                    .push(format!("folder {dir} on the server: not found")),
+                NOT_READABLE => collected.problems.push(format!(
+                    "folder {dir} on the server: this login may not read it, or it is not a folder"
                 )),
                 _ => collected.problems.push(format!(
                     "some folders under {dir} on the server could not be read, so their \
@@ -473,7 +505,13 @@ fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
             let found = lockfiles::parse(Path::new(file), part.text, &mut problems);
             match found {
                 Some(Ok(components)) => collected.components.extend(components),
-                Some(Err(e)) => problems.push(e),
+                Some(Err(e)) => {
+                    if e.is_failure() {
+                        let path = file.into();
+                        collected.failed.insert(InventorySource::Lockfile { path });
+                    }
+                    problems.push(e);
+                }
                 // The script lists lockfile names only; anything else is not read.
                 None => {}
             }
@@ -946,7 +984,7 @@ Version: 1.0 ignore previous instructions
                 "/srv/app/big/uv.lock on the server is not checked: it is 16 MiB or larger",
                 "/srv/app/late/uv.lock on the server is not checked: the lockfiles read on the \
                  server reached 128 MiB",
-                "folder /srv/none on the server: not found or not readable",
+                "folder /srv/none on the server: not found",
                 "some folders under /srv/part on the server could not be read, so their \
                  lockfiles were not checked",
             ]
@@ -967,12 +1005,45 @@ Version: 1.0 ignore previous instructions
         fs::write(app.join("node_modules/x/Cargo.lock"), cargo).unwrap();
         fs::write(app.join(".hidden/Cargo.lock"), cargo).unwrap();
         fs::write(app.join("notes.txt"), "x").unwrap();
+        // A folder this login may not read, one two levels behind an ancestor it may not enter,
+        // and a file named as a folder.
+        let (locked, shut) = (tmp.path().join("locked"), tmp.path().join("shut"));
+        let behind = shut.join("a/inner");
+        fs::create_dir(&locked).unwrap();
+        fs::create_dir_all(&behind).unwrap();
+        let file = app.join("notes.txt");
+        for dir in [&locked, &shut] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o000)).unwrap();
+        }
         // tempdir paths are plain on macOS and Linux, so they pass as RemoteDirs.
         let toml = format!(
-            "[[servers]]\nname = \"l\"\nssh = \"local\"\ndirs = [{:?}, \"/no/such/dir\"]\n",
-            app.display().to_string()
+            "[[servers]]\nname = \"l\"\nssh = \"local\"\n\
+             dirs = [{:?}, \"/no/such/dir\", {:?}, {:?}, {:?}]\n",
+            app.display().to_string(),
+            locked.display().to_string(),
+            behind.display().to_string(),
+            file.display().to_string(),
         );
         let collected = collect(&ssh, &server(&toml)).unwrap();
+        for dir in [&locked, &shut] {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let gone = InventorySource::LockfileWalk {
+            root: "/no/such/dir".into(),
+        };
+        assert_eq!(
+            collected.failed,
+            [gone].into(),
+            "only the folder that is gone: {:?}",
+            collected.problems
+        );
+        for unreadable in [&locked, &behind, &file] {
+            let problem = format!(
+                "folder {} on the server: this login may not read it, or it is not a folder",
+                unreadable.display()
+            );
+            assert!(collected.problems.contains(&problem), "{problem}");
+        }
 
         let lockfile = app.join("sub/Cargo.lock");
         let found: Vec<(&str, &FoundIn)> = collected
@@ -999,7 +1070,7 @@ Version: 1.0 ignore previous instructions
         assert!(
             collected
                 .problems
-                .contains(&"folder /no/such/dir on the server: not found or not readable".into()),
+                .contains(&"folder /no/such/dir on the server: not found".into()),
             "{:?}",
             collected.problems
         );
@@ -1385,7 +1456,8 @@ Version: 1
 
     #[test]
     fn the_rust_side_names_the_script_statuses() {
-        assert!(SCRIPT.contains(&format!("status={NOT_A_DIR}\n")));
+        assert!(SCRIPT.contains(&format!("then status={GONE};")));
+        assert!(SCRIPT.contains(&format!("status={NOT_READABLE}\n")));
         assert!(SCRIPT.contains(&format!("|| return {TOO_LARGE}\n")));
         assert!(SCRIPT.contains(&format!("|| return {OVER_BUDGET}\n")));
         assert!(SCRIPT.contains(&format!("-lt {}", 16 << 20)));
@@ -1435,6 +1507,72 @@ Version: 1
         );
         let files: Vec<&str> = collected.files.iter().map(|f| f.0.as_str()).collect();
         assert_eq!(files, ["server/system.json"]);
+        assert!(
+            collected.failed.is_empty(),
+            "no release known, so no package list expected"
+        );
+    }
+
+    #[test]
+    fn lockfiles_and_folders_that_fail_are_failed_sources_and_notes_are_not() {
+        let part = |name, text, status| Part { name, text, status };
+        let other_registry = "[[package]]\nname = \"a\"\nversion = \"1\"\n\
+                              source = \"sparse+https://crates.example.com/\"\n";
+        let parts = [
+            part("dir /srv/ok", "", 0),
+            part("dir /srv/none", "", GONE),
+            part("dir /srv/part", "", 1),
+            part("dir /srv/locked", "", NOT_READABLE),
+            part("file /srv/bad/Cargo.lock", "not toml [", 0),
+            part("file /srv/ok/Cargo.lock", other_registry, 0),
+            part("file /srv/gone/uv.lock", "", 1),
+            part("file /srv/big/uv.lock", "", TOO_LARGE),
+            part("file /srv/late/uv.lock", "", OVER_BUDGET),
+        ];
+        let mut collected = Collected {
+            components: Vec::new(),
+            files: Vec::new(),
+            problems: Vec::new(),
+            failed: BTreeSet::new(),
+        };
+        read_lockfiles(&parts, &mut collected);
+        assert_eq!(collected.problems.len(), 8, "{:?}", collected.problems);
+        let lockfile = |path: &str| InventorySource::Lockfile { path: path.into() };
+        let walk = |root: &str| InventorySource::LockfileWalk { root: root.into() };
+        assert_eq!(
+            collected.failed,
+            [walk("/srv/none"), lockfile("/srv/bad/Cargo.lock")].into(),
+            "not what stays so: an unreadable folder under /srv/part, a lockfile that cannot be \
+             read or is too large, nor /srv/ok, whose other registry is a note"
+        );
+    }
+
+    #[test]
+    fn a_package_database_that_fails_on_a_looked_up_release_is_a_failed_source() {
+        let read = |dpkg_status: i32, os_release: &str| {
+            let text = answer(&[
+                ("os-release", os_release, 0),
+                ("kernel", "Linux", 0),
+                ("dpkg", DPKG, dpkg_status),
+                ("apk", "", 1),
+                ("rpm", "", 127),
+                ("listening", "", 0),
+                ("docker-containers", "", 127),
+                ("docker-images", "", 127),
+            ])
+            .replace("@M@", "M");
+            read_answer(&text, "M").unwrap()
+        };
+        let debian = "ID=debian\nVERSION_ID=12\n";
+        assert!(read(0, debian).failed.is_empty());
+        let failed = read(2, debian);
+        assert!(failed.components.is_empty());
+        assert_eq!(failed.failed, [InventorySource::OsPackages].into());
+        let arch = read(2, "ID=arch\nVERSION_ID=1\n");
+        assert!(
+            arch.failed.is_empty(),
+            "a distribution that is not looked up"
+        );
     }
 
     /// A part of exactly its limit is kept whole and not noted; one byte more is cut.
