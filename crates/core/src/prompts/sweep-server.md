@@ -78,6 +78,12 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   line of printable ASCII with single spaces, at most 300 characters, and one command: no
   `;`, `|`, `&`, `<`, `>`, backticks, `$` or `\`. At most 20 steps and 20 commands; write web
   addresses in ASCII.
+- Set `"no_fixed_release": true` in the `fix` only when the record shows that no released
+  package fixes the finding: an OSV range with neither a `fixed` nor a `last_affected` version,
+  or a distribution advisory that lists the package as not yet fixed. Then leave `commands`
+  empty, and give in `summary` and `steps` what to do until a fix is released (a setting to
+  change, a service to keep local). A `last_affected` bound names the last affected version,
+  not whether a newer one is out: write the upgrade as usual.
 
 If nothing is affected and nothing is risky, write `{"findings": [], "issues": []}`.
 

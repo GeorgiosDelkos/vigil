@@ -519,8 +519,8 @@ describe("the popover", () => {
     expect(screen.getByText("Stopping the agent and cleaning up…")).toBeTruthy();
   });
 
-  it("says which sources failed instead of all clear, and keeps Sweep", async () => {
-    const warning = "NVD for 3 products not checked";
+  it("says which sources failed instead of all clear, in no box, and keeps Sweep", async () => {
+    const warning = "pipx, NVD for 3 products";
     shown = overview({
       last_swept: "2026-11-06T11:00:00Z",
       first_sweep_hint: null,
@@ -536,8 +536,10 @@ describe("the popover", () => {
     });
     answer();
     render(() => <App />);
-    const banner = await screen.findByText("This Mac: NVD for 3 products not checked");
-    expect(banner.classList.contains("warn")).toBe(true);
+    await screen.findByTitle("Show details");
+    // The owner's decision, 2026-11-13: no box; the row says it, the target's screen names it.
+    expect(document.querySelector(".banner")).toBeNull();
+    expect(screen.queryByText(/pipx/)).toBeNull();
     expect(document.querySelector(".orbit.green")).toBeNull();
     expect(sceneOf(shown)).toEqual({ mood: "unswept" });
     const mac = targetRow(/^This Mac/);
@@ -546,11 +548,18 @@ describe("the popover", () => {
     const orbitRow = screen.getByRole("button", { name: /^This Mac, not fully checked, 12 / });
     expect(orbitRow.getAttribute("aria-label")).not.toContain("clear");
 
-    fireEvent.click(screen.getByTitle("Show details"));
+    fireEvent.click(orbitRow);
+    expect(await screen.findByText(/· not fully checked: pipx, NVD for 3 products$/)).toBeTruthy();
+    expect(document.querySelector(".banner")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    fireEvent.click(await screen.findByTitle("Show details"));
     expect(await screen.findByText("Not fully checked", { selector: "h1" })).toBeTruthy();
+    expect(document.querySelector(".banner")).toBeNull();
     expect(screen.getByRole("button", { name: "Sweep" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: /Targets/ }));
     expect(listTarget("This Mac").textContent).toContain("not fully checked");
+    expect(listTarget("This Mac").textContent).not.toContain("pipx");
     expect(listTarget("This Mac").querySelector(".open svg")).toBeNull();
 
     // With something open the row still says it was not fully checked.
@@ -564,6 +573,78 @@ describe("the popover", () => {
     await openList();
     fireEvent.click(await screen.findByRole("tab", { name: /Targets/ }));
     expect(listTarget("This Mac").textContent).toContain("not fully checked");
+  });
+
+  it("labels the items Vigil does not fix, keeps their advice, and offers them no Fix", async () => {
+    shown = {
+      ...two(),
+      items: [
+        finding("p", {
+          name: "python",
+          fix: "Run that work with Homebrew Python 3.14.10",
+          steps: ["Call /opt/homebrew/bin/python3"],
+          commands: [],
+          fix_kind: "manual",
+        }),
+        finding("s", {
+          name: "sqlite",
+          fix: "Do not pipe .recover output into sqlite3",
+          steps: ["Upgrade sqlite once a fixed version is released"],
+          commands: [],
+          fix_kind: "no_release",
+        }),
+        component("f", [
+          advisory("f1", { name: "ffmpeg", commands: [], fix_kind: "no_release" }),
+          advisory("f2", { name: "ffmpeg", commands: [], fix_kind: "no_release" }),
+        ]),
+        finding("c", { name: "curl" }),
+      ],
+    };
+    answer();
+    await openList();
+
+    const tags = (name: string) =>
+      [...row(name).querySelectorAll(".tag")].map((tag) => tag.textContent);
+    expect(tags("python")).toEqual(["Manual fix"]);
+    expect(tags("sqlite")).toEqual(["No fix released yet"]);
+    expect(tags("curl")).toEqual([]);
+    // The advice stays on the row, after the wrench.
+    expect(row("python").querySelector(".fix")?.textContent).toBe(
+      "Run that work with Homebrew Python 3.14.10",
+    );
+    expect(row("sqlite").querySelector(".fix")?.textContent).toBe(
+      "Do not pipe .recover output into sqlite3",
+    );
+
+    fireEvent.click(row("python"));
+    await screen.findByRole("heading", { level: 2 });
+    expect(screen.queryByRole("button", { name: "Fix…" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Dismiss…" })).toBeTruthy();
+    const steps = screen.getByRole("list", { name: "Steps to take" });
+    expect(steps.textContent).toBe("Call /opt/homebrew/bin/python3");
+    expect(screen.getByText(/Vigil has no commands to run for this fix/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    fireEvent.click(row("sqlite"));
+    await screen.findByRole("heading", { level: 2 });
+    expect(screen.queryByRole("button", { name: "Fix…" })).toBeNull();
+    expect(screen.getByText(/No released version fixes this yet/)).toBeTruthy();
+    expect(screen.getByRole("list", { name: "Steps to take" }).textContent).toBe(
+      "Upgrade sqlite once a fixed version is released",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    // A component's advisories are dismissed below, so no empty row of buttons is left.
+    fireEvent.click(row("ffmpeg"));
+    await screen.findByRole("heading", { level: 2 });
+    expect(screen.queryByRole("button", { name: "Fix…" })).toBeNull();
+    expect(document.querySelector(".detail > .dacts")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+
+    fireEvent.click(row("curl"));
+    await screen.findByRole("heading", { level: 2 });
+    expect(screen.getByRole("button", { name: "Fix…" })).toBeTruthy();
+    expect(screen.queryByRole("list", { name: "Steps to take" })).toBeNull();
   });
 
   it("shows all clear once a sweep found nothing", async () => {

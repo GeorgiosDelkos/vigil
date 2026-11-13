@@ -1629,12 +1629,13 @@ fn finding_markdown(key: FindingKey, finding: &Finding) -> String {
         ""
     };
     let mut out = format!(
-        "### {} {} ({}{exploited})\n\nKey: {key}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
+        "### {} {} ({}{exploited})\n\nKey: {key}\n\nWhy: {}\n\nEvidence: {}\n\n{}: {}\n",
         finding.severity,
         escape(&finding.advisories.join(", ")),
         finding.confidence,
         escape(&finding.explanation),
         escape(&finding.evidence),
+        fix_heading(&finding.fix),
         escape(&finding.fix.summary),
     );
     out.push_str(&commands_markdown(&finding.fix));
@@ -1643,15 +1644,26 @@ fn finding_markdown(key: FindingKey, finding: &Finding) -> String {
 
 fn issue_markdown(key: FindingKey, issue: &Issue) -> String {
     let mut out = format!(
-        "### {} {}\n\nKey: {key}\n\nWhy: {}\n\nEvidence: {}\n\nFix: {}\n",
+        "### {} {}\n\nKey: {key}\n\nWhy: {}\n\nEvidence: {}\n\n{}: {}\n",
         issue.severity,
         escape(&issue.subject.to_string()),
         escape(&issue.explanation),
         escape(&issue.evidence),
+        fix_heading(&issue.fix),
         escape(&issue.fix.summary),
     );
     out.push_str(&commands_markdown(&issue.fix));
     out
+}
+
+/// What a fix's line in `report.md` starts with: "Fix", or "No fix released yet", so its
+/// summary reads as what to do until then.
+fn fix_heading(fix: &Fix) -> &'static str {
+    if fix.no_fixed_release {
+        "No fix released yet"
+    } else {
+        "Fix"
+    }
 }
 
 /// The fix's commands as one `sh` block, then a blank line. The steps are left out: the
@@ -2567,6 +2579,38 @@ mod tests {
         );
     }
 
+    /// `report.json` keeps whether a fix was released, and `report.md` says so in place of
+    /// "Fix". The test of `lifecycle::latest` reading a fix's kind covers reading it back.
+    #[test]
+    fn a_fix_with_no_release_is_saved_and_written_as_one() {
+        let mut report = report(
+            vec![
+                report_finding("GHSA-1", "high", false, "npm:lodash"),
+                report_finding("CVE-3", "low", false, "curl"),
+            ],
+            &[],
+        );
+        let fix = &mut report.findings[0].finding.fix;
+        fix.no_fixed_release = true;
+        fix.commands.clear();
+        fix.summary = "Do not parse untrusted input".to_owned();
+
+        let saved = serde_json::to_value(&report).unwrap();
+        assert_eq!(saved["findings"][0]["fix"]["no_fixed_release"], true);
+        assert!(
+            saved["findings"][1]["fix"]
+                .get("no_fixed_release")
+                .is_none(),
+            "false is left out, so an older vigil still plans the fix"
+        );
+        let text = report_markdown(&report);
+        assert!(
+            text.contains("No fix released yet: Do not parse untrusted input\n"),
+            "{text}"
+        );
+        assert_eq!(text.matches("\n\nFix: ").count(), 1, "{text}");
+    }
+
     #[test]
     fn markdown_lists_findings_then_gaps() {
         let text = report_markdown(&report(
@@ -2813,7 +2857,7 @@ mod tests {
         assert!(!view.all_clear);
         assert_eq!(
             view.warning.as_deref(),
-            Some("This Mac: lockfile /p/web/package-lock.json not checked")
+            Some("This Mac: lockfile /p/web/package-lock.json")
         );
 
         // Homebrew fails, which lists no lockfile: the finding is resolved and the fix confirmed,
@@ -2830,10 +2874,7 @@ mod tests {
         assert_eq!(done.fixed.len(), 1);
         let view = crate::popover::popover_view(vec![done]);
         assert!(!view.all_clear, "Homebrew was not read");
-        assert_eq!(
-            view.warning.as_deref(),
-            Some("This Mac: Homebrew not checked")
-        );
+        assert_eq!(view.warning.as_deref(), Some("This Mac: Homebrew"));
     }
 
     #[test]

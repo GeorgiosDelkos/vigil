@@ -39,6 +39,7 @@ use jiff::Timestamp;
 use serde::Serialize;
 
 use crate::findings::Severity;
+use crate::lifecycle::FixKind;
 use crate::lifecycle::FixState;
 use crate::lifecycle::Fixed;
 use crate::lifecycle::Latest;
@@ -79,7 +80,9 @@ pub struct PopoverView {
     /// target has a [`TargetLine::warning`].
     pub all_clear: bool,
     /// Each target with a [`TargetLine::warning`], as its label and the warning, joined by "; ":
-    /// "This Mac: NVD for 3 products not checked". `None` when no target has one.
+    /// "This Mac: NVD for 3 products". `None` when no target has one. The popover shows it in no
+    /// box of its own (the owner's decision, 2026-11-13): each target's row says "not fully
+    /// checked", and its screen says what was not. The HTML report prints it.
     pub warning: Option<String>,
     /// How many targets there are: "1 target", "3 targets".
     pub target_count: String,
@@ -266,9 +269,9 @@ pub struct TargetLine {
     /// The label of its Fix all button, "Fix all 3", when [`fix_all_items`] takes two or more
     /// of its items; `None` hides the button, as one item already has its own Fix.
     pub fix_all: Option<String>,
-    /// Why what it shows may be incomplete: the sources that failed in its newest sweep
-    /// ("NVD for 3 products not checked"), or what of its state could not be read. `None` when
-    /// neither.
+    /// Why what it shows may be incomplete: what its newest sweep could not check ("NVD for 3
+    /// products", "pipx"), then what of its state could not be read. The target's screen shows
+    /// it as "not fully checked: pipx". `None` when neither.
     pub warning: Option<String>,
 }
 
@@ -549,13 +552,10 @@ fn target_line(latest: &Latest, items: &Items) -> TargetLine {
     }
 }
 
-/// Why what `latest` shows may be incomplete, in one line: "NVD for 3 products not checked",
-/// then whatever could not be read.
+/// Why what `latest` shows may be incomplete, in one line: what was not checked ("NVD for 3
+/// products"), then whatever could not be read.
 fn warning(latest: &Latest) -> Option<String> {
-    let unchecked = latest
-        .unchecked
-        .describe()
-        .map(|s| format!("{s} not checked"));
+    let unchecked = latest.unchecked.describe();
     let parts: Vec<&str> = unchecked
         .as_deref()
         .into_iter()
@@ -565,8 +565,10 @@ fn warning(latest: &Latest) -> Option<String> {
 }
 
 /// The open items of `target` that Fix all takes, in the order `open` ranks them: those whose
-/// lead's fix has commands to run. A fix without commands is manual (the sweep found nothing
-/// to run), so it keeps its own Fix rather than ride in a batch the user confirms as commands.
+/// lead's fix Vigil runs ([`FixKind::Run`]). A manual fix and one with no fixed release have
+/// nothing to run, so they are left out, and their rows say why; the button's count is then
+/// the number of rows without such a label (the owner's report, 2026-11-13, of "Fix all 2"
+/// over three rows).
 ///
 /// None for a repository. The owner's decision on Fix all (2026-11-11) left repositories to us:
 /// there each fix is a pull request on its own branch, reviewed and merged on its own, and a
@@ -580,7 +582,7 @@ pub(crate) fn fix_all_items<'a>(
 ) -> impl Iterator<Item = &'a Listed> {
     let repo = matches!(target_kind(target), TargetKind::Repo);
     open.iter()
-        .filter(move |item| !repo && !item.lead.commands.is_empty())
+        .filter(move |item| !repo && item.lead.fix_kind == FixKind::Run)
 }
 
 /// "1 fix to confirm", "2 fixes to confirm".
@@ -642,6 +644,7 @@ mod tests {
             fix: format!("fix {key}"),
             steps: Vec::new(),
             commands: Vec::new(),
+            fix_kind: FixKind::Manual,
             first_seen: first_seen.map(|s| Timestamp::from_second(s).unwrap()),
             new: false,
             fix_state: None,
@@ -1321,7 +1324,7 @@ mod tests {
         assert_eq!(view.headline, "Not fully checked");
         assert_eq!(
             view.targets[0].warning.as_deref(),
-            Some("CISA KEV, NVD for 1 product not checked")
+            Some("CISA KEV, NVD for 1 product")
         );
         assert_eq!(
             view.targets[1].warning.as_deref(),
@@ -1331,7 +1334,7 @@ mod tests {
         assert_eq!(
             view.warning.as_deref(),
             Some(concat!(
-                "This Mac: CISA KEV, NVD for 1 product not checked; ",
+                "This Mac: CISA KEV, NVD for 1 product; ",
                 "o/web: cannot read dismissals.json"
             ))
         );
@@ -1362,10 +1365,19 @@ mod tests {
         assert_eq!(target_label("other"), "other");
     }
 
-    /// A high finding of key `key` in the component `name`, whose fix runs `commands`.
+    /// A high finding of key `key` in the component `name` on this Mac, whose fix runs
+    /// `commands`.
     fn fixable(key: u64, name: &str, commands: &[&str]) -> Open {
         let mut finding = in_component(open(key, Severity::High, false, None), name, "1.0");
         finding.commands = commands.iter().map(|&c| c.to_owned()).collect();
+        finding.fix_kind = FixKind::of("mac", &finding.commands, false);
+        finding
+    }
+
+    /// A high finding of key `key` in the component `name` that no released version fixes.
+    fn unreleased(key: u64, name: &str) -> Open {
+        let mut finding = fixable(key, name, &[]);
+        finding.fix_kind = FixKind::of("mac", &finding.commands, true);
         finding
     }
 
@@ -1384,6 +1396,7 @@ mod tests {
                 // A second advisory of curl: one item, counted once.
                 fixable(3, "curl", &["brew upgrade curl"]),
                 fixable(4, "manual", &[]),
+                unreleased(5, "sqlite"),
             ]
         };
         assert_eq!(line("mac", four()).as_deref(), Some("Fix all 2"));
@@ -1401,6 +1414,10 @@ mod tests {
         let names: Vec<&str> = fix_all_items("mac", &listed)
             .map(|i| i.name.as_str())
             .collect();
-        assert_eq!(names, ["curl", "ffmpeg"], "ranked, the manual fix left out");
+        assert_eq!(
+            names,
+            ["curl", "ffmpeg"],
+            "ranked, the manual fix and the one with no release left out"
+        );
     }
 }

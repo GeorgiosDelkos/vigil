@@ -554,10 +554,24 @@ use ssh.
 
 The owner asked for a Fix all button on a target's screen and chose "one run, one confirm":
 
-- Fix all takes every open item of one target whose lead's fix has commands to run, in the
-  order the popover ranks them. A fix without commands is manual and keeps its own Fix. The
-  button reads "Fix all N" (Rust's label) and shows only when it takes two or more items: one
-  item already has Fix.
+- Fix all takes every open item of one target whose lead's fix Vigil runs, in the order the
+  popover ranks them. What Vigil runs is one rule in Rust (`FixKind`, decided 2026-11-13):
+  a fix with no fixed release (`no_release`) never runs; on this Mac or a server, a fix
+  without commands is manual (`manual`) and never runs; anything else runs (`run`), including
+  a repository's fix without commands, whose agent opens a pull request from the steps. A
+  `manual` or `no_release` item has no Fix button, its row says "Manual fix" or "No fix
+  released yet", its detail keeps the summary and steps with a line saying why there is
+  nothing to run, and `vigil fix <key>` refuses it. So "Fix all N" counts the rows without
+  such a label (the owner's report, 2026-11-13: "Fix all 2" over three rows, the third a
+  manual fix). The button reads "Fix all N" (Rust's label) and shows only when it takes two or
+  more items: one item already has Fix.
+- An item's kind is its lead's, as its fix is (decided 2026-11-10): a component whose worst
+  finding has no fixed release reads "No fix released yet" even when an upgrade would close a
+  lesser advisory in it, which shows in its detail. Leading with the runnable finding instead
+  was weighed and not done: it would rank by fixability over risk.
+- An item whose last fix ran but changed nothing keeps "Still found after a fix": that is what
+  happened, and once a sweep with the current prompt marks it "No fix released yet", the two
+  labels together say why. A new item with no fixed release never gets it, as nothing runs.
 - Not for repositories (our choice; the owner left it open). There each fix is a pull request
   on its own branch, reviewed and merged on its own, and a setting is fixed with `gh api`.
   One pull request for all of them was weighed: it needs a branch named after no one finding,
@@ -794,6 +808,23 @@ agent sets severity from the source score and this machine's context and says wh
 differs. When the KEV catalog was read, it decides `known_exploited` in both directions and
 the app raises such a finding to at least `high`; without it the agent's value stands.
 
+No fixed release (decided 2026-11-13, after a Fix all ran `brew upgrade sqlite` with no newer
+sqlite, and the item then read "Still found after a fix"): when no released version fixes a
+finding yet, the agent sets `"no_fixed_release": true` in its `fix`, leaves `commands` empty,
+and gives what to do until a release in `summary` and `steps`. A fix with the field and a
+command is an error. The field is optional and false when absent, so older prompts and
+`findings.json` files still validate. `report.json` keeps it in each fix (`fix.no_fixed_release`,
+written only when true, so a `vigil` from before it, whose fix planning denies unknown fields,
+still plans every other fix; a report saved before it reads as false), `report.md` heads such a
+fix "No fix released yet" instead of "Fix", and the app, the CLI and the HTML report label it the
+same way. The prompts ask for it only on positive evidence: an OSV range with neither a `fixed`
+nor a `last_affected` version, an NVD configuration with no end bound, a distribution advisory
+listing the package as not fixed, or advisory text saying so. A `versionEndIncluding` or
+`last_affected` bound names the last affected version, not whether a newer one is out, and the
+sweep agent cannot look that up (no network, no commands), so then it writes the upgrade as
+usual. Telling "Homebrew has nothing newer" apart needs the newest version in the inventory
+(`brew info` reports `versions.stable`), which is not collected yet.
+
 The app validates strictly (unknown fields, unknown ids, an advisory not fetched for the finding's
 component, a repeated advisory and component pair, empty text, control and invisible formatting
 characters, and bad enums are errors) and caps what it shows (decided 2026-11-12): at most 500
@@ -944,10 +975,14 @@ Built in step 9a (2026-11-06):
   a target's newest sweep had a source fail or its files cannot be read, or the schedule could
   not be checked, and nothing critical or high is open). A target with a failed source or an
   unreadable file is never "All clear" (decided 2026-11-12): the headline reads "Not fully
-  checked" when nothing is open, an amber banner names each such target and what failed, its
-  row says "not fully checked", and the main view's vortex is not green. A failure never hides an open critical or high (the
+  checked" when nothing is open, its row says "not fully checked", its screen's subtitle names
+  what was not checked ("132 components checked · swept 1 h ago · not fully checked: pipx"),
+  and the main view's vortex is not green. No box at the top says it again (the owner's
+  decision, 2026-11-13, replacing the amber banner of 2026-11-12); the HTML report still lists
+  it under "Not fully checked". A failure never hides an open critical or high (the
   owner's rule, clarified 2026-11-11): the icon stays red or orange, and the tooltip ("Vigil:
-  critical findings open; something failed, open Vigil to see it") and the popover's banner show the failure.
+  critical findings open; something failed, open Vigil to see it") and the target rows show
+  the failure.
   Medium and low no longer colour the icon and stay
   visible in the popover (the owner's decision, 2026-11-11, replacing blue, yellow and pink for
   low, medium, and critical and high, and the uncoloured icon for nothing open). Red, orange

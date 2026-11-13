@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use jiff::Timestamp;
 
 use crate::config::Config;
+use crate::lifecycle::FixKind;
 use crate::lifecycle::FixState;
 use crate::lifecycle::Latest;
 use crate::lifecycle::Open;
@@ -151,12 +152,13 @@ fn exploited_callout(view: &PopoverView) -> String {
         .map(|item| {
             let lead = &item.lead;
             // A command reads as code; a manual fix's summary reads as prose.
-            let first = match (lead.commands.first(), lead.fix.is_empty()) {
-                (Some(command), _) => {
-                    format!(" Fix it first: <code>{}</code>", esc(command))
+            let first = match (lead.fix_kind, lead.commands.first()) {
+                (FixKind::NoRelease, _) => {
+                    format!(" No fix is released yet; until then: {}.", esc(&lead.fix))
                 }
-                (None, false) => format!(" Fix it first: {}.", esc(&lead.fix)),
-                (None, true) => String::new(),
+                (_, Some(command)) => format!(" Fix it first: <code>{}</code>", esc(command)),
+                (_, None) if !lead.fix.is_empty() => format!(" Fix it first: {}.", esc(&lead.fix)),
+                (_, None) => String::new(),
             };
             let exploited: Vec<String> = item
                 .findings()
@@ -444,8 +446,13 @@ fn fix_status(state: &FixState) -> String {
 fn fix_part(open: &Open) -> String {
     let mut out = String::new();
     if !open.fix.is_empty() {
+        let label = match open.fix_kind {
+            FixKind::Run => "Fix:",
+            FixKind::Manual => "Manual fix:",
+            FixKind::NoRelease => "No fix released yet:",
+        };
         out.push_str(&format!(
-            "<p class=\"fixsum\"><b>Fix:</b> {}</p>",
+            "<p class=\"fixsum\"><b>{label}</b> {}</p>",
             esc(&open.fix)
         ));
     }
@@ -843,6 +850,7 @@ mod tests {
             fix: "upgrade it".to_owned(),
             steps: Vec::new(),
             commands: vec![format!("brew upgrade pkg{key}")],
+            fix_kind: FixKind::Run,
             first_seen: Some(at("2026-11-01T00:00:00Z")),
             new: false,
             fix_state: None,
@@ -876,7 +884,7 @@ mod tests {
         degraded.unchecked.osv = Some(crate::OsvUnchecked::All);
         let html = page(vec![degraded]);
         assert!(
-            html.contains("<b>Not fully checked.</b> This Mac: OSV not checked"),
+            html.contains("<b>Not fully checked.</b> This Mac: OSV"),
             "{html}"
         );
         assert!(html.contains("Nothing is open in what was checked"));
@@ -1065,6 +1073,7 @@ mod tests {
             fix: evil.to_owned(),
             steps: vec![evil.to_owned()],
             commands: Vec::new(),
+            fix_kind: FixKind::Manual,
             fix_state: Some(FixState::Reported {
                 at: at("2026-11-08T00:00:00Z"),
                 summary: evil.to_owned(),
@@ -1172,6 +1181,7 @@ mod tests {
             evidence: format!("Evidence {key}."),
             fix: "Upgrade ffmpeg.".to_owned(),
             commands: vec!["brew upgrade ffmpeg".to_owned()],
+            fix_kind: FixKind::Run,
             ..open(key, severity, exploited)
         };
         let mut own_fix = ffmpeg(3, Severity::Low, false);
@@ -1271,9 +1281,22 @@ mod tests {
         let mut manual = open(4, Severity::Low, true);
         manual.commands = Vec::new();
         manual.fix = "<Upgrade> the app".to_owned();
+        manual.fix_kind = FixKind::Manual;
         let html = page(vec![mac(vec![manual])]);
         assert!(html.contains("using now. Fix it first: &lt;Upgrade&gt; the app.</p>"));
         assert!(html.contains("<div class=\"hot\"><b>1</b><span>exploited in the wild</span>"));
+        assert!(html.contains("<b>Manual fix:</b> &lt;Upgrade&gt; the app"));
+
+        let mut unreleased = open(5, Severity::Low, true);
+        unreleased.commands = Vec::new();
+        unreleased.fix = "Do not open untrusted files".to_owned();
+        unreleased.fix_kind = FixKind::NoRelease;
+        let html = page(vec![mac(vec![unreleased])]);
+        assert!(html.contains(
+            "using now. No fix is released yet; until then: Do not open untrusted files.</p>"
+        ));
+        assert!(html.contains("<b>No fix released yet:</b> Do not open untrusted files"));
+        assert!(!html.contains("Fix it first"));
     }
 
     #[test]

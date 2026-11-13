@@ -19,6 +19,7 @@ import {
   type Finding,
   type FixedItem,
   type FixedStatus,
+  type FixKind,
   type FixRunItem,
   type FixState,
   type FixAllPreview,
@@ -347,7 +348,6 @@ function Summary(props: { overview: Overview; now: Date; onSweep: () => void }) 
         </button>
       </div>
       <Show when={failed()}>{(f) => <p class="banner bad">{f().error}</p>}</Show>
-      <Show when={props.overview.warning}>{(w) => <p class="banner warn">{w()}</p>}</Show>
       <Show when={props.overview.items.length > 0}>
         <div
           class="bar"
@@ -468,9 +468,32 @@ const PENDING_LABELS: Readonly<Record<PendingFix, string>> = {
   pull_request: "Pull request open",
 };
 
-/** Whether a row shows any tag: exploited, new, or what keeps its fix from counting. */
+/** The badge of an item whose fix Vigil does not run, and why. These items have no Fix button
+ * and stay out of Fix all, so its count matches the rows without this badge (the owner's
+ * report, 2026-11-13, of "Fix all 2" over three rows). */
+const UNRUN_LABELS: Readonly<Record<Exclude<FixKind, "run">, string>> = {
+  manual: "Manual fix",
+  no_release: "No fix released yet",
+};
+
+/** What the detail of an item Vigil does not fix says in place of its Fix button. */
+const UNRUN_NOTES: Readonly<Record<Exclude<FixKind, "run">, string>> = {
+  manual: "Vigil has no commands to run for this fix; do what it says yourself.",
+  no_release:
+    "No released version fixes this yet, so there is nothing to run. Until one is, do what " +
+    "the fix says.",
+};
+
+/** The fix kind of an item Vigil does not fix, or null when Vigil runs its fix. */
+function unrun(item: Listed): Exclude<FixKind, "run"> | null {
+  const kind = item.lead.fix_kind;
+  return kind === "run" ? null : kind;
+}
+
+/** Whether a row shows any tag: exploited, new, what keeps its fix from counting, or that
+ * Vigil does not run its fix. */
 function tagged(item: Listed): boolean {
-  return item.known_exploited || item.new || item.pending_fix !== null;
+  return item.known_exploited || item.new || item.pending_fix !== null || unrun(item) !== null;
 }
 
 /** What a row says it is about: how many advisories a component has, or its advisory ids. */
@@ -510,6 +533,9 @@ function Rows(props: {
                         <span class={`tag fix-${pending()}`}>{PENDING_LABELS[pending()]}</span>
                       )}
                     </Show>
+                    <Show when={unrun(item)}>
+                      {(kind) => <span class={`tag fix-${kind()}`}>{UNRUN_LABELS[kind()]}</span>}
+                    </Show>
                   </span>
                 </Show>
                 <span class="where">
@@ -541,9 +567,9 @@ const SEVERITY_COLOURS: Readonly<Record<Severity, string>> = {
 };
 
 /** What a target's last sweep checked, when, and how many findings are dismissed there:
- * "139 components checked · swept 1 h ago · 2 dismissed", and "not fully checked" when a
- * source failed or a file could not be read. */
-function sweptLine(t: TargetLine, now: Date): string {
+ * "139 components checked · swept 1 h ago · 2 dismissed", then `unchecked` when a source
+ * failed or a file could not be read. */
+function sweptLine(t: TargetLine, now: Date, unchecked: string): string {
   const parts =
     t.swept === null ? ["not swept yet"] : [t.checked, `swept ${since(t.swept, now)} ago`];
   if (t.dismissed > 0) {
@@ -551,7 +577,7 @@ function sweptLine(t: TargetLine, now: Date): string {
   }
   // Whatever is open: a failed source may hide more.
   if (t.warning !== null) {
-    parts.push("not fully checked");
+    parts.push(unchecked);
   }
   return parts.filter((part) => part !== null).join(" · ");
 }
@@ -571,7 +597,7 @@ function Targets(props: {
           <button type="button" class="trow target" onClick={() => props.onOpen(t.key)}>
             <Icon name={t.kind} />
             <span class="tname">{t.label}</span>
-            <span class="tsub">{sweptLine(t, props.now)}</span>
+            <span class="tsub">{sweptLine(t, props.now, "not fully checked")}</span>
             <TargetFigures target={t} colours={SEVERITY_COLOURS} />
             {/* TargetFigures says the open count in its sentence, so it is not read twice. */}
             <span class="open" aria-hidden="true">
@@ -633,7 +659,11 @@ function TargetFindings(props: {
         <div class="headline">
           <div class="headline-text">
             <h1>{props.line.label}</h1>
-            <p class="sub">{sweptLine(props.line, props.now)}</p>
+            {/* The target's own screen names what was not checked, in no box (the owner's
+                decision, 2026-11-13): "not fully checked: pipx". */}
+            <p class="sub">
+              {sweptLine(props.line, props.now, `not fully checked: ${props.line.warning ?? ""}`)}
+            </p>
           </div>
           <Show when={asked() === null && props.line.fix_all}>
             {(label) => (
@@ -644,7 +674,6 @@ function TargetFindings(props: {
             )}
           </Show>
         </div>
-        <Show when={props.line.warning}>{(w) => <p class="banner warn">{w()}</p>}</Show>
       </section>
       <Show
         when={asked()}
@@ -840,7 +869,17 @@ function Detail(props: {
           <Icon name="wrench" />
           {lead().fix}
         </p>
-        <Commands commands={lead().commands} />
+        <Show when={unrun(props.item)} fallback={<Commands commands={lead().commands} />}>
+          {(kind) => (
+            <>
+              <Steps steps={lead().steps} label="Steps to take" />
+              <p class="note">
+                <span class={`tag fix-${kind()}`}>{UNRUN_LABELS[kind()]}</span>{" "}
+                {UNRUN_NOTES[kind()]}
+              </p>
+            </>
+          )}
+        </Show>
         <Switch>
           <Match when={preview()}>
             {(p) => (
@@ -877,11 +916,15 @@ function Detail(props: {
               onCancel={() => setDismissing(false)}
             />
           </Match>
-          <Match when={true}>
+          {/* Nothing for a component Vigil does not fix: its advisories are dismissed below. */}
+          <Match when={unrun(props.item) === null || single()}>
             <div class="dacts">
-              <button type="button" class="btn primary" disabled={props.busy} onClick={askFix}>
-                Fix…
-              </button>
+              {/* Rust refuses to plan a fix with nothing to run, so none is offered. */}
+              <Show when={unrun(props.item) === null}>
+                <button type="button" class="btn primary" disabled={props.busy} onClick={askFix}>
+                  Fix…
+                </button>
+              </Show>
               {/* A component's advisories are dismissed one by one, below. */}
               <Show when={single()}>
                 <button type="button" class="btn" onClick={() => setDismissing(true)}>
