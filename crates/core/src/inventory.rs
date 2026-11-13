@@ -37,8 +37,9 @@ pub struct Inventory {
     /// Sources or files that could not be read, names that cannot be looked up, and notes on
     /// sources that were still read (see [`InventoryError::is_failure`]).
     ///
-    /// A collector adds a failure only through `fail` (or `run` and `absorb`), which also names
-    /// its source in `failed`; only notes are pushed here directly.
+    /// Every failure here names its source in `failed`: collectors add one through `fail` (or
+    /// `run` and `absorb`), and `lockfiles::add_walks` adds the stopped walk's roots itself.
+    /// Only notes are pushed without a source.
     pub problems: Vec<InventoryError>,
     /// The sources a failure in `problems` left unread or partly read, so the sweep keeps the
     /// findings they gave last time (see `unchecked`).

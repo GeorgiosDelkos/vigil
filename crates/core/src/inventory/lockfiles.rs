@@ -212,8 +212,15 @@ fn walk(root: &Path, bounds: &Bounds<'_>, inventory: &mut Inventory) {
     // is told apart from a folder under it.
     let device = match fs::metadata(root).and_then(|meta| fs::read_dir(root).map(|_| meta)) {
         Ok(meta) => meta.st_dev(),
-        Err(e) => {
-            unopened_root(inventory, root, e);
+        Err(source) => {
+            let unopened = InventorySource::LockfileWalk {
+                root: root.to_owned(),
+            };
+            let error = InventoryError::ProjectFolder {
+                root: root.to_owned(),
+                source,
+            };
+            inventory.fail(unopened, error);
             return;
         }
     };
@@ -311,19 +318,6 @@ fn unwalked(inventory: &mut Inventory, path: &Path, error: std::io::Error) {
         root: path.to_owned(),
     };
     inventory.fail(source, InventoryError::io(path, error));
-}
-
-/// Records that the project folder `root` could not be listed: a failed source whatever the
-/// cause, permission included, unlike a folder under it ([`InventoryError::ProjectFolder`]).
-fn unopened_root(inventory: &mut Inventory, root: &Path, source: std::io::Error) {
-    let error = InventoryError::ProjectFolder {
-        root: root.to_owned(),
-        source,
-    };
-    let unwalked = InventorySource::LockfileWalk {
-        root: root.to_owned(),
-    };
-    inventory.fail(unwalked, error);
 }
 
 /// Returns whether the walk may enter the folder at `path` by its name: not hidden by a dot,
