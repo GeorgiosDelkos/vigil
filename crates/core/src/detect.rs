@@ -122,9 +122,8 @@ pub struct SshHost {
     pub host_name: Option<String>,
 }
 
-/// Detects what this Mac has. Takes a few seconds: it runs the user's shell (an interactive
-/// login shell for zsh and bash when this process has no terminal, as in the app, so
-/// `.zshrc` counts; longer when it hangs, until a time limit; otherwise `-lc`), `gh` twice,
+/// Detects what this Mac has. Takes a few seconds: it runs the user's shell the way
+/// `login_shell::run` does (longer, up to its time limit, when `.zshrc` hangs), `gh` twice,
 /// the model lists of Grok and opencode side by side (each cut off after [`MODELS_TIMEOUT`])
 /// and the Keychain lookup.
 ///

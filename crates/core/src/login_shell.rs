@@ -10,10 +10,9 @@
 //!
 //! Decision: the interactive shell first on every lookup without a terminal (below), falling
 //! back to `-lc` when it fails, times out after [`INTERACTIVE_TIMEOUT`], or exits before the
-//! script's [`END_MARK`]. Rejected:
-//! `-lc` first and `-ilc` only when an agent is not found, which costs one shell start fewer
-//! for users whose `.zprofile` has everything, but leaves the tool search path without the
-//! `.zshrc` entries, so bun or conda read as not installed.
+//! script's [`END_MARK`]. Rejected: `-lc` first and `-ilc` only when an agent is not found,
+//! which costs one shell start fewer for users whose `.zprofile` has everything, but leaves
+//! the tool search path without the `.zshrc` entries, so bun or conda read as not installed.
 //!
 //! Only zsh and bash, known by the file name of `$SHELL`, run interactively. Other shells keep
 //! `-lc`, since their flags differ and nobody has checked them.
@@ -209,6 +208,24 @@ mod tests {
             first_line(run_with(&zsh, &[], "x", Start::Login).unwrap()),
             "-lc",
             "a process with a terminal"
+        );
+    }
+
+    #[test]
+    fn run_clears_definitions_before_the_script() {
+        let tmp = tempfile::tempdir().unwrap();
+        // fish is only started as `-lc <script>`, so `$2` is the script `run_with` built.
+        let fish = fake_shell(
+            tmp.path(),
+            "fish",
+            &format!("printf '%s\\n' \"$2\" {END_MARK}\n"),
+        );
+        let output = run_with(&fish, &["claude"], "the-script", INTERACTIVE)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            output.stdout.lines().next().unwrap(),
+            format!("{}the-script", clear_definitions(&["claude"]))
         );
     }
 
