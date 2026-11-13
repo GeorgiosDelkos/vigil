@@ -390,11 +390,10 @@ pub(crate) fn carried_over(
     for mut entry in entries.findings.into_iter().chain(entries.carried) {
         let saved =
             SavedEntry::deserialize(&serde_json::Value::Object(entry.clone())).map_err(invalid)?;
-        let lookup = saved
-            .installed
-            .as_ref()
-            .map_or(&serde_json::Value::Null, |i| &i.lookup);
-        if found.contains(&saved.key) || !unchecked.covers(lookup) {
+        let installed = saved.installed.as_ref();
+        let lookup = installed.map_or(&serde_json::Value::Null, |i| &i.lookup);
+        let place = installed.and_then(|i| FoundIn::deserialize(&i.found_in).ok());
+        if found.contains(&saved.key) || !unchecked.covers(lookup, place.as_ref()) {
             continue;
         }
         let carried_from = saved.carried_from.unwrap_or(last.started);
@@ -1236,6 +1235,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::inventory::InventorySource;
 
     #[test]
     fn keys_are_fnv1a_of_the_parts_and_parse_back() {
@@ -2090,6 +2090,70 @@ mod tests {
         let mac = &latest(&data_dir, &config)[0];
         assert_eq!(mac.fixed.len(), 1);
         assert_eq!(mac.fixed[0].key, curl);
+    }
+
+    #[test]
+    fn a_failed_inventory_source_carries_only_the_findings_of_its_places() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path().join("sweeps");
+        let [brew, lock, other_lock, unknown] = [1, 2, 3, 4].map(FindingKey);
+        let curl = json!({"product": "curl"});
+        let crate_x = json!({"package": {"ecosystem": "crates.io", "name": "x"}});
+        let all = [
+            (brew, curl.clone()),
+            (lock, crate_x.clone()),
+            (other_lock, crate_x.clone()),
+            (unknown, curl),
+        ];
+        let mut saved = report_of("2026-11-05T10:00:00Z", &all, &json!({}));
+        let places = [
+            json!({"kind": "homebrew_formula", "name": "curl"}),
+            json!({"kind": "lockfile", "path": "/p/a/Cargo.lock"}),
+            json!({"kind": "lockfile", "path": "/p/b/Cargo.lock"}),
+            // A place a later build saved, which this one cannot read.
+            json!({"kind": "martian"}),
+        ];
+        for (finding, place) in saved["findings"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(places)
+        {
+            finding["installed"]["found_in"] = place;
+        }
+        save(&sweeps, "20261105T100000Z/mac", &saved);
+
+        let none = Dismissals::default();
+        let carried = |failed: &[InventorySource], found: &[FindingKey]| {
+            let unchecked = Unchecked {
+                inventory: failed.iter().cloned().collect(),
+                ..Unchecked::default()
+            };
+            let found = found.iter().copied().collect();
+            let carried = carried_over(&sweeps, "mac", &unchecked, &found, &none).unwrap();
+            carried.iter().map(|c| c.key).collect::<Vec<_>>()
+        };
+        let lockfile = |path: &str| InventorySource::Lockfile { path: path.into() };
+        let walk = |root: &str| InventorySource::LockfileWalk { root: root.into() };
+
+        assert_eq!(carried(&[InventorySource::Homebrew], &[]), [brew]);
+        assert_eq!(
+            carried(&[lockfile("/p/a/Cargo.lock")], &[]),
+            [lock],
+            "a lockfile that failed keeps its own findings, not Homebrew's"
+        );
+        assert_eq!(carried(&[walk("/p")], &[]), [lock, other_lock]);
+        assert_eq!(carried(&[walk("/p/b")], &[]), [other_lock]);
+        assert_eq!(
+            carried(&[InventorySource::Homebrew], &[brew]),
+            [],
+            "found again"
+        );
+        assert_eq!(
+            carried(&[InventorySource::Node, walk("/q")], &[]),
+            [],
+            "nothing of theirs was found last time"
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ use crate::feeds::cache_key;
 use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::InventoryError;
+use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
 use crate::inventory::command;
 use crate::package::Ecosystem;
@@ -83,6 +84,8 @@ pub(crate) struct Repo {
     pub(crate) settings: Vec<String>,
     /// Parts that could not be collected.
     pub(crate) problems: Vec<String>,
+    /// The dependency graph, when it could not be read for a reason that may pass.
+    pub(crate) failed: BTreeSet<InventorySource>,
 }
 
 impl Repo {
@@ -104,6 +107,10 @@ impl Repo {
                     ));
                 }
             }
+            // A refusal is a graph turned off (404) or one this login may not see (403): lasting,
+            // like a tool not installed on a Mac, so no failed source. Counting it would keep a
+            // repository that turned its graph off from ever being clear. A rate limit or a
+            // server error is an `Err`.
             Ok(Answer::Refused { status, message }) => {
                 let advice = if status == 404 {
                     "; turn on the dependency graph under Settings, Code security"
@@ -115,7 +122,10 @@ impl Repo {
                      were not checked{advice}"
                 ));
             }
-            Err(e) => self.problems.push(format!("dependency graph: {e}")),
+            Err(e) => {
+                self.failed.insert(InventorySource::DependencyGraph);
+                self.problems.push(format!("dependency graph: {e}"));
+            }
         }
     }
 
@@ -1142,6 +1152,11 @@ esac
             !problems.contains("turn on the dependency graph"),
             "{problems}"
         );
+        assert_eq!(
+            repo.failed,
+            [InventorySource::DependencyGraph].into(),
+            "a rate limit passes"
+        );
     }
 
     /// Alerts are fetched a page at a time, following the cursor in each `Link` header, and
@@ -1267,6 +1282,7 @@ esac
             "{:?}",
             repo.problems
         );
+        assert!(repo.failed.is_empty(), "a graph turned off stays off");
 
         let repo = collect(&gh, &slug("o/over")).unwrap();
         let refusal = json!({"status": 404, "message": "Not Found"});

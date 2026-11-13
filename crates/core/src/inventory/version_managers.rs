@@ -16,6 +16,7 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::InventoryError;
+use crate::inventory::InventorySource;
 use crate::inventory::VersionManager;
 use crate::inventory::toolchains::product;
 
@@ -26,15 +27,16 @@ use crate::inventory::toolchains::product;
 /// folders are read.
 pub(super) fn collect(inventory: &mut Inventory) {
     let Some(home) = std::env::home_dir() else {
-        inventory.problems.push(InventoryError::Io {
+        let error = InventoryError::Io {
             path: PathBuf::from("~"),
             source: io::Error::new(io::ErrorKind::NotFound, "no home folder: set HOME"),
-        });
+        };
+        inventory.fail(InventorySource::VersionManagers, error);
         return;
     };
     let env = |name: &str| std::env::var_os(name).map(PathBuf::from);
     for layout in layouts(&home, env) {
-        inventory.absorb(read_versions(&layout));
+        inventory.absorb(InventorySource::VersionManagers, read_versions(&layout));
     }
 }
 

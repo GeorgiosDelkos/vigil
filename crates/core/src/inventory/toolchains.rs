@@ -17,6 +17,7 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::InventoryError;
+use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
 use crate::inventory::command;
 use crate::package::Ecosystem;
@@ -25,26 +26,31 @@ use crate::package::Package;
 type Parsed = Result<Vec<Component>, InventoryError>;
 
 pub(super) fn macos(inventory: &mut Inventory, cancel: &Cancel) {
-    if let Some(output) = inventory.run("sw_vers", &["-productVersion"], cancel) {
-        inventory.absorb(parse_macos_version(&output));
+    let source = InventorySource::MacOs;
+    if let Some(output) = inventory.run(source.clone(), "sw_vers", &["-productVersion"], cancel) {
+        inventory.absorb(source, parse_macos_version(&output));
     }
 }
 
 pub(super) fn collect(inventory: &mut Inventory, cancel: &Cancel) {
     rustup(inventory, cancel);
-    if let Some(output) = inventory.run("cargo", &["install", "--list"], cancel) {
-        inventory.absorb(parse_cargo_install(&output));
+    let source = InventorySource::CargoInstall;
+    if let Some(output) = inventory.run(source.clone(), "cargo", &["install", "--list"], cancel) {
+        inventory.absorb(source, parse_cargo_install(&output));
     }
-    if let Some(output) = inventory.run("node", &["--version"], cancel) {
-        inventory.absorb(parse_node_version(&output));
+    let source = InventorySource::Node;
+    if let Some(output) = inventory.run(source.clone(), "node", &["--version"], cancel) {
+        inventory.absorb(source, parse_node_version(&output));
     }
     npm_global(inventory, cancel);
     python(inventory, cancel);
-    if let Some(output) = inventory.run("uv", &["tool", "list"], cancel) {
-        inventory.absorb(parse_uv_tools(&output));
+    let source = InventorySource::UvTool;
+    if let Some(output) = inventory.run(source.clone(), "uv", &["tool", "list"], cancel) {
+        inventory.absorb(source, parse_uv_tools(&output));
     }
-    if let Some(output) = inventory.run("pipx", &["list", "--json"], cancel) {
-        inventory.absorb(parse_pipx(&output));
+    let source = InventorySource::Pipx;
+    if let Some(output) = inventory.run(source.clone(), "pipx", &["list", "--json"], cancel) {
+        inventory.absorb(source, parse_pipx(&output));
     }
 }
 
@@ -85,13 +91,14 @@ fn parse_macos_version(output: &str) -> Parsed {
 /// Each toolchain's version comes from its `rustc`, since `stable` and `nightly` name no
 /// version. One toolchain failing does not stop the others.
 fn rustup(inventory: &mut Inventory, cancel: &Cancel) {
-    let Some(list) = inventory.run("rustup", &["toolchain", "list"], cancel) else {
+    let source = InventorySource::Rustup;
+    let Some(list) = inventory.run(source.clone(), "rustup", &["toolchain", "list"], cancel) else {
         return;
     };
     for toolchain in parse_rustup_toolchains(&list) {
         let args = ["run", toolchain.as_str(), "rustc", "--version"];
-        if let Some(output) = inventory.run("rustup", &args, cancel) {
-            inventory.absorb(parse_rustc_version(&output, toolchain));
+        if let Some(output) = inventory.run(source.clone(), "rustup", &args, cancel) {
+            inventory.absorb(source.clone(), parse_rustc_version(&output, toolchain));
         }
     }
 }
@@ -172,7 +179,7 @@ fn npm_global(inventory: &mut Inventory, cancel: &Cancel) {
             return;
         }
         Err(e) => {
-            inventory.problems.push(e);
+            inventory.fail(InventorySource::NpmGlobal, e);
             return;
         }
     };
@@ -187,11 +194,14 @@ fn npm_global(inventory: &mut Inventory, cancel: &Cancel) {
             }
             inventory.components.extend(found);
         }
-        Err(e) if output.success => inventory.problems.push(e),
-        Err(_) => inventory.problems.push(InventoryError::Command {
-            command: output.command,
-            detail: output.detail,
-        }),
+        Err(e) if output.success => inventory.fail(InventorySource::NpmGlobal, e),
+        Err(_) => {
+            let error = InventoryError::Command {
+                command: output.command,
+                detail: output.detail,
+            };
+            inventory.fail(InventorySource::NpmGlobal, error);
+        }
     }
 }
 
@@ -237,11 +247,14 @@ fn python(inventory: &mut Inventory, cancel: &Cancel) {
         )
     };
     let real = python_is_real_at(command::which("python3").as_deref(), has_tools);
-    inventory.problems.extend(problem);
+    let source = InventorySource::Python;
+    if let Some(problem) = problem {
+        inventory.fail(source.clone(), problem);
+    }
     if !real {
         inventory.missing("python3");
-    } else if let Some(output) = inventory.run("python3", &["--version"], cancel) {
-        inventory.absorb(parse_python_version(&output));
+    } else if let Some(output) = inventory.run(source.clone(), "python3", &["--version"], cancel) {
+        inventory.absorb(source, parse_python_version(&output));
     }
 }
 

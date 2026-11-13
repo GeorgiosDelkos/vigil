@@ -149,12 +149,25 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   its findings show as resolved, confirmed pending fixes, and left a green icon and "All
   clear"): each report has `unchecked`, a typed record of the sources that failed for its
   target: the KEV catalog, OSV (the id query, or records that could not be fetched and had no
-  cached copy), and the NVD products with nothing fetched and nothing cached in the last week. A finding of the
-  target's last report with a verdict that this sweep did not find, and that a failed source
-  could have produced (an OSV finding when OSV failed or a record its package's query returned
-  did, an NVD finding when its product failed, an OS package's finding when the KEV catalog
-  failed, since without it a crowded query is not thinned and the agent judges another set),
-  goes into the new report's `carried` as that report saved it, with `carried_from`, the start
+  cached copy), the NVD products with nothing fetched and nothing cached in the last week, and
+  (`inventory`, added 2026-11-13) the inventory sources that failed, each `{"kind": ...}`:
+  `mac_os`, `homebrew` (formulae and casks), `rustup`, `cargo_install`, `node`, `npm_global`,
+  `python`, `uv_tool`, `pipx`, `version_managers`, `lockfile` with its `path` (could not be
+  read or parsed), `lockfile_walk` with its `root` (a folder the walk could not list, or a
+  project folder the walk did not finish), `os_packages` (a server whose release is looked up
+  but whose package database failed) and `dependency_graph` (a GitHub request that failed, not
+  a graph turned off or hidden from the login). A tool that is not installed, a graph turned
+  off, and the notes (`NoProduct`, another Cargo registry, an npm tree problem, too many
+  entries, an iCloud-only lockfile) are lasting facts, not failures: counting them would keep
+  a Mac without pipx from ever being clear and a fix that uninstalls a tool from ever being
+  confirmed. A finding of the target's last report with a verdict that this sweep did not
+  find, and that a failed source could have produced (an OSV finding when OSV failed or a
+  record its package's query returned did, an NVD finding when its product failed, an OS
+  package's finding when the KEV catalog failed, since without it a crowded query is not
+  thinned and the agent judges another set, a finding whose saved `installed.found_in` is a
+  place the failed inventory source lists: a Homebrew formula or cask for `homebrew`, a
+  lockfile at the path or under the root for `lockfile` and `lockfile_walk`), goes into the
+  new report's `carried` as that report saved it, with `carried_from`, the start
   of the last sweep that checked it. It stays open, is neither
   resolved nor new, and its fix is not confirmed until a sweep that checks it; a fix planned
   from any report since `carried_from` is still "fix reported". A target whose newest report

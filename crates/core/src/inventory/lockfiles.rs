@@ -39,6 +39,7 @@ use crate::inventory::Component;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::InventoryError;
+use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
 use crate::package::Ecosystem;
 use crate::package::Package;
@@ -97,11 +98,31 @@ pub(super) fn collect(roots: &[PathBuf], inventory: &mut Inventory, cancel: &Can
         walk(root, &bounds, &mut found);
         found
     });
+    add_walks(inventory, roots, walked, stopped);
+}
+
+/// Adds what [`bounded`] returned for `roots` to `inventory`: each finished walk, then why the
+/// walk stopped, if it did. A walk that stopped did so in the root after the last one it
+/// finished and walked none after that, so those roots count as unread.
+fn add_walks(
+    inventory: &mut Inventory,
+    roots: &[PathBuf],
+    walked: Vec<Inventory>,
+    stopped: Option<InventoryError>,
+) {
+    let unfinished = &roots[walked.len()..];
     for found in walked {
         inventory.components.extend(found.components);
         inventory.problems.extend(found.problems);
+        inventory.failed.extend(found.failed);
     }
-    inventory.problems.extend(stopped);
+    if let Some(stopped) = stopped {
+        let sources = unfinished
+            .iter()
+            .map(|root| InventorySource::LockfileWalk { root: root.clone() });
+        inventory.failed.extend(sources);
+        inventory.problems.push(stopped);
+    }
 }
 
 /// Runs `walk` on each of `roots` in turn, on its own thread, and returns each finished
@@ -190,7 +211,7 @@ fn walk(root: &Path, bounds: &Bounds<'_>, inventory: &mut Inventory) {
     let device = match fs::metadata(root) {
         Ok(meta) => meta.st_dev(),
         Err(e) => {
-            inventory.problems.push(InventoryError::io(root, e));
+            unwalked(inventory, root, e);
             return;
         }
     };
@@ -200,13 +221,7 @@ fn walk(root: &Path, bounds: &Bounds<'_>, inventory: &mut Inventory) {
         if bounds.stop.is_cancelled() {
             return;
         }
-        let Some(entries) = list(
-            &dir,
-            device,
-            bounds.never,
-            &mut left,
-            &mut inventory.problems,
-        ) else {
+        let Some(entries) = list(&dir, device, bounds.never, &mut left, inventory) else {
             inventory.problems.push(InventoryError::TooManyEntries {
                 root: root.to_owned(),
                 limit: bounds.limit,
@@ -232,19 +247,19 @@ enum Entry {
 
 /// Returns `dir`'s entries the walk cares about, sorted by name: folders it enters (see
 /// [`entered`]) and regular files. Symlinks, skipped folders and unreadable entries are left
-/// out, the last reported in `problems`. Each entry read counts against `left`; `None` once
+/// out, the last recorded with [`unwalked`]. Each entry read counts against `left`; `None` once
 /// that runs out, before the rest of `dir` is read.
 fn list(
     dir: &Path,
     device: u64,
     never: &[PathBuf],
     left: &mut usize,
-    problems: &mut Vec<InventoryError>,
+    inventory: &mut Inventory,
 ) -> Option<Vec<(PathBuf, Entry)>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
-            problems.push(InventoryError::io(dir, e));
+            unwalked(inventory, dir, e);
             return Some(Vec::new());
         }
     };
@@ -254,7 +269,7 @@ fn list(
         let entry = match entry {
             Ok(entry) => entry,
             Err(e) => {
-                problems.push(InventoryError::io(dir, e));
+                unwalked(inventory, dir, e);
                 continue;
             }
         };
@@ -263,7 +278,7 @@ fn list(
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(e) => {
-                problems.push(InventoryError::io(&entry.path(), e));
+                unwalked(inventory, &entry.path(), e);
                 continue;
             }
         };
@@ -278,12 +293,21 @@ fn list(
             match entry.metadata() {
                 Ok(meta) if entered(&meta, device) => listed.push((path, Entry::Dir)),
                 Ok(_) => {}
-                Err(e) => problems.push(InventoryError::io(&path, e)),
+                Err(e) => unwalked(inventory, &path, e),
             }
         }
     }
     listed.sort_by(|a, b| a.0.cmp(&b.0));
     Some(listed)
+}
+
+/// Records that `path`, a folder or an entry the walk could not tell, could not be read, so
+/// no lockfile at or under it was.
+fn unwalked(inventory: &mut Inventory, path: &Path, error: std::io::Error) {
+    let source = InventorySource::LockfileWalk {
+        root: path.to_owned(),
+    };
+    inventory.fail(source, InventoryError::io(path, error));
 }
 
 /// Returns whether the walk may enter the folder at `path` by its name: not hidden by a dot,
@@ -311,7 +335,10 @@ fn read(path: &Path, inventory: &mut Inventory) {
     let found = read_lockfile(path).and_then(|text| {
         parse(path, &text, &mut inventory.problems).expect("checked to be a lockfile name")
     });
-    inventory.absorb(found);
+    let source = InventorySource::Lockfile {
+        path: path.to_owned(),
+    };
+    inventory.absorb(source, found);
 }
 
 /// The lockfile names this module reads.
@@ -1016,6 +1043,10 @@ mod tests {
             "{:?}",
             inventory.problems
         );
+        let broken = InventorySource::Lockfile {
+            path: root.join("broken/Cargo.lock"),
+        };
+        assert_eq!(inventory.failed, [broken].into());
     }
 
     #[test]
@@ -1069,14 +1100,60 @@ mod tests {
             "{:?}",
             inventory.problems
         );
+        let unlisted = InventorySource::LockfileWalk { root: locked };
+        assert_eq!(inventory.failed, [unlisted].into());
     }
 
     #[test]
     fn missing_root_is_reported() {
-        let inventory = walked(Path::new("/nonexistent/vigil"), &[]);
+        let root = Path::new("/nonexistent/vigil");
+        let inventory = walked(root, &[]);
         assert!(matches!(
             inventory.problems[..],
             [InventoryError::Io { .. }]
         ));
+        let unwalked = InventorySource::LockfileWalk { root: root.into() };
+        assert_eq!(inventory.failed, [unwalked].into());
+    }
+
+    #[test]
+    fn a_stopped_walk_counts_its_root_and_those_after_it_as_unread() {
+        let roots = ["/a", "/b", "/c"].map(PathBuf::from);
+        let first = || {
+            let mut found = Inventory::default();
+            unwalked(
+                &mut found,
+                Path::new("/a/x"),
+                std::io::ErrorKind::PermissionDenied.into(),
+            );
+            found
+        };
+        let walk = |root: &str| InventorySource::LockfileWalk { root: root.into() };
+
+        let mut inventory = Inventory::default();
+        let timed_out = InventoryError::WalkTimedOut {
+            root: "/b".into(),
+            limit: WALK_TIMEOUT,
+        };
+        add_walks(&mut inventory, &roots, vec![first()], Some(timed_out));
+        assert_eq!(
+            inventory.failed,
+            [walk("/a/x"), walk("/b"), walk("/c")].into()
+        );
+        assert!(
+            matches!(
+                inventory.problems[..],
+                [
+                    InventoryError::Io { .. },
+                    InventoryError::WalkTimedOut { .. }
+                ]
+            ),
+            "the walked roots' problems first: {:?}",
+            inventory.problems
+        );
+
+        let mut inventory = Inventory::default();
+        add_walks(&mut inventory, &roots, vec![first()], None);
+        assert_eq!(inventory.failed, [walk("/a/x")].into());
     }
 }

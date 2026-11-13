@@ -394,6 +394,52 @@ fn clean_sweep_writes_bundle_and_report() {
     // The prompt template is now the user's to edit.
     let template = sandbox.path().join("data/prompts/sweep.md");
     assert!(fs::read_to_string(template).unwrap().contains("{{target}}"));
+    assert_eq!(
+        report["unchecked"]["inventory"],
+        serde_json::json!([]),
+        "brew not installed is no failure"
+    );
+}
+
+#[test]
+fn a_failed_inventory_source_is_saved_and_shown_as_not_checked() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let projects = sandbox.path().join("projects");
+    fs::create_dir_all(projects.join("web")).unwrap();
+    fs::write(projects.join("web/Cargo.lock"), "not toml [").unwrap();
+    fs::write(
+        sandbox.path().join("data/config.toml"),
+        format!(
+            "agent = \"claude\"\n[mac]\nproject_dirs = [\"{}\"]\n",
+            projects.display()
+        ),
+    )
+    .unwrap();
+    sandbox.script("bin/brew", "#!/bin/sh\necho 'brew is broken' >&2\nexit 1\n");
+    sandbox.script("bin/npm", "#!/bin/sh\necho 'npm is broken' >&2\nexit 2\n");
+
+    let out = sandbox.sweep("ok");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let report = sandbox.newest_report("mac");
+    let lockfile = projects.join("web/Cargo.lock");
+    assert_eq!(
+        report["unchecked"]["inventory"],
+        serde_json::json!([
+            {"kind": "homebrew"},
+            {"kind": "npm_global"},
+            {"kind": "lockfile", "path": lockfile},
+        ])
+    );
+
+    let out = sandbox.run(&["findings"]);
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "not fully checked: Homebrew, npm global packages, lockfile {}",
+            lockfile.display()
+        )),
+        "{stdout}"
+    );
 }
 
 #[test]

@@ -1,8 +1,8 @@
 //! What is installed: the components a sweep looks up advisories for.
 //!
 //! Each source (macOS, Homebrew, toolchains, project lockfiles) is collected on its own. A
-//! source that fails is reported in [`Inventory::problems`] and the others still count, so one
-//! broken tool never hides the rest. A tool that is not installed is listed in
+//! source that fails is reported in [`Inventory::problems`] and named in [`Inventory::failed`],
+//! and the others still count, so one broken tool never hides the rest. A tool that is not installed is listed in
 //! [`Inventory::not_installed`], so an inventory taken with a bare `PATH` (an app started by
 //! launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`) shows what it did not check.
 //!
@@ -15,6 +15,7 @@ pub(crate) mod lockfiles;
 mod toolchains;
 mod version_managers;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -35,6 +36,14 @@ pub struct Inventory {
     /// Sources or files that could not be read, names that cannot be looked up, and notes on
     /// sources that were still read (see [`InventoryError::is_failure`]).
     pub problems: Vec<InventoryError>,
+    /// The sources a failure in `problems` left unread or partly read, so the sweep keeps the
+    /// findings they gave last time (see `unchecked`).
+    ///
+    /// A tool in `not_installed` is deliberately not here. That is a lasting fact, not a
+    /// failure: counting it would make a Mac without pipx never clear, and a fix that
+    /// uninstalls a tool could never be confirmed. What keeps `brew` found when the app starts
+    /// under launchd is the login shell's `PATH` (`command::search_path`).
+    pub failed: BTreeSet<InventorySource>,
     /// Listing tools that are not on `PATH`, so their part was not checked.
     pub not_installed: Vec<&'static str>,
 }
@@ -75,12 +84,22 @@ impl Inventory {
         });
     }
 
-    /// Adds `result`'s components, or records its error.
-    fn absorb(&mut self, result: Result<Vec<Component>, InventoryError>) {
+    /// Adds `result`'s components, or records its error as one of `source`.
+    fn absorb(&mut self, source: InventorySource, result: Result<Vec<Component>, InventoryError>) {
         match result {
             Ok(components) => self.components.extend(components),
-            Err(e) => self.problems.push(e),
+            Err(e) => self.fail(source, e),
         }
+    }
+
+    /// Records `error`, met reading `source`, and when it is a failure that `source` was not
+    /// fully read. An [`InventoryError::Cancelled`] counts too, which changes nothing: a
+    /// cancelled sweep saves no report.
+    fn fail(&mut self, source: InventorySource, error: InventoryError) {
+        if error.is_failure() {
+            self.failed.insert(source);
+        }
+        self.problems.push(error);
     }
 
     /// Records that `program` is not installed, once.
@@ -90,9 +109,15 @@ impl Inventory {
         }
     }
 
-    /// Runs a listing command, recording a failure as a problem and a missing tool in
-    /// `not_installed`. Returns stdout only when the command succeeded.
-    fn run(&mut self, program: &'static str, args: &[&str], cancel: &Cancel) -> Option<String> {
+    /// Runs a listing command of `source`, recording a failure as a problem of `source` and a
+    /// missing tool in `not_installed`. Returns stdout only when the command succeeded.
+    fn run(
+        &mut self,
+        source: InventorySource,
+        program: &'static str,
+        args: &[&str],
+        cancel: &Cancel,
+    ) -> Option<String> {
         match command::run(program, args, cancel) {
             Ok(Some(output)) => Some(output),
             Ok(None) => {
@@ -100,7 +125,7 @@ impl Inventory {
                 None
             }
             Err(e) => {
-                self.problems.push(e);
+                self.fail(source, e);
                 None
             }
         }
@@ -308,6 +333,107 @@ impl VersionManager {
             Self::Volta => "volta",
             Self::Asdf => "asdf",
             Self::Pyenv => "pyenv",
+        }
+    }
+}
+
+/// A source of components that failed in a sweep, as [`Inventory::failed`] and a report's
+/// `unchecked` name it: coarser than [`FoundIn`], one entry per thing listed or read at once.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum InventorySource {
+    /// `sw_vers`.
+    MacOs,
+    /// Homebrew formulae and casks: one `brew info` lists both.
+    Homebrew,
+    /// rustup toolchains.
+    Rustup,
+    /// `cargo install --list`.
+    CargoInstall,
+    /// The `node` on `PATH`.
+    Node,
+    /// `npm ls -g`.
+    NpmGlobal,
+    /// The `python3` on `PATH`.
+    Python,
+    /// `uv tool list`.
+    UvTool,
+    /// `pipx list`.
+    Pipx,
+    /// The version managers' folders, all of them: one that cannot be listed is rare enough
+    /// that telling the managers apart is not worth a field.
+    VersionManagers,
+    /// One lockfile that could not be read or parsed.
+    Lockfile {
+        /// The lockfile's path.
+        path: PathBuf,
+    },
+    /// A folder the lockfile walk could not list, or did not finish: lockfiles at or under it
+    /// were not read.
+    LockfileWalk {
+        /// The folder.
+        root: PathBuf,
+    },
+    /// A server's OS package database.
+    OsPackages,
+    /// A GitHub repository's dependency graph.
+    DependencyGraph,
+}
+
+impl InventorySource {
+    /// Whether a component found in `place` comes from this source, so a failure of this
+    /// source could have left it out.
+    pub(crate) fn covers(&self, place: &FoundIn) -> bool {
+        match self {
+            Self::MacOs => matches!(place, FoundIn::MacOs),
+            Self::Homebrew => matches!(
+                place,
+                FoundIn::HomebrewFormula { .. } | FoundIn::HomebrewCask { .. }
+            ),
+            Self::Rustup => matches!(place, FoundIn::Rustup { .. }),
+            Self::CargoInstall => matches!(place, FoundIn::CargoInstall),
+            Self::Node => matches!(place, FoundIn::Node),
+            Self::NpmGlobal => matches!(place, FoundIn::NpmGlobal),
+            Self::Python => matches!(place, FoundIn::Python),
+            Self::UvTool => matches!(place, FoundIn::UvTool),
+            Self::Pipx => matches!(place, FoundIn::Pipx),
+            Self::VersionManagers => matches!(place, FoundIn::VersionManager { .. }),
+            Self::Lockfile { path } => {
+                matches!(place, FoundIn::Lockfile { path: found } if found == path)
+            }
+            // `starts_with` compares whole components, so `/a/bc` is not under `/a/b`.
+            Self::LockfileWalk { root } => {
+                matches!(place, FoundIn::Lockfile { path } if path.starts_with(root))
+            }
+            Self::OsPackages => matches!(place, FoundIn::OsPackage { .. }),
+            Self::DependencyGraph => matches!(place, FoundIn::DependencyGraph { .. }),
+        }
+    }
+
+    /// Whether it is a lockfile or a folder of them, which a summary counts together.
+    pub(crate) fn is_lockfiles(&self) -> bool {
+        matches!(self, Self::Lockfile { .. } | Self::LockfileWalk { .. })
+    }
+}
+
+/// How a person reads it: "Homebrew", "lockfiles under /Users/me/code".
+impl std::fmt::Display for InventorySource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MacOs => f.write_str("macOS"),
+            Self::Homebrew => f.write_str("Homebrew"),
+            Self::Rustup => f.write_str("rustup"),
+            Self::CargoInstall => f.write_str("cargo install"),
+            Self::Node => f.write_str("the node on PATH"),
+            Self::NpmGlobal => f.write_str("npm global packages"),
+            Self::Python => f.write_str("the python3 on PATH"),
+            Self::UvTool => f.write_str("uv tools"),
+            Self::Pipx => f.write_str("pipx"),
+            Self::VersionManagers => f.write_str("version managers"),
+            Self::Lockfile { path } => write!(f, "lockfile {}", path.display()),
+            Self::LockfileWalk { root } => write!(f, "lockfiles under {}", root.display()),
+            Self::OsPackages => f.write_str("OS packages"),
+            Self::DependencyGraph => f.write_str("the dependency graph"),
         }
     }
 }
@@ -542,26 +668,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_tools_are_listed_once() {
+    fn missing_tools_are_listed_once_and_failed_ones_name_their_source() {
         let mut inventory = Inventory::default();
-        assert_eq!(
-            inventory.run("vigil-no-such-tool", &[], &Cancel::new()),
-            None
-        );
-        assert_eq!(
-            inventory.run("vigil-no-such-tool", &["x"], &Cancel::new()),
-            None
-        );
+        let mut run = |program, args: &[&str]| {
+            inventory.run(InventorySource::Pipx, program, args, &Cancel::new())
+        };
+        assert_eq!(run("vigil-no-such-tool", &[]), None);
+        assert_eq!(run("vigil-no-such-tool", &["x"]), None);
+        assert_eq!(run("echo", &["hi"]).as_deref(), Some("hi\n"));
         assert_eq!(inventory.not_installed, ["vigil-no-such-tool"]);
-        assert_eq!(
-            inventory.run("echo", &["hi"], &Cancel::new()).as_deref(),
-            Some("hi\n")
+        assert!(
+            inventory.failed.is_empty(),
+            "a tool that is not installed is no failure"
         );
-        assert_eq!(inventory.run("false", &[], &Cancel::new()), None);
+
+        let failed = inventory.run(InventorySource::Homebrew, "false", &[], &Cancel::new());
+        assert_eq!(failed, None);
         assert!(matches!(
             inventory.problems[..],
             [InventoryError::Command { .. }]
         ));
+        assert_eq!(inventory.failed, [InventorySource::Homebrew].into());
     }
 
     #[test]
@@ -731,13 +858,151 @@ mod tests {
     #[test]
     fn absorb_keeps_components_and_problems() {
         let mut inventory = Inventory::default();
-        inventory.absorb(Ok(vec![Component {
+        let curl = Component {
             lookup: Lookup::Product("curl".parse().unwrap()),
             version: "8".into(),
             found_in: FoundIn::MacOs,
-        }]));
-        inventory.absorb(Err(InventoryError::parse("x", &"y")));
+        };
+        inventory.absorb(InventorySource::MacOs, Ok(vec![curl]));
+        inventory.absorb(
+            InventorySource::UvTool,
+            Err(InventoryError::parse("x", &"y")),
+        );
         assert_eq!(inventory.components.len(), 1);
         assert_eq!(inventory.problems.len(), 1);
+        assert_eq!(inventory.failed, [InventorySource::UvTool].into());
+
+        // A note about one item is a problem, but its source was still read.
+        let note = InventoryError::NoProduct { name: "x".into() };
+        inventory.absorb(InventorySource::Homebrew, Err(note));
+        assert_eq!(inventory.problems.len(), 2);
+        assert_eq!(inventory.failed, [InventorySource::UvTool].into());
+    }
+
+    #[test]
+    fn a_failed_source_covers_only_its_own_places() {
+        let lockfile = |path: &str| FoundIn::Lockfile { path: path.into() };
+        let formula = FoundIn::HomebrewFormula {
+            name: "curl".into(),
+        };
+        let cask = FoundIn::HomebrewCask {
+            token: "docker".into(),
+        };
+        let homebrew = InventorySource::Homebrew;
+        assert!(homebrew.covers(&formula) && homebrew.covers(&cask));
+        assert!(!homebrew.covers(&lockfile("/a/Cargo.lock")));
+        assert!(!homebrew.covers(&FoundIn::MacOs));
+
+        let one = InventorySource::Lockfile {
+            path: "/a/Cargo.lock".into(),
+        };
+        assert!(one.covers(&lockfile("/a/Cargo.lock")));
+        assert!(!one.covers(&lockfile("/a/b/Cargo.lock")));
+        assert!(!one.covers(&formula));
+
+        let walk = InventorySource::LockfileWalk {
+            root: "/a/b".into(),
+        };
+        assert!(walk.covers(&lockfile("/a/b/Cargo.lock")));
+        assert!(walk.covers(&lockfile("/a/b/c/uv.lock")));
+        assert!(
+            !walk.covers(&lockfile("/a/bc/Cargo.lock")),
+            "not a folder under it"
+        );
+        assert!(!walk.covers(&lockfile("/a/Cargo.lock")));
+        assert!(!walk.covers(&formula));
+
+        let places = [
+            (InventorySource::MacOs, FoundIn::MacOs),
+            (
+                InventorySource::Rustup,
+                FoundIn::Rustup {
+                    toolchain: "stable".into(),
+                },
+            ),
+            (InventorySource::CargoInstall, FoundIn::CargoInstall),
+            (InventorySource::Node, FoundIn::Node),
+            (InventorySource::NpmGlobal, FoundIn::NpmGlobal),
+            (InventorySource::Python, FoundIn::Python),
+            (InventorySource::UvTool, FoundIn::UvTool),
+            (InventorySource::Pipx, FoundIn::Pipx),
+            (
+                InventorySource::VersionManagers,
+                FoundIn::VersionManager {
+                    manager: VersionManager::Nvm,
+                    path: "/v".into(),
+                },
+            ),
+            (
+                InventorySource::OsPackages,
+                FoundIn::OsPackage {
+                    packages: vec!["libssl3".into()],
+                },
+            ),
+            (
+                InventorySource::DependencyGraph,
+                FoundIn::DependencyGraph { repo: "o/r".into() },
+            ),
+        ];
+        for (i, (source, _)) in places.iter().enumerate() {
+            for (j, (_, place)) in places.iter().enumerate() {
+                assert_eq!(source.covers(place), i == j, "{source} and {place}");
+            }
+            assert!(!source.covers(&formula) && !source.covers(&lockfile("/a/Cargo.lock")));
+        }
+    }
+
+    #[test]
+    fn inventory_sources_read_like_a_place_and_save_tagged() {
+        let walk = InventorySource::LockfileWalk {
+            root: "/Users/me/code".into(),
+        };
+        assert_eq!(walk.to_string(), "lockfiles under /Users/me/code");
+        let one = InventorySource::Lockfile {
+            path: "/a/uv.lock".into(),
+        };
+        assert_eq!(one.to_string(), "lockfile /a/uv.lock");
+        assert!(walk.is_lockfiles() && one.is_lockfiles());
+        assert!(!InventorySource::Homebrew.is_lockfiles());
+        assert_eq!(
+            serde_json::to_value(&walk).unwrap(),
+            serde_json::json!({"kind": "lockfile_walk", "root": "/Users/me/code"})
+        );
+        let names = [
+            (InventorySource::MacOs, "macOS", "mac_os"),
+            (InventorySource::Homebrew, "Homebrew", "homebrew"),
+            (InventorySource::Rustup, "rustup", "rustup"),
+            (
+                InventorySource::CargoInstall,
+                "cargo install",
+                "cargo_install",
+            ),
+            (InventorySource::Node, "the node on PATH", "node"),
+            (
+                InventorySource::NpmGlobal,
+                "npm global packages",
+                "npm_global",
+            ),
+            (InventorySource::Python, "the python3 on PATH", "python"),
+            (InventorySource::UvTool, "uv tools", "uv_tool"),
+            (InventorySource::Pipx, "pipx", "pipx"),
+            (
+                InventorySource::VersionManagers,
+                "version managers",
+                "version_managers",
+            ),
+            (InventorySource::OsPackages, "OS packages", "os_packages"),
+            (
+                InventorySource::DependencyGraph,
+                "the dependency graph",
+                "dependency_graph",
+            ),
+        ];
+        for (source, text, kind) in names {
+            assert_eq!(source.to_string(), text);
+            let value = serde_json::to_value(&source).unwrap();
+            assert_eq!(value, serde_json::json!({ "kind": kind }));
+            assert_eq!(InventorySource::deserialize(&value).unwrap(), source);
+        }
     }
 }
