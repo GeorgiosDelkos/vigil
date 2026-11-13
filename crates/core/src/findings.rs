@@ -105,7 +105,8 @@ pub struct Fix {
     /// Whether no released version fixes the finding's advisory yet; never set on an
     /// [`Issue`]. The summary and steps are then what to do until one is released, and there
     /// are no commands: upgrading to the newest version would change nothing, and a fix that
-    /// runs it would read "Still found after a fix" at the next sweep. Absent, so false, in findings and reports written before it existed.
+    /// runs it would read "Still found after a fix" at the next sweep. Absent, so false, in
+    /// findings and reports written before it existed.
     ///
     /// Written only when true: `Fix` denies unknown fields, so a `vigil` from before this field
     /// that plans a fix from a newer report fails on it. Leaving out `false` limits that to the
