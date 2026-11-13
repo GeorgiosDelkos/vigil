@@ -123,7 +123,7 @@ pub struct SshHost {
 }
 
 /// Detects what this Mac has. Takes a few seconds: it runs the user's shell as an interactive
-/// login shell (up to 10 seconds more when their `.zshrc` hangs, then a login shell), `gh`
+/// login shell (longer when their `.zshrc` hangs, until a time limit), `gh`
 /// twice, the model lists of Grok and opencode side by side (each cut off after
 /// [`MODELS_TIMEOUT`]) and the Keychain lookup.
 ///
@@ -276,8 +276,10 @@ fn shell_answer(shell: &str) -> Option<Answer> {
         .collect();
     // The names are this module's constants, so they need no quoting.
     let script = format!(
-        "printf '%s\\n' {PATH_MARK} \"$PATH\"; for b in {}; do printf '{BIN_MARK}%s\\t%s\\n' \
-         \"$b\" \"$(command -v \"$b\")\"; done; printf '%s\\n' {END_MARK}",
+        "{}printf '%s\\n' {PATH_MARK} \"$PATH\"; for b in {}; do \
+         printf '{BIN_MARK}%s\\t%s\\n' \"$b\" \"$(command -v \"$b\")\"; done; \
+         printf '%s\\n' {END_MARK}",
+        login_shell::clear_definitions(&names),
         names.join(" ")
     );
     let output = login_shell::run(shell, &script).ok()??;

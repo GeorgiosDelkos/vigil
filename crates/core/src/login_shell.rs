@@ -97,6 +97,18 @@ fn interactive_flags(shell: &str) -> Option<&'static [&'static str]> {
     }
 }
 
+/// Shell text that removes every alias, and any function named after one of `programs`, so
+/// a `command -v` after it prints where the program is on `PATH`. An interactive shell has
+/// the aliases and functions its startup files define, and `command -v` prints those instead
+/// (`alias claude='claude --model opus'`), which the callers would read as not installed.
+/// The names are the callers' constants, so they need no quoting.
+pub(crate) fn clear_definitions(programs: &[&str]) -> String {
+    format!(
+        "unalias -a 2>/dev/null; unset -f {} 2>/dev/null; ",
+        programs.join(" ")
+    )
+}
+
 /// Whether `line` is the one the script's [`PATH_MARK`] ends. A startup file that prints
 /// without a final newline (a prompt theme's escape codes) leaves its text on the same line,
 /// before the mark. The later marks follow the script's own newlines, so they stand alone.
@@ -148,6 +160,24 @@ mod tests {
         assert_eq!(first_line(run(&zsh, "x").unwrap()), "-i +m -l -c");
         assert_eq!(first_line(run(&bash, "x").unwrap()), "-i -l -c");
         assert_eq!(first_line(run(&fish, "x").unwrap()), "-lc");
+    }
+
+    #[test]
+    fn cleared_aliases_and_functions_leave_the_program_on_path() {
+        let script = format!(
+            "alias ls='ls -G'; ls() {{ :; }}; {}command -v ls",
+            clear_definitions(&["no-such-program", "ls"])
+        );
+        // zsh, the default shell, and sh, which is bash in POSIX mode on macOS and prints
+        // aliases from `command -v` as zsh does.
+        for shell in ["/bin/zsh", "/bin/sh"] {
+            if !Path::new(shell).exists() {
+                continue;
+            }
+            let output = command::run(shell, &["-c", &script], &crate::cancel::Cancel::new());
+            let found = output.unwrap().unwrap();
+            assert!(found.trim().starts_with('/'), "{shell} printed {found:?}");
+        }
     }
 
     #[test]
