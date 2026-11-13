@@ -608,16 +608,18 @@ argument). Exact flags for each CLI are verified against current docs at impleme
 time, not from memory. Detection: GUI apps launched at login get a minimal `PATH`, so the
 user's shell prints its `PATH` and `command -v <bin>` between marker lines at the start of each
 sweep; the agent then runs with that `PATH`, so an npm-installed agent and the tools it calls
-start as in a terminal. zsh and bash run as an interactive login shell (`-i -l -c`; zsh also
-`+m`, so it does not wait to own a terminal the CLI was started from), as VS Code resolves the
-shell environment: zsh reads `.zshrc` only when interactive, and the Claude Code and Grok
-installers, nvm and oh-my-zsh add their `PATH` entries there (decided 2026-11-13, after an app
-found neither `claude` nor `grok` on a Mac that had both). stdin is closed and only the marked
-lines are read, so what `.zshrc` prints does not matter. When the interactive shell fails,
-prints no end mark, or takes more than 10 seconds, a login shell (`-lc`, no `.zshrc`) answers
-instead; other shells always use `-lc`. This runs the user's own `.zshrc`, as their terminal
-does. An agent still not found is reported, and the error says to install it. An agent missing or logged out is a target error
-with a fix hint, never a silent skip.
+start as in a terminal. zsh and bash run as an interactive login shell (`-i -l -c`), as VS
+Code resolves the shell environment: zsh reads `.zshrc` only when interactive, and the Claude
+Code and Grok installers, nvm and oh-my-zsh add their `PATH` entries there (decided
+2026-11-13, after an app found neither `claude` nor `grok` on a Mac that had both). stdin is
+closed, aliases and functions named after the programs are removed before `command -v`, and
+only the marked lines are read, so what `.zshrc` prints does not matter. When the interactive
+shell fails, prints no end mark, or takes more than 10 seconds, a login shell (`-lc`, no
+`.zshrc`) answers instead. Other shells, and a process with a controlling terminal (the CLI
+run from a terminal, whose `PATH` already has the `.zshrc` entries), use `-lc` only, so
+`.zshrc` never runs against the user's terminal. This runs the user's own `.zshrc`, as their
+terminal does. An agent missing or logged out is a target error with a fix hint (install it,
+or log in), never a silent skip.
 
 Sweeps run restricted (decided 2026-11-05): the agent may read anything, write only
 `findings.json`, and run no shell command. Network and credentials (decided 2026-11-12, at the

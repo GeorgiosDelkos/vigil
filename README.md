@@ -362,8 +362,9 @@ Agents and tools are found on the `PATH` your shell sets up as an interactive lo
 (`$SHELL -ilc` for zsh and bash, `-lc` for other shells), so an agent installed with npm,
 Homebrew or its own installer starts as it does in a terminal, whether its `PATH` entry is in
 `.zprofile` or `.zshrc`. This runs your shell startup files, as opening a terminal does. If
-they fail or take more than 10 seconds, a login shell without `.zshrc` (`-lc`) is used instead. The model each agent uses is set in Settings or in
-`[models]`.
+they fail or take more than 10 seconds, a login shell without `.zshrc` (`-lc`) is used
+instead. The CLI run from a terminal already has your terminal's `PATH` and uses `-lc`. The
+model each agent uses is set in Settings or in `[models]`.
 
 ## Project layout
 

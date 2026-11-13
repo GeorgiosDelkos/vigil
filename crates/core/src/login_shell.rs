@@ -8,29 +8,38 @@
 //! both. So the script runs in an interactive login shell first, as VS Code resolves the shell
 //! environment, and that `PATH` is also the one tools are found on.
 //!
-//! Decision: always the interactive shell first, falling back to `-lc` when it fails, times
+//! Decision: the interactive shell first on every lookup without a terminal (below), falling
+//! back to `-lc` when it fails, times
 //! out after [`INTERACTIVE_TIMEOUT`], or exits before the script's [`END_MARK`]. Rejected:
 //! `-lc` first and `-ilc` only when an agent is not found, which costs one shell start fewer
 //! for users whose `.zprofile` has everything, but leaves the tool search path without the
 //! `.zshrc` entries, so bun or conda read as not installed.
 //!
 //! Only zsh and bash, known by the file name of `$SHELL`, run interactively. Other shells keep
-//! `-lc`, since their flags differ (fish has no `+m`) and nobody has checked them.
+//! `-lc`, since their flags differ and nobody has checked them.
+//!
+//! A process with a controlling terminal (the CLI run from a terminal) keeps `-lc` too, as VS
+//! Code skips resolving the environment when started from one. Its `PATH` already has the
+//! `.zshrc` entries, which `-lc` keeps. An interactive shell there would run `.zshrc` against
+//! that terminal (checked 2026-11-13 under a pseudo-terminal): output to `/dev/tty` reaches
+//! the user's screen, Apple Terminal's `/etc/zshrc_Apple_Terminal` writes session files for
+//! the parent's session, and a read from `/dev/tty` or zsh's job control stops the shell,
+//! which runs in its own background process group, until the time limit.
 //!
 //! An interactive shell started without a terminal needs care:
 //! - stdin is closed, so a `.zshrc` that reads input gets end of file instead of waiting;
 //! - startup files print (a Java stub on stderr, prompt themes' escape codes on stdout), so
-//!   the script marks its answer and the callers read only the marked lines;
-//! - zsh runs with `+m` (no job control). Interactive zsh opens `/dev/tty` when it has one,
-//!   which the CLI started from a terminal does, and with job control it waits to become the
-//!   terminal's foreground group. The command runs in its own process group, so it would stop
-//!   there until the time limit; with `+m` it answered in half a second (checked 2026-11-13
-//!   under a pseudo-terminal). bash with stdin not a terminal starts no job control, and
-//!   answered at once under the same check.
+//!   the script marks its answer and the callers read only the marked lines.
 //!
-//! This runs the user's own `.zshrc` or `.bashrc`, as their terminal does; `-lc` already ran
-//! their `.zprofile`.
+//! Not handled: a background job that a startup file starts without redirecting its output
+//! keeps the output pipe open after the shell exits, so the command waits for the time limit
+//! and the interactive answer is lost. `-lc` has had the same limit with `.zprofile`; telling
+//! that job from a tool still writing its output would change how every command is read.
+//!
+//! This runs the user's own `.zshrc`, or for bash their `.bash_profile` with the interactive
+//! part of a `.bashrc` it sources, as their terminal does; `-lc` already ran `.zprofile`.
 
+use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
@@ -52,10 +61,20 @@ pub(crate) const END_MARK: &str = "__vigil_end__";
 /// network or a prompt is cut off here instead of at the one-minute command limit.
 const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How [`run_in`] starts the shell.
+#[derive(Debug, Clone, Copy)]
+enum Start {
+    /// Interactive first, when the shell is zsh or bash, for up to this long.
+    Interactive(Duration),
+    /// A login shell only.
+    Login,
+}
+
 /// Runs `script` in `shell` as the user's terminal would: interactive and login, falling back
-/// to a login shell alone (see the module docs). Returns the output of whichever answered, or
-/// `None` when `shell` is not installed. Stdout is decoded lossily, so a startup file that
-/// prints bytes that are not UTF-8 does not discard the answer.
+/// to a login shell alone, or only a login shell when this process has a terminal (see the
+/// module docs). Returns the output of whichever answered, or `None` when `shell` is not
+/// installed. Stdout is decoded lossily, so a startup file that prints bytes that are not
+/// UTF-8 does not discard the answer.
 ///
 /// Blocks for up to [`INTERACTIVE_TIMEOUT`] plus the one-minute command limit. Runs the user's
 /// startup files.
@@ -64,21 +83,25 @@ const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(10);
 ///
 /// Fails when the login shell fails, after the interactive one did.
 pub(crate) fn run(shell: &str, script: &str) -> Result<Option<Output>, InventoryError> {
-    run_within(shell, script, INTERACTIVE_TIMEOUT)
+    // Opening `/dev/tty` fails (ENXIO) exactly when the process has no controlling terminal.
+    let start = if fs::File::open("/dev/tty").is_ok() {
+        Start::Login
+    } else {
+        Start::Interactive(INTERACTIVE_TIMEOUT)
+    };
+    run_in(shell, script, start)
 }
 
-/// [`run`] with the interactive shell's time limit given, so tests can wait less.
-fn run_within(
-    shell: &str,
-    script: &str,
-    interactive_limit: Duration,
-) -> Result<Option<Output>, InventoryError> {
-    if let Some(flags) = interactive_flags(shell) {
-        let args = [flags, &[script]].concat();
+/// [`run`] with how to start the shell given, so tests do not depend on having a terminal.
+fn run_in(shell: &str, script: &str, start: Start) -> Result<Option<Output>, InventoryError> {
+    if let Start::Interactive(limit) = start
+        && runs_interactive(shell)
+    {
+        let args = ["-i", "-l", "-c", script];
         // Anything else is not returned: a broken `.zshrc` or a slow prompt is the user's
         // terminal setup, and the login shell can still answer. If it cannot either (or the
         // shell is not installed), its result is the one reported.
-        if let Ok(Some(output)) = command::run_with_input(shell, &args, b"", interactive_limit)
+        if let Ok(Some(output)) = command::run_with_input(shell, &args, b"", limit)
             && finished(&output.stdout)
         {
             return Ok(Some(output));
@@ -87,14 +110,10 @@ fn run_within(
     command::run_with_input(shell, &["-lc", script], b"", command::TIMEOUT)
 }
 
-/// The flags that start `shell` as an interactive login shell running the next argument, or
-/// `None` for a shell other than zsh and bash.
-fn interactive_flags(shell: &str) -> Option<&'static [&'static str]> {
-    match Path::new(shell).file_name()?.to_str()? {
-        "zsh" => Some(&["-i", "+m", "-l", "-c"]),
-        "bash" => Some(&["-i", "-l", "-c"]),
-        _ => None,
-    }
+/// Whether `shell` is zsh or bash, which this module starts interactive.
+fn runs_interactive(shell: &str) -> bool {
+    let name = Path::new(shell).file_name().and_then(|n| n.to_str());
+    matches!(name, Some("zsh" | "bash"))
 }
 
 /// Shell text that removes every alias, and any function named after one of `programs`, so
@@ -128,6 +147,9 @@ mod tests {
 
     use super::*;
 
+    /// The app's start, whether or not the test runs in a terminal.
+    const INTERACTIVE: Start = Start::Interactive(INTERACTIVE_TIMEOUT);
+
     /// Writes an executable shell script named `name` into `dir`, standing in for a shell.
     fn fake_shell(dir: &Path, name: &str, body: &str) -> String {
         let path = dir.join(name);
@@ -157,9 +179,20 @@ mod tests {
         let bash = echoing_shell(tmp.path(), "bash");
         let fish = echoing_shell(tmp.path(), "fish");
 
-        assert_eq!(first_line(run(&zsh, "x").unwrap()), "-i +m -l -c");
-        assert_eq!(first_line(run(&bash, "x").unwrap()), "-i -l -c");
-        assert_eq!(first_line(run(&fish, "x").unwrap()), "-lc");
+        assert_eq!(
+            first_line(run_in(&zsh, "x", INTERACTIVE).unwrap()),
+            "-i -l -c"
+        );
+        assert_eq!(
+            first_line(run_in(&bash, "x", INTERACTIVE).unwrap()),
+            "-i -l -c"
+        );
+        assert_eq!(first_line(run_in(&fish, "x", INTERACTIVE).unwrap()), "-lc");
+        assert_eq!(
+            first_line(run_in(&zsh, "x", Start::Login).unwrap()),
+            "-lc",
+            "a process with a terminal"
+        );
     }
 
     #[test]
@@ -192,7 +225,10 @@ mod tests {
                  echo {END_MARK}\n"
             ),
         );
-        assert_eq!(first_line(run(&zsh, "x").unwrap()), "/from/zshrc");
+        assert_eq!(
+            first_line(run_in(&zsh, "x", INTERACTIVE).unwrap()),
+            "/from/zshrc"
+        );
     }
 
     #[test]
@@ -207,7 +243,10 @@ mod tests {
                  echo /from/zprofile\necho {END_MARK}\n"
             ),
         );
-        assert_eq!(first_line(run(&zsh, "x").unwrap()), "/from/zprofile");
+        assert_eq!(
+            first_line(run_in(&zsh, "x", INTERACTIVE).unwrap()),
+            "/from/zprofile"
+        );
     }
 
     #[test]
@@ -223,7 +262,7 @@ mod tests {
                  echo /from/zprofile\necho {END_MARK}\n"
             ),
         );
-        let output = run_within(&zsh, "x", Duration::from_millis(300)).unwrap();
+        let output = run_in(&zsh, "x", Start::Interactive(Duration::from_millis(300))).unwrap();
         assert_eq!(first_line(output), "/from/zprofile");
     }
 
