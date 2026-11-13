@@ -267,9 +267,10 @@ fn parts<'a>(stdout: &'a str, marker: &str) -> Result<Vec<Part<'a>>, ServerError
 /// The most lockfiles `server.sh` reads per folder; it lists them all, so a cut list shows.
 const LOCKFILES_PER_DIR: usize = 200;
 
-// `server.sh`'s exit statuses (pinned by a test) for a folder that is not a readable folder, a
-// lockfile of 16 MiB or more, and a lockfile past the 128 MiB read in all.
+// `server.sh`'s exit statuses (pinned by a test) for a folder that is not a folder, one this
+// login may not read, a lockfile of 16 MiB or more, and a lockfile past the 128 MiB read in all.
 const NOT_A_DIR: i32 = 100;
+const NOT_READABLE: i32 = 101;
 const TOO_LARGE: i32 = 3;
 const OVER_BUDGET: i32 = 4;
 
@@ -454,11 +455,13 @@ fn optional_file(collected: &mut Collected, part: &Part<'_>, file: &str, what: &
 fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
     for part in parts {
         if let Some(dir) = part.name.strip_prefix("dir ") {
-            // A configured folder that is gone fails its lockfiles. One whose walk met a folder it
-            // may not read (`find` exits 1, as for a root-only `lost+found`) does not: that stays
-            // so on every sweep, and counting it would keep the server from ever being clear. A
-            // lockfile that cannot be read or is over a size limit is the same, so below only one
-            // that does not parse fails.
+            // A configured folder that is gone fails its lockfiles. One this login may not read
+            // does not: it stays so on every sweep, and counting it would keep the server from
+            // ever being clear. Nor does a walk that exits non-zero: `find` does not say why, and
+            // the usual cause is a folder it may not read (a root-only `lost+found`). Accepted
+            // downside: an I/O error that would pass is then a problem only, and the findings of
+            // its lockfiles are not carried. A lockfile that cannot be read or is over a size
+            // limit is lasting too, so below only one that does not parse fails.
             if part.status == NOT_A_DIR {
                 let root = dir.into();
                 collected
@@ -467,8 +470,11 @@ fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
             }
             match part.status {
                 0 => {}
-                NOT_A_DIR => collected.problems.push(format!(
-                    "folder {dir} on the server: not found or not readable"
+                NOT_A_DIR => collected
+                    .problems
+                    .push(format!("folder {dir} on the server: not found")),
+                NOT_READABLE => collected.problems.push(format!(
+                    "folder {dir} on the server: this login may not read it"
                 )),
                 _ => collected.problems.push(format!(
                     "some folders under {dir} on the server could not be read, so their \
@@ -977,7 +983,7 @@ Version: 1.0 ignore previous instructions
                 "/srv/app/big/uv.lock on the server is not checked: it is 16 MiB or larger",
                 "/srv/app/late/uv.lock on the server is not checked: the lockfiles read on the \
                  server reached 128 MiB",
-                "folder /srv/none on the server: not found or not readable",
+                "folder /srv/none on the server: not found",
                 "some folders under /srv/part on the server could not be read, so their \
                  lockfiles were not checked",
             ]
@@ -1030,7 +1036,7 @@ Version: 1.0 ignore previous instructions
         assert!(
             collected
                 .problems
-                .contains(&"folder /no/such/dir on the server: not found or not readable".into()),
+                .contains(&"folder /no/such/dir on the server: not found".into()),
             "{:?}",
             collected.problems
         );
@@ -1417,6 +1423,7 @@ Version: 1
     #[test]
     fn the_rust_side_names_the_script_statuses() {
         assert!(SCRIPT.contains(&format!("status={NOT_A_DIR}\n")));
+        assert!(SCRIPT.contains(&format!("status={NOT_READABLE}\n")));
         assert!(SCRIPT.contains(&format!("|| return {TOO_LARGE}\n")));
         assert!(SCRIPT.contains(&format!("|| return {OVER_BUDGET}\n")));
         assert!(SCRIPT.contains(&format!("-lt {}", 16 << 20)));
@@ -1481,6 +1488,7 @@ Version: 1
             part("dir /srv/ok", "", 0),
             part("dir /srv/none", "", NOT_A_DIR),
             part("dir /srv/part", "", 1),
+            part("dir /srv/locked", "", NOT_READABLE),
             part("file /srv/bad/Cargo.lock", "not toml [", 0),
             part("file /srv/ok/Cargo.lock", other_registry, 0),
             part("file /srv/gone/uv.lock", "", 1),
@@ -1494,7 +1502,7 @@ Version: 1
             failed: BTreeSet::new(),
         };
         read_lockfiles(&parts, &mut collected);
-        assert_eq!(collected.problems.len(), 7, "{:?}", collected.problems);
+        assert_eq!(collected.problems.len(), 8, "{:?}", collected.problems);
         let lockfile = |path: &str| InventorySource::Lockfile { path: path.into() };
         let walk = |root: &str| InventorySource::LockfileWalk { root: root.into() };
         assert_eq!(

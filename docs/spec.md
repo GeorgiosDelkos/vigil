@@ -152,17 +152,19 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   cached copy), the NVD products with nothing fetched and nothing cached in the last week, and
   (`inventory`, added 2026-11-13) the inventory sources that failed, each `{"kind": ...}`:
   `mac_os`, `homebrew` (formulae and casks), `rustup`, `cargo_install`, `node`, `npm_global`,
-  `python`, `uv_tool`, `pipx`, `version_managers`, `lockfile` with its `path` (on the Mac,
-  could not be read or parsed; on a server, did not parse), `lockfile_walk` with its `root` (a
-  folder the walk could not list for a reason other than permission, a configured folder that
-  is gone, or a project folder the walk did not finish), `os_packages` (a server whose release
-  is looked up but whose package database failed) and `dependency_graph` (a GitHub request
-  that failed, not a graph turned off or hidden from the login). A kind this build does not
-  know reads as `unknown`, not fully checked, so a report a later build wrote still reads. A
-  tool that is not installed, a graph turned off, a folder this user may not read, a server
-  lockfile that cannot be read or is over a size limit, and the notes (`NoProduct`, another
-  Cargo registry, an npm tree problem, too many entries, an iCloud-only lockfile, a server
-  package list cut at its limit) are lasting facts, not failures: counting them would keep a
+  `python`, `uv_tool`, `pipx`, `version_managers`, `lockfile` with its `path` (did not parse,
+  or on the Mac could not be read for a reason other than permission), `lockfile_walk` with
+  its `root` (a folder the Mac walk could not list for a reason other than permission, a
+  configured folder that is gone, or a project folder the walk did not finish),
+  `os_packages` (a server whose release is looked up but whose package database failed) and
+  `dependency_graph` (a GitHub request that failed, not a graph turned off or hidden from the
+  login). A kind this build does not know reads as `unknown`, not fully checked, so a report a
+  later build wrote still reads. A tool that is not installed, a graph turned off, a file or
+  folder this user may not read, a lockfile over a size limit, a server folder walk that
+  exits non-zero (`find` does not say why, and the usual cause is a folder it may not read;
+  an I/O error that would pass is then missed), a server lockfile that cannot be read, and
+  the notes (`NoProduct`, another Cargo registry, an npm tree problem, too many entries, an
+  iCloud-only lockfile, a server package list cut at its limit) are lasting facts, not failures: counting them would keep a
   Mac without pipx from ever being clear and a fix that uninstalls a tool from ever being
   confirmed. A finding of the target's last report with a verdict that this sweep did not
   find, and that a failed source could have produced (an OSV finding when OSV failed or a

@@ -77,16 +77,20 @@ part docker-containers docker ps --no-trunc --format '{{json .}}'
 part docker-images docker images --digests --no-trunc --format '{{json .}}'
 
 # Each folder's part lists every lockfile found, with status 100 when the folder is not a
-# readable folder; at most 200 of them are read. The loop splits the list on newlines only and
-# with globbing off, in this shell, so `total` carries across folders.
+# folder (gone) and 101 when this login may not read it; at most 200 of them are read. The
+# loop splits the list on newlines only and with globbing off, in this shell, so `total`
+# carries across folders.
 total=0
 for dir in "$@"; do
-  if [ -d "$dir" ] && [ -r "$dir" ]; then
-    files=$(lockfiles "$dir")
-    status=$?
-  else
+  if [ ! -d "$dir" ]; then
     files=
     status=100
+  elif [ ! -r "$dir" ]; then
+    files=
+    status=101
+  else
+    files=$(lockfiles "$dir")
+    status=$?
   fi
   printf '%s begin dir %s\n%s\n%s end %s\n' "$marker" "$dir" "$files" "$marker" "$status"
   set -f

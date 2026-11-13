@@ -38,8 +38,7 @@ pub struct Inventory {
     /// sources that were still read (see [`InventoryError::is_failure`]).
     ///
     /// A collector adds a failure only through `fail` (or `run` and `absorb`), which also names
-    /// its source in `failed`; only notes, and a lockfile walk's folders this user may not
-    /// read (`lockfiles::unwalked` says why), are pushed here directly.
+    /// its source in `failed`; only notes are pushed here directly.
     pub problems: Vec<InventoryError>,
     /// The sources a failure in `problems` left unread or partly read, so the sweep keeps the
     /// findings they gave last time (see `unchecked`).
@@ -560,6 +559,16 @@ pub enum InventoryError {
         /// The lockfile.
         path: PathBuf,
     },
+    /// A file named as a lockfile is larger than any real one, so it is not read.
+    #[error("{} is {len} bytes, over the {limit}-byte limit for a lockfile, so it is not read", path.display())]
+    TooLarge {
+        /// The file.
+        path: PathBuf,
+        /// Its size, in bytes.
+        len: u64,
+        /// The largest lockfile read, in bytes.
+        limit: u64,
+    },
 }
 
 impl InventoryError {
@@ -570,15 +579,19 @@ impl InventoryError {
             Self::Spawn { .. }
             | Self::Command { .. }
             | Self::Parse { .. }
-            | Self::Io { .. }
             | Self::Cancelled { .. }
             | Self::WalkTimedOut { .. } => true,
+            // A file or folder this user may not read (a privacy-protected folder, another
+            // user's `0700` one) stays so on every sweep; counting it would keep this Mac from
+            // ever being clear. Accepted downside: a lockfile only behind it is never carried.
+            Self::Io { source, .. } => source.kind() != std::io::ErrorKind::PermissionDenied,
             // Each is about one item, and the next sweep reports it again: a project folder
-            // holds as many entries then, and a lockfile in iCloud stays there.
+            // holds as many entries then, a lockfile is as large, and one in iCloud stays there.
             Self::NoProduct { .. }
             | Self::OtherRegistry { .. }
             | Self::NpmTree { .. }
             | Self::TooManyEntries { .. }
+            | Self::TooLarge { .. }
             | Self::CloudOnly { .. } => false,
         }
     }
@@ -783,6 +796,23 @@ mod tests {
         };
         assert!(!other.is_failure());
         assert!(other.to_string().contains("OSV covers crates.io only"));
+
+        let io = |kind: std::io::ErrorKind| InventoryError::io(Path::new("/p"), kind.into());
+        assert!(io(std::io::ErrorKind::NotFound).is_failure());
+        assert!(
+            !io(std::io::ErrorKind::PermissionDenied).is_failure(),
+            "a folder this user may not read stays so"
+        );
+        let large = InventoryError::TooLarge {
+            path: PathBuf::from("/p/Cargo.lock"),
+            len: 2,
+            limit: 1,
+        };
+        assert!(!large.is_failure());
+        assert_eq!(
+            large.to_string(),
+            "/p/Cargo.lock is 2 bytes, over the 1-byte limit for a lockfile, so it is not read"
+        );
     }
 
     /// What is left after [`drop_path_duplicates`], as `version [found_in]`.

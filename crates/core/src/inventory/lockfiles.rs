@@ -302,22 +302,13 @@ fn list(
 }
 
 /// Records that `path`, a folder or an entry the walk could not tell, could not be read, so
-/// no lockfile at or under it was.
-///
-/// A folder this user may not read (a privacy-protected one, another user's `0700` folder) is
-/// only a problem, not a failed source: it is as unreadable on the next sweep, and counting it
-/// would keep this Mac from ever being clear. A lockfile only behind it is then never carried.
+/// no lockfile at or under it was. One this user may not read is a problem only
+/// ([`InventoryError::is_failure`] says why).
 fn unwalked(inventory: &mut Inventory, path: &Path, error: std::io::Error) {
-    let denied = error.kind() == std::io::ErrorKind::PermissionDenied;
-    let error = InventoryError::io(path, error);
-    if denied {
-        inventory.problems.push(error);
-        return;
-    }
     let source = InventorySource::LockfileWalk {
         root: path.to_owned(),
     };
-    inventory.fail(source, error);
+    inventory.fail(source, InventoryError::io(path, error));
 }
 
 /// Returns whether the walk may enter the folder at `path` by its name: not hidden by a dot,
@@ -398,10 +389,11 @@ fn read_lockfile(path: &Path) -> Result<String, InventoryError> {
     }
     let len = meta.len();
     if len > LOCKFILE_LIMIT {
-        return Err(parse_error(
-            path,
-            &format!("{len} bytes, over the {LOCKFILE_LIMIT}-byte limit"),
-        ));
+        return Err(InventoryError::TooLarge {
+            path: path.to_owned(),
+            len,
+            limit: LOCKFILE_LIMIT,
+        });
     }
     fs::read_to_string(path).map_err(|e| InventoryError::io(path, e))
 }
@@ -1070,6 +1062,7 @@ mod tests {
             .unwrap();
         let err = read_lockfile(&path).unwrap_err();
         assert!(err.to_string().contains("over the"), "{err}");
+        assert!(!err.is_failure(), "it is as large on the next sweep");
 
         fs::File::create(&path)
             .unwrap()
@@ -1100,19 +1093,26 @@ mod tests {
             ),
         )
         .unwrap();
+        let denied = tmp.path().join("denied/Cargo.lock");
+        fs::create_dir(denied.parent().unwrap()).unwrap();
+        fs::write(&denied, "").unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        fs::set_permissions(&denied, fs::Permissions::from_mode(0o000)).unwrap();
 
         let inventory = walked(tmp.path(), &[]);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(inventory.components.len(), 1);
         assert!(
-            matches!(inventory.problems[..], [InventoryError::Io { .. }]),
+            matches!(
+                inventory.problems[..],
+                [InventoryError::Io { .. }, InventoryError::Io { .. }]
+            ),
             "{:?}",
             inventory.problems
         );
         assert!(
             inventory.failed.is_empty(),
-            "a folder this user may not read stays so: {:?}",
+            "a folder or lockfile this user may not read stays so: {:?}",
             inventory.failed
         );
     }
