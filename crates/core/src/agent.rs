@@ -43,7 +43,9 @@ use crate::cancel::Cancel;
 use crate::cancel::Ended;
 use crate::config::ModelName;
 use crate::inventory::InventoryError;
-use crate::inventory::command;
+use crate::login_shell;
+use crate::login_shell::END_MARK;
+use crate::login_shell::PATH_MARK;
 use crate::paths;
 
 /// The one line every agent is given; the real instructions are in the bundle's `PROMPT.md`.
@@ -248,11 +250,9 @@ const PROVIDER_ENV_PREFIXES: &[&str] = &[
     "OPENCODE_",
 ];
 
-/// Marks the lines of the login shell's answer, so nothing its startup files print is mistaken
-/// for the answer.
-const PATH_MARK: &str = "__vigil_path__";
+/// Marks the agent's path in the login shell's answer, between [`login_shell::PATH_MARK`] and
+/// [`login_shell::END_MARK`], so nothing its startup files print is mistaken for the answer.
 const BINARY_MARK: &str = "__vigil_binary__";
-const END_MARK: &str = "__vigil_end__";
 
 /// A coding-agent CLI that Vigil can drive headless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -305,13 +305,15 @@ impl AgentKind {
         }
     }
 
-    /// Finds the agent's executable the way a login shell would (zsh reads `.zprofile`, not
-    /// `.zshrc`), since an app started at login gets a `PATH` without `~/.local/bin`, nvm or
-    /// Homebrew. Returns `None` when the shell cannot find it as a file (an alias or a shell
-    /// function does not count).
+    /// Finds the agent's executable the way the user's terminal would, since an app started at
+    /// login gets a `PATH` without `~/.local/bin`, nvm or Homebrew. Returns `None` when the
+    /// shell cannot find it as a file (an alias or a shell function does not count).
     ///
-    /// Runs `$SHELL -lc`, which reads the user's shell startup files. The agent found runs
-    /// `model`, or its own default for `None`.
+    /// Runs `$SHELL` as an interactive login shell (`-ilc` for zsh and bash, so zsh reads
+    /// `.zshrc` as well as `.zprofile`), falling back to `-lc`; see [`login_shell`]. This runs
+    /// the user's shell startup files, as their terminal does, and takes up to 10 seconds
+    /// before the fallback when a `.zshrc` hangs. The agent found runs `model`, or its own
+    /// default for `None`.
     ///
     /// # Errors
     ///
@@ -323,7 +325,7 @@ impl AgentKind {
              printf '%s\\n' {END_MARK}",
             self.binary()
         );
-        match command::run_any_status(&shell, &["-lc", &script], &Cancel::new()) {
+        match login_shell::run(&shell, &script) {
             Ok(Some(output)) => Ok(parse_located(&output.stdout, model)),
             Ok(None) => Err(AgentError::NoShell { shell }),
             Err(source) => Err(AgentError::Locate {
@@ -663,7 +665,8 @@ impl Located {
 fn parse_located(stdout: &str, model: Option<&ModelName>) -> Option<Located> {
     let lines: Vec<&str> = stdout.lines().collect();
     let at = |mark: &str| lines.iter().position(|l| l.trim() == mark);
-    let (path_at, binary_at, end_at) = (at(PATH_MARK)?, at(BINARY_MARK)?, at(END_MARK)?);
+    let path_at = lines.iter().position(|l| login_shell::is_path_mark(l))?;
+    let (binary_at, end_at) = (at(BINARY_MARK)?, at(END_MARK)?);
     if binary_at != path_at + 2 || end_at != binary_at + 2 {
         return None;
     }
@@ -1275,6 +1278,28 @@ mod tests {
             format!("{PATH_MARK}\n:/a::.:bin:./x:/b:\n{BINARY_MARK}\n{agent}\n{END_MARK}\n");
         let found = parse_located(&relative, None).unwrap();
         assert_eq!(found.path, OsString::from("/a:/b"));
+    }
+
+    #[test]
+    fn an_interactive_shell_noise_around_the_answer_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agent = script(tmp.path(), "claude", "true");
+        let agent = agent.to_str().unwrap();
+        // A prompt theme's escape codes without a newline end up on the mark's line; a
+        // `.zlogout` prints after the answer.
+        let noisy = format!(
+            "Unable to locate a Java Runtime.\n\x1b[?1h\x1b={PATH_MARK}\r\n/a:/b\n\
+             {BINARY_MARK}\n{agent}\n{END_MARK}\n\x1b]0;~\x07bye\n"
+        );
+        let found = parse_located(&noisy, None).unwrap();
+        assert_eq!(found.binary, Path::new(agent));
+        assert_eq!(found.path, OsString::from("/a:/b"));
+
+        let after_mark = format!("{PATH_MARK}x\n/a\n{BINARY_MARK}\n{agent}\n{END_MARK}\n");
+        assert!(
+            parse_located(&after_mark, None).is_none(),
+            "text after the mark is not the mark"
+        );
     }
 
     #[test]

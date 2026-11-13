@@ -22,6 +22,9 @@ use crate::agent::AgentKind;
 use crate::cancel::Cancel;
 use crate::config::ModelName;
 use crate::inventory::command;
+use crate::login_shell;
+use crate::login_shell::END_MARK;
+use crate::login_shell::PATH_MARK;
 
 /// The agents a sweep can run, in the order the settings list them.
 const AGENTS: [AgentKind; 5] = [
@@ -63,9 +66,9 @@ const REPO_LIMIT: &str = "100";
 /// the settings.
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
-const PATH_MARK: &str = "__vigil_path__";
+/// Starts each program's line in the login shell's answer, between
+/// [`login_shell::PATH_MARK`] and [`login_shell::END_MARK`].
 const BIN_MARK: &str = "__vigil_bin__";
-const END_MARK: &str = "__vigil_end__";
 
 /// What the settings start from.
 #[derive(Debug)]
@@ -119,13 +122,14 @@ pub struct SshHost {
     pub host_name: Option<String>,
 }
 
-/// Detects what this Mac has. Takes a few seconds: it runs the login shell, `gh` twice, the
-/// model lists of Grok and opencode side by side (each cut off after [`MODELS_TIMEOUT`]) and
-/// the Keychain lookup.
+/// Detects what this Mac has. Takes a few seconds: it runs the user's shell as an interactive
+/// login shell (up to 10 seconds more when their `.zshrc` hangs, then a login shell), `gh`
+/// twice, the model lists of Grok and opencode side by side (each cut off after
+/// [`MODELS_TIMEOUT`]) and the Keychain lookup.
 ///
-/// Every tool the core runs from then on is found on the login shell's `PATH`, as in the
-/// user's terminal and as the settings show it: the menu-bar app starts with macOS's minimal
-/// one. When the shell gives no answer, the `PATH` in use stays.
+/// Every tool the core runs from then on is found on that shell's `PATH`, as in the user's
+/// terminal and as the settings show it: the menu-bar app starts with macOS's minimal one.
+/// When the shell gives no answer, the `PATH` in use stays.
 pub fn detect(home: &Path) -> Detected {
     let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
     detect_with(&shell, home, crate::feeds::NvdAccess::has_keychain_key)
@@ -133,7 +137,7 @@ pub fn detect(home: &Path) -> Detected {
 
 /// [`detect`] with the login shell and the Keychain check given, so tests use stand-ins.
 fn detect_with(shell: &str, home: &Path, nvd_key: impl FnOnce() -> bool) -> Detected {
-    let answer = login_shell(shell);
+    let answer = shell_answer(shell);
     if let Some(answer) = &answer {
         command::use_search_path(answer.path.clone());
     }
@@ -264,7 +268,7 @@ impl Answer {
     }
 }
 
-fn login_shell(shell: &str) -> Option<Answer> {
+fn shell_answer(shell: &str) -> Option<Answer> {
     let names: Vec<&str> = AGENTS
         .iter()
         .map(|a| a.binary())
@@ -276,15 +280,18 @@ fn login_shell(shell: &str) -> Option<Answer> {
          \"$b\" \"$(command -v \"$b\")\"; done; printf '%s\\n' {END_MARK}",
         names.join(" ")
     );
-    let output = command::run_any_status(shell, &["-lc", &script], &Cancel::new()).ok()??;
+    let output = login_shell::run(shell, &script).ok()??;
     parse_answer(&output.stdout)
 }
 
-/// Reads the marked lines of the login shell's answer. Lines before the `PATH` mark (startup
-/// files that print) are ignored; a program found as anything but an absolute path (an alias,
-/// a function) counts as not found.
+/// Reads the marked lines of the login shell's answer. What startup files print before the
+/// `PATH` mark, on its line or earlier ones, is ignored; a program found as anything but an
+/// absolute path (an alias, a function) counts as not found.
 fn parse_answer(stdout: &str) -> Option<Answer> {
-    let mut lines = stdout.lines().skip_while(|l| l.trim() != PATH_MARK).skip(1);
+    let mut lines = stdout
+        .lines()
+        .skip_while(|l| !login_shell::is_path_mark(l))
+        .skip(1);
     let path = OsString::from(lines.next()?);
     let mut binaries = Vec::new();
     for line in lines {
@@ -451,6 +458,19 @@ mod tests {
             "no end mark"
         );
         assert!(parse_answer("nothing marked\n").is_none());
+
+        // An interactive shell's noise: a prompt theme's escape codes on the mark's line, a
+        // `.zlogout` that prints after the answer.
+        let noisy = format!(
+            "\x1b[?1h\x1b={PATH_MARK}\r\n/usr/bin\n{BIN_MARK}gh\t/opt/gh\n{END_MARK}\nbye\n"
+        );
+        let answer = parse_answer(&noisy).unwrap();
+        assert_eq!(answer.path, OsString::from("/usr/bin"));
+        assert_eq!(answer.binary("gh"), Some(PathBuf::from("/opt/gh")));
+        assert!(
+            parse_answer(&format!("{PATH_MARK}x\n/usr/bin\n{END_MARK}\n")).is_none(),
+            "text after the mark is not the mark"
+        );
     }
 
     /// Writes an executable shell script.
