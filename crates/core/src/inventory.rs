@@ -560,7 +560,10 @@ pub enum InventoryError {
         path: PathBuf,
     },
     /// A file named as a lockfile is larger than any real one, so it is not read.
-    #[error("{} is {len} bytes, over the {limit}-byte limit for a lockfile, so it is not read", path.display())]
+    #[error(
+        "{} is {len} bytes, over the {limit}-byte limit for a lockfile, so it is not read",
+        path.display()
+    )]
     TooLarge {
         /// The file.
         path: PathBuf,
