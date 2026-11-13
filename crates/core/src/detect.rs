@@ -122,10 +122,11 @@ pub struct SshHost {
     pub host_name: Option<String>,
 }
 
-/// Detects what this Mac has. Takes a few seconds: it runs the user's shell as an interactive
-/// login shell (longer when their `.zshrc` hangs, until a time limit), `gh`
-/// twice, the model lists of Grok and opencode side by side (each cut off after
-/// [`MODELS_TIMEOUT`]) and the Keychain lookup.
+/// Detects what this Mac has. Takes a few seconds: it runs the user's shell (an interactive
+/// login shell for zsh and bash when this process has no terminal, as in the app, so
+/// `.zshrc` counts; longer when it hangs, until a time limit; otherwise `-lc`), `gh` twice,
+/// the model lists of Grok and opencode side by side (each cut off after [`MODELS_TIMEOUT`])
+/// and the Keychain lookup.
 ///
 /// Every tool the core runs from then on is found on that shell's `PATH`, as in the user's
 /// terminal and as the settings show it: the menu-bar app starts with macOS's minimal one.
@@ -276,13 +277,12 @@ fn shell_answer(shell: &str) -> Option<Answer> {
         .collect();
     // The names are this module's constants, so they need no quoting.
     let script = format!(
-        "{}printf '%s\\n' {PATH_MARK} \"$PATH\"; for b in {}; do \
+        "printf '%s\\n' {PATH_MARK} \"$PATH\"; for b in {}; do \
          printf '{BIN_MARK}%s\\t%s\\n' \"$b\" \"$(command -v \"$b\")\"; done; \
          printf '%s\\n' {END_MARK}",
-        login_shell::clear_definitions(&names),
         names.join(" ")
     );
-    let output = login_shell::run(shell, &script).ok()??;
+    let output = login_shell::run(shell, &names, &script).ok()??;
     parse_answer(&output.stdout)
 }
 

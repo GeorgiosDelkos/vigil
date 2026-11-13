@@ -9,8 +9,8 @@
 //! environment, and that `PATH` is also the one tools are found on.
 //!
 //! Decision: the interactive shell first on every lookup without a terminal (below), falling
-//! back to `-lc` when it fails, times
-//! out after [`INTERACTIVE_TIMEOUT`], or exits before the script's [`END_MARK`]. Rejected:
+//! back to `-lc` when it fails, times out after [`INTERACTIVE_TIMEOUT`], or exits before the
+//! script's [`END_MARK`]. Rejected:
 //! `-lc` first and `-ilc` only when an agent is not found, which costs one shell start fewer
 //! for users whose `.zprofile` has everything, but leaves the tool search path without the
 //! `.zshrc` entries, so bun or conda read as not installed.
@@ -61,7 +61,7 @@ pub(crate) const END_MARK: &str = "__vigil_end__";
 /// network or a prompt is cut off here instead of at the one-minute command limit.
 const INTERACTIVE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How [`run_in`] starts the shell.
+/// How [`run_with`] starts the shell.
 #[derive(Debug, Clone, Copy)]
 enum Start {
     /// Interactive first, when the shell is zsh or bash, for up to this long.
@@ -70,11 +70,13 @@ enum Start {
     Login,
 }
 
-/// Runs `script` in `shell` as the user's terminal would: interactive and login, falling back
-/// to a login shell alone, or only a login shell when this process has a terminal (see the
-/// module docs). Returns the output of whichever answered, or `None` when `shell` is not
-/// installed. Stdout is decoded lossily, so a startup file that prints bytes that are not
-/// UTF-8 does not discard the answer.
+/// Runs `script`, which looks up `programs` with `command -v`, in `shell` as the user's
+/// terminal would: interactive and login, falling back to a login shell alone, or only a login
+/// shell when this process has a terminal (see the module docs). Every alias, and any function
+/// named after one of `programs`, is removed before `script` runs (see
+/// [`clear_definitions`]). Returns the output of whichever shell answered, or `None` when
+/// `shell` is not installed. Stdout is decoded lossily, so a startup file that prints bytes
+/// that are not UTF-8 does not discard the answer.
 ///
 /// Blocks for up to [`INTERACTIVE_TIMEOUT`] plus the one-minute command limit. Runs the user's
 /// startup files.
@@ -82,18 +84,30 @@ enum Start {
 /// # Errors
 ///
 /// Fails when the login shell fails, after the interactive one did.
-pub(crate) fn run(shell: &str, script: &str) -> Result<Option<Output>, InventoryError> {
-    // Opening `/dev/tty` fails (ENXIO) exactly when the process has no controlling terminal.
+pub(crate) fn run(
+    shell: &str,
+    programs: &[&str],
+    script: &str,
+) -> Result<Option<Output>, InventoryError> {
+    // Opening `/dev/tty` fails with ENXIO when the process has no controlling terminal. Any
+    // other failure (no file descriptors left, a sandbox) is taken as no terminal as well.
     let start = if fs::File::open("/dev/tty").is_ok() {
         Start::Login
     } else {
         Start::Interactive(INTERACTIVE_TIMEOUT)
     };
-    run_in(shell, script, start)
+    run_with(shell, programs, script, start)
 }
 
 /// [`run`] with how to start the shell given, so tests do not depend on having a terminal.
-fn run_in(shell: &str, script: &str, start: Start) -> Result<Option<Output>, InventoryError> {
+fn run_with(
+    shell: &str,
+    programs: &[&str],
+    script: &str,
+    start: Start,
+) -> Result<Option<Output>, InventoryError> {
+    let script = format!("{}{script}", clear_definitions(programs));
+    let script = script.as_str();
     if let Start::Interactive(limit) = start
         && runs_interactive(shell)
     {
@@ -121,7 +135,7 @@ fn runs_interactive(shell: &str) -> bool {
 /// the aliases and functions its startup files define, and `command -v` prints those instead
 /// (`alias claude='claude --model opus'`), which the callers would read as not installed.
 /// The names are the callers' constants, so they need no quoting.
-pub(crate) fn clear_definitions(programs: &[&str]) -> String {
+fn clear_definitions(programs: &[&str]) -> String {
     format!(
         "unalias -a 2>/dev/null; unset -f {} 2>/dev/null; ",
         programs.join(" ")
@@ -180,16 +194,19 @@ mod tests {
         let fish = echoing_shell(tmp.path(), "fish");
 
         assert_eq!(
-            first_line(run_in(&zsh, "x", INTERACTIVE).unwrap()),
+            first_line(run_with(&zsh, &[], "x", INTERACTIVE).unwrap()),
             "-i -l -c"
         );
         assert_eq!(
-            first_line(run_in(&bash, "x", INTERACTIVE).unwrap()),
+            first_line(run_with(&bash, &[], "x", INTERACTIVE).unwrap()),
             "-i -l -c"
         );
-        assert_eq!(first_line(run_in(&fish, "x", INTERACTIVE).unwrap()), "-lc");
         assert_eq!(
-            first_line(run_in(&zsh, "x", Start::Login).unwrap()),
+            first_line(run_with(&fish, &[], "x", INTERACTIVE).unwrap()),
+            "-lc"
+        );
+        assert_eq!(
+            first_line(run_with(&zsh, &[], "x", Start::Login).unwrap()),
             "-lc",
             "a process with a terminal"
         );
@@ -226,7 +243,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            first_line(run_in(&zsh, "x", INTERACTIVE).unwrap()),
+            first_line(run_with(&zsh, &[], "x", INTERACTIVE).unwrap()),
             "/from/zshrc"
         );
     }
@@ -244,7 +261,7 @@ mod tests {
             ),
         );
         assert_eq!(
-            first_line(run_in(&zsh, "x", INTERACTIVE).unwrap()),
+            first_line(run_with(&zsh, &[], "x", INTERACTIVE).unwrap()),
             "/from/zprofile"
         );
     }
@@ -262,17 +279,28 @@ mod tests {
                  echo /from/zprofile\necho {END_MARK}\n"
             ),
         );
-        let output = run_in(&zsh, "x", Start::Interactive(Duration::from_millis(300))).unwrap();
+        let output = run_with(
+            &zsh,
+            &[],
+            "x",
+            Start::Interactive(Duration::from_millis(300)),
+        )
+        .unwrap();
         assert_eq!(first_line(output), "/from/zprofile");
     }
 
     #[test]
     fn a_missing_shell_is_none_and_a_failing_one_reports_the_login_shell() {
-        assert!(run("/nonexistent/zsh", "x").unwrap().is_none());
+        assert!(run("/nonexistent/zsh", &[], "x").unwrap().is_none());
 
         let tmp = tempfile::tempdir().unwrap();
+        // A shell this module never starts interactive answers the same with or without a
+        // terminal, so `run` itself can be checked here.
+        let fish = echoing_shell(tmp.path(), "fish");
+        assert_eq!(first_line(run(&fish, &[], "x").unwrap()), "-lc");
+
         let zsh = fake_shell(tmp.path(), "zsh", "echo \"$1\"; exit 3\n");
-        let output = run(&zsh, "x").unwrap().unwrap();
+        let output = run_with(&zsh, &[], "x", INTERACTIVE).unwrap().unwrap();
         assert_eq!(output.stdout.trim(), "-lc", "the login shell's answer");
         assert!(!output.success);
     }

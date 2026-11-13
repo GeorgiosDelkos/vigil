@@ -310,10 +310,11 @@ impl AgentKind {
     /// shell cannot find it as a file on its `PATH` (the user's aliases and functions are
     /// removed first, so one named after the agent neither counts nor hides it).
     ///
-    /// Runs `$SHELL` as an interactive login shell (`-ilc` for zsh and bash, so zsh reads
-    /// `.zshrc` as well as `.zprofile`), falling back to `-lc` after a time limit; see
-    /// [`login_shell`]. This runs the user's shell startup files, as their terminal does. The
-    /// agent found runs `model`, or its own default for `None`.
+    /// Runs `$SHELL` the way [`login_shell::run`] does: for zsh and bash in a process without a
+    /// terminal (the app), an interactive login shell, so zsh reads `.zshrc` as well as
+    /// `.zprofile`, falling back to `-lc` after a time limit; otherwise `-lc`, whose `PATH` in
+    /// a terminal already has the `.zshrc` entries. This runs the user's shell startup files,
+    /// as their terminal does. The agent found runs `model`, or its own default for `None`.
     ///
     /// # Errors
     ///
@@ -321,12 +322,11 @@ impl AgentKind {
     pub(crate) fn locate(self, model: Option<&ModelName>) -> Result<Option<Located>, AgentError> {
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_owned());
         let script = format!(
-            "{}printf '%s\\n' {PATH_MARK} \"$PATH\" {BINARY_MARK}; command -v {}; \
+            "printf '%s\\n' {PATH_MARK} \"$PATH\" {BINARY_MARK}; command -v {}; \
              printf '%s\\n' {END_MARK}",
-            login_shell::clear_definitions(&[self.binary()]),
             self.binary()
         );
-        match login_shell::run(&shell, &script) {
+        match login_shell::run(&shell, &[self.binary()], &script) {
             Ok(Some(output)) => Ok(parse_located(&output.stdout, model)),
             Ok(None) => Err(AgentError::NoShell { shell }),
             Err(source) => Err(AgentError::Locate {
