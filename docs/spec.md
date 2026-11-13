@@ -179,7 +179,9 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   as fully checked with nothing carried. A source served from its cache, because it could not
   be asked again, is a note in the report, not a failure. Accepted downside: a build from
   before these fields ignores `carried`, so after a downgrade a carried finding reads as
-  resolved and its fix as confirmed.
+  resolved and its fix as confirmed; likewise a build from before `inventory` ignores it, so
+  after a downgrade a report whose only failure was an inventory source reads as fully
+  checked.
 - Reading: one report or state file that cannot be read is a problem of the targets it
   touches, never of all of them (decided 2026-11-12, after one broken `report.json` blanked
   the popover and greyed a red icon). A target whose newest report cannot be read shows the
