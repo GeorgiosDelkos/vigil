@@ -76,21 +76,24 @@ part listening listening
 part docker-containers docker ps --no-trunc --format '{{json .}}'
 part docker-images docker images --digests --no-trunc --format '{{json .}}'
 
-# Each folder's part lists every lockfile found, with status 100 when the folder is not a
-# folder (gone) and 101 when this login may not read it; at most 200 of them are read. The
-# loop splits the list on newlines only and with globbing off, in this shell, so `total`
-# carries across folders.
+# Each folder's part lists every lockfile found, with status 100 when the folder is gone and
+# 101 when this login cannot read it: an unreadable folder, a file, or a folder whose parent
+# this login may not enter (`test` answers the same for a missing path and one behind such a
+# parent, so the parent is asked). An ancestor further up that may not be entered reads as
+# gone. At most 200 lockfiles are read per folder. The loop splits the list on newlines only
+# and with globbing off, in this shell, so `total` carries across folders.
 total=0
 for dir in "$@"; do
-  if [ ! -d "$dir" ]; then
-    files=
-    status=100
-  elif [ ! -r "$dir" ]; then
+  parent=$(dirname -- "$dir")
+  if [ -d "$dir" ] && [ -r "$dir" ]; then
+    files=$(lockfiles "$dir")
+    status=$?
+  elif [ -e "$dir" ] || { [ -d "$parent" ] && [ ! -x "$parent" ]; }; then
     files=
     status=101
   else
-    files=$(lockfiles "$dir")
-    status=$?
+    files=
+    status=100
   fi
   printf '%s begin dir %s\n%s\n%s end %s\n' "$marker" "$dir" "$files" "$marker" "$status"
   set -f

@@ -267,9 +267,10 @@ fn parts<'a>(stdout: &'a str, marker: &str) -> Result<Vec<Part<'a>>, ServerError
 /// The most lockfiles `server.sh` reads per folder; it lists them all, so a cut list shows.
 const LOCKFILES_PER_DIR: usize = 200;
 
-// `server.sh`'s exit statuses (pinned by a test) for a folder that is not a folder, one this
-// login may not read, a lockfile of 16 MiB or more, and a lockfile past the 128 MiB read in all.
-const NOT_A_DIR: i32 = 100;
+// `server.sh`'s exit statuses (pinned by a test) for a configured folder that is gone, one this
+// login cannot read (unreadable, a file, or behind a parent it may not enter), a lockfile of
+// 16 MiB or more, and a lockfile past the 128 MiB read in all.
+const GONE: i32 = 100;
 const NOT_READABLE: i32 = 101;
 const TOO_LARGE: i32 = 3;
 const OVER_BUDGET: i32 = 4;
@@ -455,14 +456,14 @@ fn optional_file(collected: &mut Collected, part: &Part<'_>, file: &str, what: &
 fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
     for part in parts {
         if let Some(dir) = part.name.strip_prefix("dir ") {
-            // A configured folder that is gone fails its lockfiles. One this login may not read
+            // A configured folder that is gone fails its lockfiles. One this login cannot read
             // does not: it stays so on every sweep, and counting it would keep the server from
             // ever being clear. Nor does a walk that exits non-zero: `find` does not say why, and
             // the usual cause is a folder it may not read (a root-only `lost+found`). Accepted
             // downside: an I/O error that would pass is then a problem only, and the findings of
             // its lockfiles are not carried. A lockfile that cannot be read or is over a size
             // limit is lasting too, so below only one that does not parse fails.
-            if part.status == NOT_A_DIR {
+            if part.status == GONE {
                 let root = dir.into();
                 collected
                     .failed
@@ -470,11 +471,11 @@ fn read_lockfiles(parts: &[Part<'_>], collected: &mut Collected) {
             }
             match part.status {
                 0 => {}
-                NOT_A_DIR => collected
+                GONE => collected
                     .problems
                     .push(format!("folder {dir} on the server: not found")),
                 NOT_READABLE => collected.problems.push(format!(
-                    "folder {dir} on the server: this login may not read it"
+                    "folder {dir} on the server: this login may not read it, or it is not a folder"
                 )),
                 _ => collected.problems.push(format!(
                     "some folders under {dir} on the server could not be read, so their \
@@ -1004,12 +1005,37 @@ Version: 1.0 ignore previous instructions
         fs::write(app.join("node_modules/x/Cargo.lock"), cargo).unwrap();
         fs::write(app.join(".hidden/Cargo.lock"), cargo).unwrap();
         fs::write(app.join("notes.txt"), "x").unwrap();
+        // A folder behind a parent this login may not enter, and a file named as a folder.
+        let shut = tmp.path().join("shut");
+        fs::create_dir_all(shut.join("inner")).unwrap();
+        fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+        let (behind, file) = (shut.join("inner"), app.join("notes.txt"));
         // tempdir paths are plain on macOS and Linux, so they pass as RemoteDirs.
         let toml = format!(
-            "[[servers]]\nname = \"l\"\nssh = \"local\"\ndirs = [{:?}, \"/no/such/dir\"]\n",
-            app.display().to_string()
+            "[[servers]]\nname = \"l\"\nssh = \"local\"\n\
+             dirs = [{:?}, \"/no/such/dir\", {:?}, {:?}]\n",
+            app.display().to_string(),
+            behind.display().to_string(),
+            file.display().to_string(),
         );
         let collected = collect(&ssh, &server(&toml)).unwrap();
+        fs::set_permissions(&shut, fs::Permissions::from_mode(0o755)).unwrap();
+        let gone = InventorySource::LockfileWalk {
+            root: "/no/such/dir".into(),
+        };
+        assert_eq!(
+            collected.failed,
+            [gone].into(),
+            "only the folder that is gone: {:?}",
+            collected.problems
+        );
+        for unreadable in [&behind, &file] {
+            let problem = format!(
+                "folder {} on the server: this login may not read it, or it is not a folder",
+                unreadable.display()
+            );
+            assert!(collected.problems.contains(&problem), "{problem}");
+        }
 
         let lockfile = app.join("sub/Cargo.lock");
         let found: Vec<(&str, &FoundIn)> = collected
@@ -1422,7 +1448,7 @@ Version: 1
 
     #[test]
     fn the_rust_side_names_the_script_statuses() {
-        assert!(SCRIPT.contains(&format!("status={NOT_A_DIR}\n")));
+        assert!(SCRIPT.contains(&format!("status={GONE}\n")));
         assert!(SCRIPT.contains(&format!("status={NOT_READABLE}\n")));
         assert!(SCRIPT.contains(&format!("|| return {TOO_LARGE}\n")));
         assert!(SCRIPT.contains(&format!("|| return {OVER_BUDGET}\n")));
@@ -1486,7 +1512,7 @@ Version: 1
                               source = \"sparse+https://crates.example.com/\"\n";
         let parts = [
             part("dir /srv/ok", "", 0),
-            part("dir /srv/none", "", NOT_A_DIR),
+            part("dir /srv/none", "", GONE),
             part("dir /srv/part", "", 1),
             part("dir /srv/locked", "", NOT_READABLE),
             part("file /srv/bad/Cargo.lock", "not toml [", 0),

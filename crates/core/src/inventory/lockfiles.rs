@@ -208,10 +208,12 @@ struct Bounds<'a> {
 /// Walks `root` and adds every package in every lockfile found, staying on `root`'s device:
 /// another device under it is a mounted disk or network share, which can be slow or hang.
 fn walk(root: &Path, bounds: &Bounds<'_>, inventory: &mut Inventory) {
-    let device = match fs::metadata(root) {
+    // Listed once here as well as in the walk, so a project folder that cannot be listed at all
+    // is told apart from a folder under it.
+    let device = match fs::metadata(root).and_then(|meta| fs::read_dir(root).map(|_| meta)) {
         Ok(meta) => meta.st_dev(),
         Err(e) => {
-            unwalked(inventory, root, e);
+            unopened_root(inventory, root, e);
             return;
         }
     };
@@ -309,6 +311,19 @@ fn unwalked(inventory: &mut Inventory, path: &Path, error: std::io::Error) {
         root: path.to_owned(),
     };
     inventory.fail(source, InventoryError::io(path, error));
+}
+
+/// Records that the project folder `root` could not be listed: a failed source whatever the
+/// cause, permission included, unlike a folder under it. The user chose this folder, and losing
+/// access to it is a change (privacy access to `~/Documents` revoked), not a lasting fact found
+/// on the way: as a note, every finding under it would read as resolved and its fix confirmed.
+/// It stays not fully checked until access is back or the folder leaves the settings.
+fn unopened_root(inventory: &mut Inventory, root: &Path, error: std::io::Error) {
+    let source = InventorySource::LockfileWalk {
+        root: root.to_owned(),
+    };
+    inventory.failed.insert(source);
+    inventory.problems.push(InventoryError::io(root, error));
 }
 
 /// Returns whether the walk may enter the folder at `path` by its name: not hidden by a dot,
@@ -1127,6 +1142,30 @@ mod tests {
         ));
         let unwalked = InventorySource::LockfileWalk { root: root.into() };
         assert_eq!(inventory.failed, [unwalked].into());
+    }
+
+    #[test]
+    fn a_project_folder_this_user_may_not_read_fails() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("projects");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let inventory = walked(&root, &[]);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(&inventory.problems[..], [InventoryError::Io { source, .. }]
+                if source.kind() == std::io::ErrorKind::PermissionDenied),
+            "{:?}",
+            inventory.problems
+        );
+        let unopened = InventorySource::LockfileWalk { root };
+        assert_eq!(
+            inventory.failed,
+            [unopened].into(),
+            "access taken away from a chosen folder must not resolve its findings"
+        );
     }
 
     #[test]
