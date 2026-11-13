@@ -102,6 +102,12 @@ pub struct Fix {
     pub steps: Vec<String>,
     /// The exact shell commands, in order; may be empty when the fix is manual.
     pub commands: Vec<String>,
+    /// Whether no released version fixes the issue yet. The summary and steps are then what to
+    /// do until one is released, and there are no commands: upgrading to the newest version
+    /// would change nothing, and a fix that runs it would read "Still found after a fix" at the
+    /// next sweep. Absent, so false, in findings and reports written before it existed.
+    #[serde(default)]
+    pub no_fixed_release: bool,
 }
 
 /// Severity on this machine, most severe first.
@@ -498,6 +504,12 @@ pub(crate) fn check_fix(at: &str, fix: &Fix, problems: &mut Vec<String>) {
             problems.push(format!("{at}.commands[{i}] {problem}"));
         }
     }
+    if fix.no_fixed_release && !fix.commands.is_empty() {
+        problems.push(format!(
+            "{at}.commands: no_fixed_release is true, so there is nothing to run; leave commands \
+             empty and give what to do until a fix is released in summary and steps"
+        ));
+    }
 }
 
 /// Shell syntax a fix command may not use: chaining (`;`, `&&`, `||`), pipes, background jobs,
@@ -811,6 +823,37 @@ mod tests {
         fine["explanation"] = json!("Two lines\nare fine in prose.");
         fine["fix"]["steps"] = json!(["Mettre à jour lodash"]);
         assert!(check(&[fine], &kev).is_ok());
+    }
+
+    #[test]
+    fn a_fix_with_no_fixed_release_has_no_commands() {
+        let kev = known(Some(&[]));
+        let mut unreleased = finding(&["GHSA-1"], "c1", "low", false);
+        unreleased["fix"] = json!({
+            "summary": "No release fixes this yet; do not parse untrusted input with it",
+            "steps": ["Upgrade lodash once a fixed version is released"],
+            "commands": [],
+            "no_fixed_release": true
+        });
+        let valid = check(&[unreleased.clone()], &kev).unwrap();
+        assert!(valid[0].finding.fix.no_fixed_release);
+
+        unreleased["fix"]["commands"] = json!(["brew upgrade lodash"]);
+        assert_eq!(
+            check(&[unreleased], &kev).unwrap_err(),
+            [
+                "findings[0].fix.commands: no_fixed_release is true, so there is nothing to run; \
+                 leave commands empty and give what to do until a fix is released in summary \
+                 and steps"
+            ]
+        );
+
+        let old = finding(&["GHSA-1"], "c1", "low", false);
+        let valid = check(&[old], &kev).unwrap();
+        assert!(
+            !valid[0].finding.fix.no_fixed_release,
+            "a finding without the field has a released fix"
+        );
     }
 
     /// The problems of one finding whose fix has `commands`, or nothing when it passes.

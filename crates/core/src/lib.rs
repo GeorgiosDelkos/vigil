@@ -107,6 +107,7 @@ pub use crate::lifecycle::Changes;
 pub use crate::lifecycle::ComponentKey;
 pub use crate::lifecycle::Dismissal;
 pub use crate::lifecycle::FindingKey;
+pub use crate::lifecycle::FixKind;
 pub use crate::lifecycle::FixState;
 pub use crate::lifecycle::Fixed;
 pub use crate::lifecycle::InComponent;

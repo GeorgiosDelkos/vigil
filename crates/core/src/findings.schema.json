@@ -99,6 +99,11 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["summary", "steps", "commands"],
+      "if": {
+        "required": ["no_fixed_release"],
+        "properties": { "no_fixed_release": { "const": true } }
+      },
+      "then": { "properties": { "commands": { "maxItems": 0 } } },
       "properties": {
         "summary": { "type": "string", "minLength": 1 },
         "steps": { "type": "array", "items": { "type": "string" } },
@@ -106,6 +111,10 @@
           "description": "Exact shell commands, in order, each one line of printable ASCII; describe a path with other characters in steps. They are shown to the user and never run during a sweep.",
           "type": "array",
           "items": { "type": "string", "pattern": "^[ -~]*$" }
+        },
+        "no_fixed_release": {
+          "description": "true when no released version fixes the issue yet, so upgrading to the newest version changes nothing. commands is then empty, and summary and steps say what to do until a fix is released. Leave it out otherwise.",
+          "type": "boolean"
         }
       }
     }

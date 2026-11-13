@@ -62,6 +62,7 @@ use crate::findings::is_forging;
 use crate::lifecycle;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
+use crate::lifecycle::FixKind;
 use crate::lifecycle::StateError;
 use crate::paths::DataDir;
 use crate::paths::open_regular;
@@ -341,6 +342,13 @@ fn plan_finding(data_dir: &DataDir, key: FindingKey) -> Result<Planned, FixError
     }
     if !problems.is_empty() {
         return Err(FixError::Malformed { key, problems });
+    }
+    // The agent would get nothing to run, and a run that changes nothing reads "Still found
+    // after a fix" at the next sweep. The popover offers no Fix for these, and says why.
+    match FixKind::of(&report.target, &fix.commands, fix.no_fixed_release) {
+        FixKind::Run => {}
+        FixKind::Manual => return Err(FixError::Manual { key }),
+        FixKind::NoRelease => return Err(FixError::NoRelease { key }),
     }
     if let Some(repo) = report.target.strip_prefix("github:") {
         let foreign = fix
@@ -1601,6 +1609,21 @@ pub enum FixError {
         /// What is wrong.
         problems: Vec<String>,
     },
+    /// The fix has no commands on this Mac or a server: advice for the user, not for the agent.
+    #[error("the fix for {key} has no commands for Vigil to run; follow its steps by hand")]
+    Manual {
+        /// The key.
+        key: FindingKey,
+    },
+    /// No released version fixes the finding yet.
+    #[error(
+        "no released version fixes {key} yet, so there is nothing to run; follow its steps \
+         until one is"
+    )]
+    NoRelease {
+        /// The key.
+        key: FindingKey,
+    },
     /// One item of a Fix all cannot be fixed now, so nothing was run.
     #[error("nothing was run: {name}")]
     Item {
@@ -2271,6 +2294,51 @@ mod tests {
                  hand if it is right"
             )
         );
+    }
+
+    #[test]
+    fn a_fix_with_nothing_to_run_is_not_planned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path());
+        let key = FindingKey::new(&["k"]);
+        let plan = |target: &str, folder: &str, fix: serde_json::Value| {
+            let dir = data_dir.sweeps_dir().join("20261105T000000Z").join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            let report = json!({
+                "started": "2026-11-05T00:00:00Z", "target": target, "failure": null,
+                "findings": [], "issues": [{"key": key, "subject": {"file": "x"},
+                    "severity": "high", "fix": fix}],
+            });
+            fs::write(dir.join("report.json"), report.to_string()).unwrap();
+            let planned = plan_finding(&data_dir, key);
+            fs::remove_dir_all(&dir).unwrap();
+            planned
+        };
+        let manual = json!({"summary": "s", "steps": ["Use another python"], "commands": []});
+        let unreleased = json!({"summary": "s", "steps": [], "commands": [],
+            "no_fixed_release": true});
+
+        let err = plan("mac", "mac", manual.clone()).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("the fix for {key} has no commands for Vigil to run; follow its steps by hand")
+        );
+        assert!(
+            plan("github:o/r", "github-o--r", manual).is_ok(),
+            "a repository's agent works from the steps"
+        );
+        for (target, folder) in [("mac", "mac"), ("github:o/r", "github-o--r")] {
+            let err = plan(target, folder, unreleased.clone()).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "no released version fixes {key} yet, so there is nothing to run; follow its \
+                     steps until one is"
+                )
+            );
+        }
+        let runs = json!({"summary": "s", "steps": [], "commands": ["brew upgrade x"]});
+        assert!(plan("mac", "mac", runs).is_ok());
     }
 
     #[test]

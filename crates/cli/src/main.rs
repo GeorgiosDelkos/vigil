@@ -14,6 +14,7 @@ use vigil_core::Confirmed;
 use vigil_core::DataDir;
 use vigil_core::Feeds;
 use vigil_core::FindingKey;
+use vigil_core::FixKind;
 use vigil_core::FixProgress;
 use vigil_core::FixState;
 use vigil_core::History;
@@ -137,7 +138,8 @@ enum Command {
     ///
     /// The agent gets full access: on this Mac it runs the commands, for a repository it
     /// opens a pull request, for a server it runs them over ssh. Each run is recorded in the
-    /// data directory's state/fixes.jsonl.
+    /// data directory's state/fixes.jsonl. A fix with nothing to run is refused: one no
+    /// released version provides yet, or one on this Mac or a server without commands.
     ///
     /// `fix all <target>` shows the fix of every open item of a target that has commands to
     /// run, and runs them all in one agent run once confirmed (`--yes` goes after the target).
@@ -381,14 +383,24 @@ fn findings_text(all: Vec<Latest>) -> String {
     out
 }
 
+/// What an item's fix line starts with, so a fix Vigil cannot run reads as one.
+fn fix_label(kind: FixKind) -> &'static str {
+    match kind {
+        FixKind::Run => "fix",
+        FixKind::Manual => "manual fix",
+        FixKind::NoRelease => "no fix released yet",
+    }
+}
+
 /// One item's lines: a finding or issue with its key, title and fix; or a component with its
 /// worst severity, how many advisories, its one fix, and each finding's severity, key and
 /// advisories.
 fn item_text(item: &Listed) -> String {
     let lead = &item.lead;
+    let fix = fix_label(lead.fix_kind);
     if item.others.is_empty() {
         let mut out = format!(
-            "  {:<8} {}  {}\n           fix: {}\n",
+            "  {:<8} {}  {}\n           {fix}: {}\n",
             lead.severity, lead.key, lead.title, lead.fix
         );
         if let Some(state) = &lead.fix_state {
@@ -402,7 +414,7 @@ fn item_text(item: &Listed) -> String {
         .expect("listed sets advisory_count whenever others is non-empty");
     let version = lead.version.as_deref().unwrap_or_default();
     let mut out = format!(
-        "  {:<8} {} {version}, {}: {count}\n           fix: {}\n",
+        "  {:<8} {} {version}, {}: {count}\n           {fix}: {}\n",
         item.severity, item.name, lead.place, lead.fix
     );
     for finding in item.findings() {
@@ -844,7 +856,8 @@ mod tests {
             explanation: String::new(),
             fix: "upgrade curl".to_owned(),
             steps: Vec::new(),
-            commands: Vec::new(),
+            commands: vec!["brew upgrade curl".to_owned()],
+            fix_kind: FixKind::Run,
             first_seen: None,
             new: false,
             fix_state: Some(FixState::Reported {
@@ -907,7 +920,8 @@ mod tests {
             explanation: String::new(),
             fix: "Upgrade ffmpeg.".to_owned(),
             steps: Vec::new(),
-            commands: Vec::new(),
+            commands: vec!["brew upgrade ffmpeg".to_owned()],
+            fix_kind: FixKind::Run,
             first_seen: None,
             new: false,
             fix_state: None,
@@ -937,6 +951,62 @@ mod tests {
              \x20          critical 0000000000000001  CVE-1\n\
              \x20                   still found after a fix at 2026-11-05T11:00:00Z\n\
              \x20          low      0000000000000002  CVE-2\n"
+        );
+    }
+
+    #[test]
+    fn a_fix_vigil_cannot_run_says_so_on_its_line() {
+        let item = |fix_kind| {
+            let lead = Open {
+                key: "0000000000000001".parse().unwrap(),
+                severity: Severity::High,
+                title: "CVE-1 in sqlite 3.54.1".to_owned(),
+                name: "sqlite".to_owned(),
+                version: Some("3.54.1".to_owned()),
+                component: None,
+                advisories: vec!["CVE-1".to_owned()],
+                place: String::new(),
+                known_exploited: false,
+                confidence: None,
+                evidence: String::new(),
+                explanation: String::new(),
+                fix: "Do not recover untrusted databases.".to_owned(),
+                steps: Vec::new(),
+                commands: Vec::new(),
+                fix_kind,
+                first_seen: None,
+                new: false,
+                fix_state: None,
+            };
+            Listed {
+                id: "0000000000000001".to_owned(),
+                target: "This Mac".to_owned(),
+                target_key: "mac".to_owned(),
+                name: "sqlite".to_owned(),
+                lead,
+                others: Vec::new(),
+                severity: Severity::High,
+                known_exploited: false,
+                needs_you: true,
+                first_seen: None,
+                new: false,
+                advisory_count: None,
+                fix_scope: None,
+                pending_fix: None,
+            }
+        };
+        let second = |kind| item_text(&item(kind)).lines().nth(1).unwrap().to_owned();
+        assert_eq!(
+            second(FixKind::NoRelease),
+            "           no fix released yet: Do not recover untrusted databases."
+        );
+        assert_eq!(
+            second(FixKind::Manual),
+            "           manual fix: Do not recover untrusted databases."
+        );
+        assert_eq!(
+            second(FixKind::Run),
+            "           fix: Do not recover untrusted databases."
         );
     }
 

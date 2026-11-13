@@ -592,6 +592,36 @@ pub enum FixState {
 /// fixes, so what Vigil fixed stays visible; older ones remain in `state/fixes.jsonl`.
 pub(crate) const CONFIRMED_DAYS: i64 = 30;
 
+/// What Vigil can do with a fix: the one rule for the popover's labels, Fix all, and whether a
+/// fix of one finding is planned at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixKind {
+    /// Vigil's agent carries it out: it has commands, or it is a repository's, where the agent
+    /// opens a pull request from the steps.
+    Run,
+    /// On this Mac or a server with no commands: advice the user follows, such as using another
+    /// installed version. The agent would get nothing to run, so Vigil offers no Fix for it.
+    Manual,
+    /// No released version fixes it yet ([`Fix::no_fixed_release`](crate::Fix)): its summary
+    /// and steps say what to do until one is, and there is nothing to run.
+    NoRelease,
+}
+
+impl FixKind {
+    /// The kind of a fix of `target` (as configured: `mac`, `github:owner/name`) with
+    /// `commands`, and whether its finding has no fixed release.
+    pub(crate) fn of(target: &str, commands: &[String], no_fixed_release: bool) -> Self {
+        if no_fixed_release {
+            Self::NoRelease
+        } else if commands.is_empty() && !target.starts_with("github:") {
+            Self::Manual
+        } else {
+            Self::Run
+        }
+    }
+}
+
 /// One open finding or issue.
 #[derive(Debug, Serialize)]
 pub struct Open {
@@ -625,6 +655,8 @@ pub struct Open {
     pub steps: Vec<String>,
     /// The fix's exact commands.
     pub commands: Vec<String>,
+    /// What Vigil can do with the fix.
+    pub fix_kind: FixKind,
     /// When a sweep first found it; `None` in a report saved before that was kept.
     pub first_seen: Option<Timestamp>,
     /// Whether the newest sweep is the first to find it since the one before.
@@ -847,6 +879,9 @@ fn open_entry(target: &str, entry: &SavedEntry, new: bool, fix_state: Option<Fix
         commands: entry.fix.as_ref().map_or(Vec::new(), |f| {
             f.commands.iter().map(|c| plain(c)).collect()
         }),
+        fix_kind: entry.fix.as_ref().map_or(FixKind::Manual, |f| {
+            FixKind::of(target, &f.commands, f.no_fixed_release)
+        }),
         first_seen: entry.first_seen,
         new,
         fix_state,
@@ -920,6 +955,9 @@ struct SavedFix {
     steps: Vec<String>,
     #[serde(default)]
     commands: Vec<String>,
+    /// Absent in a report saved before findings could say no fix was released.
+    #[serde(default)]
+    no_fixed_release: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1724,6 +1762,45 @@ mod tests {
         );
         assert_eq!(mac.open[0].fix, "up grade", "one line");
         assert_eq!((all[1].target.as_str(), all[1].swept), ("github:o/r", None));
+    }
+
+    #[test]
+    fn latest_reads_whether_a_fix_runs_is_manual_or_has_no_release() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let config_path = tmp.path().join("config.toml");
+        fs::write(&config_path, "").unwrap();
+        let config = Config::load(&config_path, tmp.path()).unwrap();
+        let [run, manual, unreleased, bare] = [1, 2, 3, 4].map(FindingKey);
+        let entry = |key: FindingKey, fix: serde_json::Value| json!({"key": key, "severity": "high", "title": "t", "fix": fix});
+        let report = json!({
+            "started": "2026-11-05T00:00:00Z", "target": "mac", "failure": null,
+            "findings": [
+                // Saved before `no_fixed_release` existed: read as false.
+                entry(run, json!({"summary": "s", "commands": ["brew upgrade sqlite"]})),
+                entry(manual, json!({"summary": "s", "steps": ["Use another python"],
+                    "commands": [], "no_fixed_release": false})),
+                entry(unreleased, json!({"summary": "s", "steps": [], "commands": [],
+                    "no_fixed_release": true})),
+                json!({"key": bare, "severity": "high", "title": "t"}),
+            ],
+            "issues": [],
+        });
+        save(&data_dir.sweeps_dir(), "20261105T000000Z/mac", &report);
+
+        let all = latest(&data_dir, &config);
+        let kinds: BTreeMap<FindingKey, FixKind> =
+            all[0].open.iter().map(|o| (o.key, o.fix_kind)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (run, FixKind::Run),
+                (manual, FixKind::Manual),
+                (unreleased, FixKind::NoRelease),
+                (bare, FixKind::Manual),
+            ]
+            .into()
+        );
     }
 
     /// A Mac report whose findings cover every grouping case, for

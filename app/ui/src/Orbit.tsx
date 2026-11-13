@@ -71,7 +71,6 @@ export function Orbit(props: { overview: Overview; now: Date; actions: OrbitActi
         <Menu onSettings={props.actions.onSettings} onError={props.actions.onError} />
       </div>
       <Show when={failed()}>{(f) => <p class="banner bad">{f().error}</p>}</Show>
-      <Show when={props.overview.warning}>{(w) => <p class="banner warn">{w()}</p>}</Show>
       <div class="stage">
         <Spiral scene={sceneOf(props.overview)} />
         <button

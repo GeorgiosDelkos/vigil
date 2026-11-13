@@ -55,7 +55,9 @@ It sweeps three kinds of target in one pass:
 - **Exploited first.** Advisories in CISA's Known Exploited Vulnerabilities catalog are
   flagged and always kept, and the popover ranks them above everything else.
 - **Fixes you approve.** Nothing changes until you confirm a fix. A dependency fix in a
-  repository is made on a branch and opened as a pull request.
+  repository is made on a branch and opened as a pull request. When no released version
+  fixes a finding yet, it says "No fix released yet" with what to do until then, and advice
+  with nothing to run says "Manual fix"; neither offers a Fix that would change nothing.
 - **A fix is checked by the next sweep.** A fix the agent reports done shows green, as
   "Fixed · the next sweep confirms it", and leaves the open counts; until a sweep confirms it,
   Vigil says "1 fix to confirm" rather than all clear. One that opened a pull request stays
@@ -74,7 +76,7 @@ example targets.
 <table>
   <tr>
     <td width="33%" align="center"><img src="docs/images/findings.png" alt="The main view: five findings need you, one exploited in the wild, each target with its open findings by severity, and the startup disk's free space"><br><sub><b>At a glance.</b> What needs you, each target by severity, and free disk space.</sub></td>
-    <td width="33%" align="center"><img src="docs/images/targets.png" alt="A server's screen: its open findings with their fixes, and a Fix all button"><br><sub><b>A target.</b> Its findings and fixes, with Fix all when two or more have commands.</sub></td>
+    <td width="33%" align="center"><img src="docs/images/targets.png" alt="A server's screen: its open findings with their fixes, and a Fix all button"><br><sub><b>A target.</b> Its findings and fixes, with Fix all when Vigil can run two or more of them.</sub></td>
     <td width="33%" align="center"><img src="docs/images/detail.png" alt="The details of a finding with its explanation and fix commands"><br><sub><b>Details.</b> The agent's explanation and the exact fix.</sub></td>
   </tr>
   <tr>

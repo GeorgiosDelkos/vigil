@@ -90,6 +90,11 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   line of printable ASCII with single spaces, at most 300 characters, and one command: no
   `;`, `|`, `&`, `<`, `>`, backticks, `$` or `\`. At most 20 steps and 20 commands; write web
   addresses in ASCII.
+- When no released version of a dependency fixes a finding yet, say so: set
+  `"no_fixed_release": true` in the `fix`, leave `commands` empty, and give in `summary` and
+  `steps` what to do until a fix is released (a feature to avoid, input to check). The record
+  shows it: an OSV range with no `fixed` version. Never describe a version bump that changes
+  nothing: a pull request for it would fix nothing.
 
 If nothing is affected and nothing is risky, write `{"findings": [], "issues": []}`.
 

@@ -78,7 +78,10 @@ export type Finding = {
   readonly evidence: string;
   readonly explanation: string;
   readonly fix: string;
+  readonly steps: readonly string[];
   readonly commands: readonly string[];
+  /** What Vigil can do with the fix, as Rust decides it. */
+  readonly fix_kind: FixKind;
   readonly first_seen: string | null;
   readonly new: boolean;
   readonly fix_state: FixState | null;
@@ -114,6 +117,11 @@ export type Listed = {
   readonly pending_fix: PendingFix | null;
 };
 
+/** What Vigil can do with a fix (the core's `FixKind`): run it; nothing, as it is advice with no
+ * commands on this Mac or a server; or nothing yet, as no released version fixes it. Only `run`
+ * has a Fix button and rides in Fix all. */
+export type FixKind = "run" | "manual" | "no_release";
+
 /** A fix that did not hold, or one whose pull request is not merged yet. */
 export type PendingFix = "not_held" | "pull_request";
 
@@ -133,8 +141,8 @@ export type TargetLine = {
   readonly dismissed: number;
   /** "Fix all 3" when Fix all takes two or more of its open items; null hides the button. */
   readonly fix_all: string | null;
-  /** Why what it shows may be incomplete: sources that failed in its newest sweep, or files
-   * Rust could not read. Null when neither. */
+  /** Why what it shows may be incomplete: what its newest sweep could not check ("pipx"), then
+   * files Rust could not read. Null when neither. */
   readonly warning: string | null;
 };
 
@@ -200,7 +208,8 @@ export type Overview = {
   readonly last_swept: string | null;
   readonly first_sweep_hint: string | null;
   readonly all_clear: boolean;
-  /** One line naming each target with a warning, and the warning; null when none has. */
+  /** One line naming each target with a warning, and the warning; null when none has. No box
+   * shows it: each target's row and screen say what was not checked. */
   readonly warning: string | null;
   readonly target_count: string;
   readonly targets: readonly TargetLine[];

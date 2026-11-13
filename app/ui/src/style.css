@@ -1358,3 +1358,8 @@ ol.steps {
 .tag.fix-not_held {
   color: var(--high);
 }
+/* A fix Vigil does not run reads as information, not as a problem. */
+.tag.fix-manual,
+.tag.fix-no_release {
+  color: var(--l2);
+}

@@ -523,6 +523,7 @@ mod tests {
             fix: String::new(),
             steps: Vec::new(),
             commands: Vec::new(),
+            fix_kind: vigil_core::FixKind::Manual,
             first_seen: None,
             new: false,
             fix_state: None,

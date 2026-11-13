@@ -65,6 +65,12 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   spaces, at most 300 characters, and one command: no `;`, `|`, `&`, `<`, `>`, backticks, `$`
   or `\`, except the nvm form below. Describe a path with other characters in `steps` instead.
   At most 20 steps and 20 commands; write web addresses in ASCII.
+- When no released version fixes the issue yet, say so: set `"no_fixed_release": true` in the
+  `fix`, leave `commands` empty, and give in `summary` and `steps` what to do until a fix is
+  released (a setting to change, input to avoid). The record shows it: an OSV range with no
+  `fixed` version, or an NVD range with no end or one that ends at or above the installed
+  version with `versionEndIncluding`. Never write an upgrade that installs nothing new, such
+  as `brew upgrade sqlite` when no newer sqlite fixes it: the user would run it for nothing.
 - For a version found in a version manager (`found_in.manager`, `found_in.path`), the fix
   removes that version with the manager: `fnm uninstall 22.22.2`,
   `asdf uninstall nodejs 22.22.2` (the plugin is the folder under `installs/`: `nodejs` or
