@@ -388,13 +388,13 @@ fn read_item(
         .as_deref()
         .or(arguments.first().map(String::as_str))
         .map(|name| checked(resolve(name, working_directory), cancel, failures));
-    let scripts = program
-        .as_ref()
-        .map(|program| scripts(&program.path, &arguments))
-        .unwrap_or_default()
-        .into_iter()
-        .map(|path| checked(path, cancel, failures))
-        .collect();
+    let scripts = match &program {
+        Some(program) => scripts(&program.path, &arguments)
+            .into_iter()
+            .map(|path| checked(path, cancel, failures))
+            .collect(),
+        None => Vec::new(),
+    };
     let environment = job
         .environment_variables
         .unwrap_or_default()
@@ -478,10 +478,8 @@ fn scripts(program: &Path, arguments: &[String]) -> Vec<PathBuf> {
         return Vec::new();
     }
     for (i, argument) in arguments.iter().enumerate().skip(1) {
-        let cluster_ending_in_c = argument.len() > 2
-            && argument.starts_with('-')
-            && !argument.starts_with("--")
-            && argument.ends_with('c');
+        let cluster_ending_in_c =
+            argument.starts_with('-') && !argument.starts_with("--") && argument.ends_with('c');
         if INLINE_CODE.contains(&argument.as_str()) || cluster_ending_in_c {
             return Vec::new();
         }
@@ -714,15 +712,8 @@ fn apple_certificate(
     team: Option<&str>,
     cancel: &Cancel,
 ) -> Result<Option<Certificate>, InventoryError> {
-    let to_team = match team {
-        // A team ID is ten letters and digits. A claim of anything else is no team Apple
-        // issued a certificate to, and is kept out of the requirement, whose language it could
-        // otherwise extend.
-        Some(team) if team.len() == 10 && team.bytes().all(|b| b.is_ascii_alphanumeric()) => {
-            format!(" and certificate leaf[subject.OU] = \"{team}\"")
-        }
-        Some(_) => return Ok(None),
-        None => String::new(),
+    let Some(to_team) = team_clause(team) else {
+        return Ok(None);
     };
     for certificate in [
         Certificate::DeveloperId,
@@ -735,6 +726,24 @@ fn apple_certificate(
         }
     }
     Ok(None)
+}
+
+/// The requirement clause that binds the leaf certificate to the claimed `team`: empty when
+/// the signature claims none, `None` when the claim is no team ID. A team ID is ten letters and
+/// digits; a claim of anything else is no team Apple issued a certificate to, and is kept out
+/// of the requirement, whose language it could otherwise extend.
+fn team_clause(team: Option<&str>) -> Option<String> {
+    match team {
+        Some(team) if is_team_id(team) => {
+            Some(format!(" and certificate leaf[subject.OU] = \"{team}\""))
+        }
+        Some(_) => None,
+        None => Some(String::new()),
+    }
+}
+
+fn is_team_id(claim: &str) -> bool {
+    claim.len() == 10 && claim.bytes().all(|b| b.is_ascii_alphanumeric())
 }
 
 /// A file's size and modification time, for an identity where its content cannot be read.
@@ -782,15 +791,19 @@ impl Shown {
 /// The SHA-256 of `file`, in hex.
 fn sha256(file: &str, cancel: &Cancel) -> Result<String, InventoryError> {
     let output = tool(SHASUM, &["-a", "256", "--", file], cancel)?;
-    let digest = output.stdout.split_whitespace().next().unwrap_or_default();
-    if output.success && digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit()) {
-        Ok(digest.to_owned())
-    } else {
-        Err(InventoryError::Command {
+    match digest(&output.stdout) {
+        Some(digest) if output.success => Ok(digest.to_owned()),
+        _ => Err(InventoryError::Command {
             command: output.command,
             detail: output.detail,
-        })
+        }),
     }
+}
+
+/// The hex SHA-256 that `shasum -a 256` prints first, or `None` when the output is not one.
+fn digest(stdout: &str) -> Option<&str> {
+    let digest = stdout.split_whitespace().next()?;
+    (digest.len() == 64 && digest.bytes().all(|b| b.is_ascii_hexdigit())).then_some(digest)
 }
 
 /// Runs a system tool that must be there: one that is not is an error, not a tool to skip.
@@ -866,6 +879,17 @@ TeamIdentifier=not set
             signature(tmp.path(), &cancel).unwrap(),
             Signature::Unreadable { stamp: Some(_), .. }
         ));
+        // Behind a folder this user may not enter, a file is unreadable, not missing.
+        let locked = tmp.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("tool"), "x").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let behind = signature(&locked.join("tool"), &cancel).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            matches!(&behind, Signature::Unreadable { stamp: None, .. }),
+            "{behind:?}"
+        );
 
         let script = tmp.path().join("run.sh");
         fs::write(&script, "hello\n").unwrap();
@@ -923,6 +947,31 @@ TeamIdentifier=not set
     }
 
     #[test]
+    fn only_a_team_id_is_bound_into_a_requirement() {
+        assert!(is_team_id("9BNSXJN65R"));
+        for claim in ["9BNSXJN65", "9BNSXJN65RX", "9BNSXJN6\"R", ""] {
+            assert!(!is_team_id(claim), "{claim:?}");
+        }
+        assert_eq!(team_clause(None).as_deref(), Some(""));
+        assert_eq!(
+            team_clause(Some("9BNSXJN65R")).as_deref(),
+            Some(" and certificate leaf[subject.OU] = \"9BNSXJN65R\"")
+        );
+        assert_eq!(team_clause(Some("X\" or anchor apple or \"Y")), None);
+    }
+
+    #[test]
+    fn a_digest_is_64_hex_digits_and_a_detail_its_first_line() {
+        let hex = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
+        assert_eq!(digest(&format!("{hex}  /tmp/run.sh\n")), Some(hex));
+        assert_eq!(digest(&hex[1..]), None, "63 digits");
+        assert_eq!(digest(&"z".repeat(64)), None, "not hex");
+        assert_eq!(digest(""), None);
+        assert_eq!(first_line("  denied: x \nmore"), "denied: x");
+        assert_eq!(first_line(""), "");
+    }
+
+    #[test]
     fn identities_follow_a_verified_team_or_the_content() {
         let issued = |certificate, team: &str, cdhash: &str| Signature::AppleIssued {
             certificate,
@@ -939,6 +988,11 @@ TeamIdentifier=not set
         assert_ne!(
             developer_id("T1", "a").identity(),
             developer_id("T2", "a").identity()
+        );
+        assert_ne!(
+            developer_id("T1", "a").identity(),
+            issued(Certificate::AppStore, "T1", "a").identity(),
+            "the kind of certificate is part of it"
         );
         // A free development certificate is keyed by content, like a self-signed one.
         let development = |cdhash| issued(Certificate::Other, "T1", cdhash);
@@ -1059,6 +1113,8 @@ TeamIdentifier=not set
         assert_eq!(ran(&["/usr/bin/python3", "-u", file]), just(&script));
         assert_eq!(ran(&["/usr/bin/env", "python3", file]), just(&script));
         assert_eq!(ran(&["/bin/bash", "-l", file]), just(&script));
+        assert_eq!(ran(&["/bin/bash", "--norc", file]), just(&script));
+        assert_eq!(ran(&["/usr/bin/python3", "-OO", file]), just(&script));
         assert_eq!(
             ran(&["/usr/bin/osascript", "-l", "JavaScript", file]),
             just(&script)
@@ -1155,6 +1211,22 @@ TeamIdentifier=not set
         let empty = plist(tmp.path(), "empty.plist", "");
         let item = read(ItemKind::LaunchAgent, &empty);
         assert!(item.error.is_none() && item.program.is_none());
+
+        // A property list of exactly the limit is read; one byte more is refused as too large.
+        let sized = |name: &str, size: u64| {
+            let path = plist(tmp.path(), name, "<key>Label</key><string>big</string>");
+            let mut text = fs::read_to_string(&path).unwrap();
+            let pad = usize::try_from(size).unwrap() - text.len();
+            text.insert_str(text.len() - "</plist>\n".len(), &" ".repeat(pad));
+            fs::write(&path, text).unwrap();
+            read(ItemKind::LaunchAgent, &path)
+        };
+        let at_limit = sized("limit.plist", PLIST_LIMIT);
+        assert_eq!(at_limit.error, None);
+        assert_eq!(at_limit.label.as_deref(), Some("big"));
+        let over = sized("over.plist", PLIST_LIMIT + 1);
+        let error = over.error.unwrap();
+        assert!(error.starts_with("more than the 1048576 bytes"), "{error}");
     }
 
     #[test]
@@ -1220,6 +1292,33 @@ TeamIdentifier=not set
         let folders = [(ItemKind::UserLaunchAgent, open.clone())];
         assert!(launch_items(&mut inventory, &folders, &cancel).is_empty());
         assert!(inventory.failed.contains(&InventorySource::LaunchItems));
+    }
+
+    #[test]
+    fn this_macs_settings_and_items_are_read() {
+        // macOS ships every settings tool, so each one answers on any Mac, CI's included.
+        let mut inventory = Inventory::default();
+        let settings = posture(&mut inventory, &Cancel::new());
+        let keys: Vec<&str> = settings.keys().copied().collect();
+        assert_eq!(
+            keys,
+            [
+                "filevault",
+                "firewall",
+                "gatekeeper",
+                "system_integrity_protection"
+            ]
+        );
+        assert!(
+            settings.values().all(|state| !state.is_empty()),
+            "{settings:?}"
+        );
+        assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
+
+        let host = collect(&mut Inventory::default(), &Cancel::new());
+        assert_eq!(host.settings.len(), POSTURE.len());
+        assert_eq!(host.files.len(), 2);
+        assert!(host.files[0].1.contains("system_integrity_protection"));
     }
 
     #[test]
