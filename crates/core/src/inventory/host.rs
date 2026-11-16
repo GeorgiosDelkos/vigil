@@ -229,9 +229,10 @@ struct Item {
     /// hold a token: the command line is what the agent judges (`sh -c`, a download piped to a
     /// shell), and the sweep's agent cannot send anything off this Mac.
     arguments: Vec<String>,
-    /// The script an interpreter in [`INTERPRETERS`] runs: its first argument that is an
-    /// absolute path, unless inline code comes first.
-    script: Option<Program>,
+    /// The files an interpreter in [`INTERPRETERS`] runs besides itself, in order: its first
+    /// argument that is an absolute path, unless inline code comes first, and through `env`
+    /// the program it starts and that program's script (see [`scripts`]).
+    scripts: Vec<Program>,
     run_at_load: bool,
     /// Whether `KeepAlive` is set: `true`, or conditions under which launchd restarts it.
     keep_alive: bool,
@@ -263,7 +264,7 @@ impl Item {
             label: None,
             program: None,
             arguments: Vec::new(),
-            script: None,
+            scripts: Vec::new(),
             run_at_load: false,
             keep_alive: false,
             disabled: false,
@@ -282,7 +283,11 @@ impl Item {
         };
         json!({
             "program": file(&self.program),
-            "script": file(&self.script),
+            "scripts": self
+                .scripts
+                .iter()
+                .map(|p| json!([p.path, p.signature.identity()]))
+                .collect::<Vec<_>>(),
             "arguments": self.arguments,
             "environment": self.environment,
             "user_name": self.user_name,
@@ -390,10 +395,13 @@ fn read_item(
         .as_deref()
         .or(arguments.first().map(String::as_str))
         .map(|name| checked(resolve(name, working_directory), cancel, failures));
-    let script = program
+    let scripts = program
         .as_ref()
-        .and_then(|program| script(&program.path, &arguments))
-        .map(|path| checked(path, cancel, failures));
+        .map(|program| scripts(&program.path, &arguments))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| checked(path, cancel, failures))
+        .collect();
     let environment = job
         .environment_variables
         .unwrap_or_default()
@@ -412,7 +420,7 @@ fn read_item(
         label: job.label,
         program,
         arguments,
-        script,
+        scripts,
         run_at_load: job.run_at_load.unwrap_or(false),
         keep_alive: job
             .keep_alive
@@ -457,16 +465,21 @@ fn resolve(name: &str, working_directory: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(name))
 }
 
-/// The script `program` runs, when it is an interpreter: the first argument after the
-/// program's own name that is an absolute path, unless an [`INLINE_CODE`] option comes first.
-/// Options and their values before it are skipped (`python3 -u /x.py`, `osascript -l
-/// JavaScript /x.js`, `env python3 /x.py`). The first absolute path is taken even when it is
-/// an option's value (`ruby -I /lib /x.rb` gives `/lib`); the agent reads the arguments too.
-/// When that path is itself an interpreter (`env /usr/bin/python3 /x.py`), the search goes on
-/// after it; each step reads a shorter list, so it ends.
-fn script(program: &Path, arguments: &[String]) -> Option<PathBuf> {
+/// The files `program` runs besides itself, when it is an interpreter: the first argument
+/// after the program's own name that is an absolute path, unless an [`INLINE_CODE`] option
+/// comes first. Options and their values before it are skipped (`python3 -u /x.py`,
+/// `osascript -l JavaScript /x.js`, `env python3 /x.py`). The first absolute path is taken even
+/// when it is an option's value (`ruby -I /lib /x.rb` gives `/lib`); the agent reads the
+/// arguments too.
+///
+/// Only `env` runs its argument as a program; every other interpreter runs it as a script,
+/// whatever its name (`sh /x/sh` runs `/x/sh` as a shell script). So only after `env` does an
+/// interpreter found there count as a program whose own script is looked for too, and both are
+/// listed (`env /x/python3 /y.py` gives `/x/python3` and `/y.py`). Each step reads a shorter
+/// list, so it ends.
+fn scripts(program: &Path, arguments: &[String]) -> Vec<PathBuf> {
     if !is_interpreter(program) {
-        return None;
+        return Vec::new();
     }
     for (i, argument) in arguments.iter().enumerate().skip(1) {
         let cluster_ending_in_c = argument.len() > 2
@@ -474,17 +487,19 @@ fn script(program: &Path, arguments: &[String]) -> Option<PathBuf> {
             && !argument.starts_with("--")
             && argument.ends_with('c');
         if INLINE_CODE.contains(&argument.as_str()) || cluster_ending_in_c {
-            return None;
+            return Vec::new();
         }
         if argument.starts_with('/') {
-            let path = Path::new(argument);
-            if is_interpreter(path) {
-                return script(path, &arguments[i..]);
+            let path = PathBuf::from(argument);
+            if program.file_name() == Some("env".as_ref()) && is_interpreter(&path) {
+                let mut chain = scripts(&path, &arguments[i..]);
+                chain.insert(0, path);
+                return chain;
             }
-            return Some(path.to_owned());
+            return vec![path];
         }
     }
-    None
+    Vec::new()
 }
 
 fn is_interpreter(path: &Path) -> bool {
@@ -589,9 +604,9 @@ impl Signature {
     fn identity(&self) -> String {
         match self {
             Self::Missing => "missing".to_owned(),
-            // Without a stamp (a folder on the way this user may not enter) the reason is all
-            // there is: a replacement there is not seen until the reason changes. Accepted, as
-            // nothing about the file can be read.
+            // Without a stamp (a folder on the way this user may not enter, or a check that
+            // could not run) the reason is all there is: a replacement there is not seen until
+            // the reason changes. Accepted, as the file could not be checked.
             Self::Unreadable { stamp, detail } => {
                 format!("unreadable:{}", stamp.as_deref().unwrap_or(detail))
             }
@@ -949,6 +964,19 @@ TeamIdentifier=not set
             cdhash: cdhash.to_owned(),
         };
         assert_ne!(invalid("a").identity(), invalid("b").identity());
+        let unreadable = |detail: &str, stamp: Option<&str>| Signature::Unreadable {
+            detail: detail.to_owned(),
+            stamp: stamp.map(str::to_owned),
+        };
+        assert_ne!(
+            unreadable("a", None).identity(),
+            unreadable("b", None).identity()
+        );
+        assert_eq!(
+            unreadable("a", Some("1 bytes")).identity(),
+            unreadable("b", Some("1 bytes")).identity(),
+            "a stamp, when there is one, decides"
+        );
         assert_ne!(Signature::Missing.identity(), Signature::Apple.identity());
     }
 
@@ -1000,7 +1028,9 @@ TeamIdentifier=not set
         let program = item.program.as_ref().unwrap();
         assert_eq!(program.path, Path::new("/bin/sh"));
         assert_eq!(program.signature, Signature::Apple);
-        let ran = item.script.as_ref().unwrap();
+        let [ran] = &item.scripts[..] else {
+            panic!("one script: {:?}", item.scripts);
+        };
         assert_eq!(ran.path, script);
         assert!(matches!(ran.signature, Signature::Unsigned { .. }));
         assert!(item.keep_alive && !item.run_at_load && !item.disabled);
@@ -1024,29 +1054,37 @@ TeamIdentifier=not set
         let script = tmp.path().join("x.py");
         fs::write(&script, "print(1)\n").unwrap();
         let file = script.to_str().unwrap();
-        let ran = |arguments: &[&str]| {
-            job(tmp.path(), "s.plist", arguments, "")
-                .script
-                .map(|s| s.path)
+        let ran = |arguments: &[&str]| -> Vec<PathBuf> {
+            let item = job(tmp.path(), "s.plist", arguments, "");
+            item.scripts.into_iter().map(|s| s.path).collect()
         };
+        let just = |path: &Path| vec![path.to_owned()];
 
-        assert_eq!(ran(&["/usr/bin/python3", "-u", file]), Some(script.clone()));
-        assert_eq!(
-            ran(&["/usr/bin/env", "python3", file]),
-            Some(script.clone())
-        );
-        assert_eq!(
-            ran(&["/usr/bin/env", "/usr/bin/python3", "-u", file]),
-            Some(script.clone())
-        );
-        assert_eq!(ran(&["/bin/bash", "-l", file]), Some(script.clone()));
+        assert_eq!(ran(&["/usr/bin/python3", "-u", file]), just(&script));
+        assert_eq!(ran(&["/usr/bin/env", "python3", file]), just(&script));
+        assert_eq!(ran(&["/bin/bash", "-l", file]), just(&script));
         assert_eq!(
             ran(&["/usr/bin/osascript", "-l", "JavaScript", file]),
-            Some(script.clone())
+            just(&script)
         );
-        assert_eq!(ran(&["/bin/sh", "-c", file]), None);
-        assert_eq!(ran(&["/bin/bash", "-lc", file]), None);
-        assert_eq!(ran(&["/bin/ls", file]), None, "not an interpreter");
+        // Through `env`, both the interpreter it starts and that interpreter's script.
+        assert_eq!(
+            ran(&["/usr/bin/env", "/opt/x/python3", "-u", file]),
+            [PathBuf::from("/opt/x/python3"), script.clone()]
+        );
+        assert_eq!(
+            ran(&["/usr/bin/env", "/opt/x/python3", "-c", "1"]),
+            just(Path::new("/opt/x/python3"))
+        );
+        // Any other interpreter runs a file named like one as a script, so it is checked.
+        assert_eq!(ran(&["/bin/sh", "/opt/x/sh"]), just(Path::new("/opt/x/sh")));
+        assert_eq!(ran(&["/bin/sh", "-c", file]), Vec::<PathBuf>::new());
+        assert_eq!(ran(&["/bin/bash", "-lc", file]), Vec::<PathBuf>::new());
+        assert_eq!(
+            ran(&["/bin/ls", file]),
+            Vec::<PathBuf>::new(),
+            "not an interpreter"
+        );
         assert!(is_interpreter(Path::new("/opt/homebrew/bin/python3.12")));
         assert!(!is_interpreter(Path::new("/bin/ls")));
     }

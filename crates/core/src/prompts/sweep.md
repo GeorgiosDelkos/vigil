@@ -24,12 +24,14 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 - `mac/persistence.jsonl`: every launch agent and daemon outside `/System`, one per line. Each
   has the property list's `path`, its `kind` (`launch_daemon` runs as root unless it names a
   `user_name`, `launch_agent` runs for every user, `user_launch_agent` for this user), its
-  `label`, the `program` launchd starts and its `arguments`, the `script` an interpreter runs
-  (its first argument that is a file path, unless inline code such as `-c` comes first),
+  `label`, the `program` launchd starts and its `arguments`, the `scripts` an interpreter runs
+  (its first argument that is a file path, unless inline code such as `-c` comes first, and
+  through `env` the program it starts and that program's script),
   `run_at_load`, `keep_alive`, `disabled` (the property list's own key only), and the
   `environment` it sets (names only, with values for `DYLD_` variables and `PATH`). An `error`
-  says the property list could not be read, with its `stamp` (size and time). Each `program`
-  and `script` has a `signature`, which Vigil checked with `codesign`; its `status` is one of:
+  says the property list could not be read, with its `stamp` (size and time). The `program`
+  and each of the `scripts` have a `signature`, which Vigil checked with `codesign`; its
+  `status` is one of:
   - `apple`: signed by Apple.
   - `apple_issued`: signed with a certificate Apple issued, with its `authority` and its
     `team`, and its `certificate`: `developer_id` (software shipped outside the App Store,
@@ -120,9 +122,9 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     System Settings or Recovery, with `commands` empty, since each needs an administrator.
   - A launch item that looks unsafe: `{"item": "<path from mac/persistence.jsonl>"}`, one
     issue per item. Report an item when any of these holds:
-    - its program or script is `missing`, `invalid`, `unsigned`, `ad_hoc`, `other_issuer`,
-      `unreadable`, or `apple_issued` with an `other` certificate, and the evidence does not
-      show it is the user's own tool;
+    - its program or one of its scripts is `missing`, `invalid`, `unsigned`, `ad_hoc`,
+      `other_issuer`, `unreadable`, or `apple_issued` with an `other` certificate, and the
+      evidence does not show it is the user's own tool;
     - it runs code on its command line: an interpreter with inline code (`sh -c`, `bash -lc`,
       `osascript -e`, `python3 -c`, `perl -e`), a download (`curl`, `wget`) or anything piped
       to a shell, or a script Vigil did not check because it is not a plain path argument.
