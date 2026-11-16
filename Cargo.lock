@@ -4863,6 +4863,7 @@ dependencies = [
  "flate2",
  "jiff",
  "libc",
+ "plist",
  "proptest",
  "serde",
  "serde_json",

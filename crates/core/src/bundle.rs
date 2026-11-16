@@ -54,11 +54,13 @@ pub(crate) struct Contents<'a> {
     pub(crate) files: &'a [(String, String)],
     /// The setting keys an issue may name.
     pub(crate) settings: &'a [String],
+    /// The launch items an issue may name, by path, each with the identity of what it runs.
+    pub(crate) items: &'a BTreeMap<String, String>,
 }
 
 /// The folder of a bundle that holds a target's own files, so they cannot replace the
 /// bundle's fixed files (`PROMPT.md`, `inventory.jsonl`, ...).
-const TARGET_FILES: [&str; 2] = ["github", "server"];
+const TARGET_FILES: [&str; 3] = ["github", "mac", "server"];
 
 /// Writes the bundle into `dir` (created if needed) and returns what findings may refer to.
 ///
@@ -75,6 +77,7 @@ pub(crate) fn write(
         entries,
         files,
         settings,
+        items,
     } = *contents;
     let io_err = |path: &Path| {
         let path = path.to_owned();
@@ -158,6 +161,7 @@ pub(crate) fn write(
     write_target_files(dir, files)?;
     known.files = files.iter().map(|(name, _)| name.clone()).collect();
     known.settings = settings.iter().cloned().collect();
+    known.items = items.clone();
     Ok(known)
 }
 
@@ -381,8 +385,11 @@ mod tests {
             entries,
             files: &[],
             settings: &[],
+            items: &NO_ITEMS,
         }
     }
+
+    static NO_ITEMS: BTreeMap<String, String> = BTreeMap::new();
 
     fn advisory(source: Source, id: &str, aliases: &[&str], record: &Value) -> Advisory {
         Advisory {

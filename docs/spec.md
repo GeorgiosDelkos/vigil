@@ -26,6 +26,7 @@ and the user can approve a fix the agent then performs.
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
 | Agent permissions | Sweeps restricted: read anything but credential paths, write only `findings.json`, no shell (Codex: inside its sandbox), and no network path out (decided 2026-11-05, network and credentials 2026-11-12). Fixes get full access, only after the user confirms (decided 2026-11-05) |
 | Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
+| Mac host checks | Toward Objective-See's KnockKnock and Dylib Hijack Scanner (decided 2026-11-16): the app reads security settings and persistence items and their code signatures, the agent reports risky ones as issues with a `setting` or `item` subject; Vigil may ask for Full Disk Access for the locations that need it (see "Mac host checks") |
 | GitHub | Explicit repo list added on demand; deps, Dependabot/code/secret alerts, Actions workflows, account/org settings; auth via `gh` login |
 | Servers | App runs a fixed read-only script over SSH, agent reads the result (changed 2026-11-06, see "Servers"); declared as `~/.ssh/config` alias or host/user/port/key fields |
 | Fix | Agent performs it per target; plan shown first, user confirms each fix |
@@ -354,6 +355,53 @@ Known gaps, accepted for now:
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the `PATH` of the user's shell started as an interactive login shell (`$SHELL -ilc`),
   as the agent adapters do.
+
+### Mac host checks (decided 2026-11-16)
+
+The goal is to come as close as a sweep can to Objective-See's scanners
+(<https://objective-see.org/tools.html>): KnockKnock (what persists), Dylib Hijack Scanner,
+KextViewr and ReiKey. Its real-time monitors (BlockBlock, LuLu, OverSight, RansomWhere?) are
+out of reach: they need a resident process and an Endpoint Security or Network Extension
+entitlement, which needs an Apple Developer account. Between sweeps, the lifecycle's "new since
+the last sweep" stands in for BlockBlock's alerts, late by one sweep.
+
+The app collects and the agent judges, as for servers. The sweep's agent runs no commands, so
+the app reads code signatures itself (`inventory/host.rs`) and writes two bundle files:
+
+| File | What it holds | An issue names it as |
+|---|---|---|
+| `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
+| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs, run-at-load, keep-alive, user, environment variable names (values only for `DYLD_`), and the signature of the program and script | `{"item": "<path of the property list>"}` |
+
+- Tools run by absolute path (`/usr/bin/codesign`): they decide whether a program is
+  trusted, and a shim earlier on the login shell's `PATH` could answer for them.
+- A signature is `apple`, `apple_issued` (Developer ID, App Store), `other_issuer`, `ad_hoc`,
+  `unsigned` (with its SHA-256), `invalid`, `missing` or `unreadable`. Apple and Apple-issued
+  are told apart by requirement checks (`codesign --verify -R="anchor apple"`, then
+  `"anchor apple generic"`): the certificate names `codesign -d` prints are the signer's
+  claim, and a self-signed certificate can carry any of them. `spctl --assess` is not used,
+  since it rejects every bare executable as "not an app".
+- An item's key is its path plus the identity of what it runs: the team of an Apple-issued
+  certificate, otherwise the content hash. A dismissed item comes back when its program is
+  replaced by someone else's or an unsigned script changes, and stays dismissed across a
+  signed update from the same team.
+- An item's fix is manual: validation refuses commands for it, since removing a launch item
+  can stop what the Mac needs and a fix runs with full access.
+- A folder that cannot be listed for lack of permission is a note, as elsewhere in the
+  inventory; any other failure marks `posture` or `launch_items` unchecked.
+
+Accepted gaps, in the order planned:
+
+- Issues are not carried over when their source fails (`lifecycle::carried_over` carries
+  findings only), so a failed `launch_items` read shows the target as not clear but drops last
+  sweep's item issues from the report. GitHub and server issues have the same gap.
+- Login items (Background Task Management), which need Full Disk Access; the owner chose to
+  ask for it when that check lands.
+- Applications in `/Applications` outside Homebrew, for both CVE matching and the dylib scan.
+- Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
+  programs without library validation.
+- Kernel and system extensions, keyboard event taps, browser extensions, cron, periodic
+  scripts, shell startup files, and whether a root daemon's program is writable by the user.
 
 ### GitHub repositories (decided 2026-11-06)
 

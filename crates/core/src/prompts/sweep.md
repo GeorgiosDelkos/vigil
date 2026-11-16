@@ -18,6 +18,27 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 - `records/<source>-<id>.json` (`osv-GHSA-...json`, `nvd-CVE-...json`): the full advisory.
   Open it when the index line is not enough to decide.
 - `findings.schema.json`: the exact shape of the file you write.
+- `mac/settings.json`: this Mac's protections, each as the line its tool printed:
+  `system_integrity_protection`, `gatekeeper`, `filevault` and `firewall`. A key that is
+  missing could not be read.
+- `mac/persistence.jsonl`: every launch agent and daemon outside `/System`, one per line. Each
+  has the property list's `path`, its `kind` (`launch_daemon` runs as root unless it names a
+  `user_name`, `launch_agent` runs for every user, `user_launch_agent` for this user), its
+  `label`, the `program` launchd starts and its `arguments`, the `script` an interpreter runs
+  when its first argument is a file, `run_at_load`, `keep_alive`, `disabled`, and the
+  `environment` it sets (names only, with values for `DYLD_` variables). An `error` says the
+  property list could not be read. Each `program` and `script` has a `signature`, which Vigil
+  checked with `codesign`; its `status` is one of:
+  - `apple`: signed by Apple.
+  - `apple_issued`: signed with a certificate Apple issued (Developer ID, App Store), with
+    its `authority` and `team`.
+  - `other_issuer`: signed with a certificate Apple did not issue. Its names are the signer's
+    own claim.
+  - `ad_hoc`: signed with no identity, as every locally built arm64 program is.
+  - `unsigned`: not signed, with its `sha256`.
+  - `invalid`: the signature does not verify, so the file changed after it was signed.
+  - `missing`: no file is there, so whoever can write that path decides what runs.
+  - `unreadable`: Vigil could not read it, with the `detail`.
 
 ## Version matches
 
@@ -88,9 +109,30 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   (`nvm alias default 22.23.4`, `fnm default 22.23.4`, `asdf set -u nodejs 22.23.4`,
   `pyenv global 3.13.1`, `volta install node@22.23.4`). Switching the default alone is not a
   fix: the vulnerable version stays installed and one command away.
-- `issues` is for settings and files of GitHub repositories; on this Mac it is always `[]`.
+- `issues` are risks no advisory names, in this Mac's protections and launch items:
+  - A protection that is off: `{"setting": "<key of mac/settings.json>"}`. System Integrity
+    Protection, Gatekeeper or FileVault off is high; the firewall off is low on a laptop that
+    joins untrusted networks, and worth mentioning at most otherwise. The fix is steps in
+    System Settings or Recovery, with `commands` empty, since each needs an administrator.
+  - A launch item that looks unsafe: `{"item": "<path from mac/persistence.jsonl>"}`, one
+    issue per item. Report an item when its program or script is `missing`, `invalid`,
+    `unsigned`, `ad_hoc` or `other_issuer` and the evidence does not show it is the user's own
+    tool; when a `launch_daemon` (root) runs a file this user or any user could replace, such
+    as one under `/Users`, `/tmp` or `/Users/Shared`; when it sets a `DYLD_` variable; when it
+    runs from a hidden folder or a temporary one; or when its label, path and program do not
+    belong together (a label that imitates Apple's `com.apple.` for a program that is not
+    Apple's). A `missing` program is a stale item at best and a slot for anyone who can create
+    that file at worst. Leave out items whose program is `apple` or `apple_issued` and whose
+    path and label match it, unless something else above holds. Severity: high for a root
+    daemon that runs a replaceable or unverified file, or a `DYLD_` variable; medium for an
+    unverified agent that runs at load; low for a stale item whose program is missing under a
+    folder only this user can write. Say in `evidence` which fields you read. The fix is
+    manual: `commands` stays empty, and `steps` say how to check the item and remove it
+    (`launchctl bootout` with the domain and label, then move the property list to the Trash),
+    so the user decides.
+  - Never an issue for a file of the bundle on this Mac: use `setting` or `item`.
 
-If nothing is affected, write `{"findings": [], "issues": []}`.
+If nothing is affected and nothing is risky, write `{"findings": [], "issues": []}`.
 
 ## Untrusted content
 

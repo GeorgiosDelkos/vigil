@@ -59,6 +59,8 @@ pub(crate) struct Output {
     /// Whether it exited with status 0.
     pub(crate) success: bool,
     pub(crate) stdout: String,
+    /// All of stderr, decoded lossily, for tools that answer there (`codesign -d`).
+    pub(crate) stderr: String,
     /// The exit status and the start of stderr, for an error message.
     pub(crate) detail: String,
     /// The command line, for an error message.
@@ -101,6 +103,7 @@ pub(crate) fn run_any_status(
     Ok(Some(Output {
         success: raw.success,
         stdout,
+        stderr: raw.stderr,
         detail: raw.detail,
         command: raw.command,
     }))
@@ -127,6 +130,7 @@ pub(crate) fn run_with_input(
     Ok(Some(Output {
         success: raw.success,
         stdout: String::from_utf8_lossy(&raw.stdout).into_owned(),
+        stderr: raw.stderr,
         detail: raw.detail,
         command: raw.command,
     }))
@@ -136,6 +140,7 @@ pub(crate) fn run_with_input(
 struct RawOutput {
     success: bool,
     stdout: Vec<u8>,
+    stderr: String,
     detail: String,
     command: String,
 }
@@ -216,14 +221,13 @@ fn run_raw(
         return Err(InventoryError::Spawn { command, source });
     }
 
-    let stderr: String = String::from_utf8_lossy(&stderr)
-        .chars()
-        .take(STDERR_LIMIT)
-        .collect();
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+    let start: String = stderr.chars().take(STDERR_LIMIT).collect();
     Ok(Some(RawOutput {
         success: status.success(),
         stdout,
-        detail: format!("{status}: {}", stderr.trim()),
+        detail: format!("{status}: {}", start.trim()),
+        stderr,
         command,
     }))
 }

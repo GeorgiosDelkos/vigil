@@ -12,6 +12,7 @@
 
 pub(crate) mod command;
 mod homebrew;
+pub(crate) mod host;
 pub(crate) mod lockfiles;
 mod toolchains;
 mod version_managers;
@@ -386,6 +387,10 @@ pub enum InventorySource {
     OsPackages,
     /// A GitHub repository's dependency graph.
     DependencyGraph,
+    /// This Mac's security settings: SIP, Gatekeeper, `FileVault`, the firewall.
+    Posture,
+    /// This Mac's launch agents and daemons, and the signatures of what they run.
+    LaunchItems,
     /// A kind a later build saved, read back by this one: the report then still reads, as not
     /// fully checked, instead of failing to parse after a downgrade. Never collected.
     #[serde(other)]
@@ -419,7 +424,8 @@ impl InventorySource {
             }
             Self::OsPackages => matches!(place, FoundIn::OsPackage { .. }),
             Self::DependencyGraph => matches!(place, FoundIn::DependencyGraph { .. }),
-            Self::Unknown => false,
+            // The host checks give issues, not components.
+            Self::Posture | Self::LaunchItems | Self::Unknown => false,
         }
     }
 
@@ -447,6 +453,8 @@ impl std::fmt::Display for InventorySource {
             Self::LockfileWalk { root } => write!(f, "lockfiles under {}", root.display()),
             Self::OsPackages => f.write_str("OS packages"),
             Self::DependencyGraph => f.write_str("the dependency graph"),
+            Self::Posture => f.write_str("macOS security settings"),
+            Self::LaunchItems => f.write_str("launch agents and daemons"),
             Self::Unknown => f.write_str("a source this version does not know"),
         }
     }
@@ -1060,6 +1068,16 @@ mod tests {
                 InventorySource::DependencyGraph,
                 "the dependency graph",
                 "dependency_graph",
+            ),
+            (
+                InventorySource::Posture,
+                "macOS security settings",
+                "posture",
+            ),
+            (
+                InventorySource::LaunchItems,
+                "launch agents and daemons",
+                "launch_items",
             ),
         ];
         for (source, text, kind) in names {

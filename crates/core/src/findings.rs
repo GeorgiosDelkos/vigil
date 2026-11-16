@@ -73,14 +73,18 @@ pub struct Issue {
     pub fix: Fix,
 }
 
-/// What an [`Issue`] is about: a key of the bundle's `github/settings.json`, or a bundle file.
+/// What an [`Issue`] is about: a key of the bundle's `github/settings.json` or
+/// `mac/settings.json`, a bundle file, or one of this Mac's launch items.
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Subject {
-    /// A setting, by its key in `github/settings.json`.
+    /// A setting, by its key in `github/settings.json` or `mac/settings.json`.
     Setting(String),
     /// A file, by its path in the bundle (`github/workflows/ci.yml`).
     File(String),
+    /// A launch agent or daemon, by its property list's path on this Mac
+    /// (`/Library/LaunchDaemons/com.example.plist`), as `mac/persistence.jsonl` lists it.
+    Item(String),
 }
 
 impl fmt::Display for Subject {
@@ -88,6 +92,7 @@ impl fmt::Display for Subject {
         match self {
             Self::Setting(key) => write!(f, "setting {key}"),
             Self::File(path) => write!(f, "file {path}"),
+            Self::Item(path) => write!(f, "launch item {path}"),
         }
     }
 }
@@ -174,6 +179,9 @@ pub(crate) struct Known {
     pub(crate) settings: BTreeSet<String>,
     /// The bundle files an issue may name, by path in the bundle.
     pub(crate) files: BTreeSet<String>,
+    /// The launch items an issue may name, by path on this Mac, each with the identity of what
+    /// it runs, which goes into the issue's key.
+    pub(crate) items: BTreeMap<String, String>,
 }
 
 /// A `findings.json` that passed validation.
@@ -289,12 +297,22 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Verdict, Vec<String>
         let known_subject = match &issue.subject {
             Subject::Setting(key) => known.settings.contains(key),
             Subject::File(path) => known.files.contains(path),
+            Subject::Item(path) => known.items.contains_key(path),
         };
         if !known_subject {
             problems.push(format!(
                 "{at}.subject: {} is not in this bundle (settings are the keys of \
-                 github/settings.json, files are bundle paths such as github/workflows/ci.yml)",
+                 github/settings.json or mac/settings.json, files are bundle paths such as \
+                 github/workflows/ci.yml, items are the paths in mac/persistence.jsonl)",
                 plain_subject(&issue.subject)
+            ));
+        }
+        // Removing a launch item can stop what the Mac needs, and a fix runs with full access
+        // once confirmed, so the user removes one by hand after reading the steps.
+        if matches!(issue.subject, Subject::Item(_)) && !issue.fix.commands.is_empty() {
+            problems.push(format!(
+                "{at}.fix.commands: a launch item is removed by hand; leave commands empty and \
+                 say how in steps"
             ));
         }
         check_text(
@@ -327,6 +345,7 @@ fn plain_subject(subject: &Subject) -> String {
     match subject {
         Subject::Setting(key) => format!("setting {key:?}"),
         Subject::File(path) => format!("file {path:?}"),
+        Subject::Item(path) => format!("launch item {path:?}"),
     }
 }
 
@@ -627,6 +646,11 @@ mod tests {
             exploited: kev.map(|ids| ids.iter().map(|id| (*id).to_owned()).collect()),
             settings: ["default_branch_protection".to_owned()].into(),
             files: ["github/workflows/ci.yml".to_owned()].into(),
+            items: [(
+                "/Library/LaunchDaemons/x.plist".to_owned(),
+                "missing none".to_owned(),
+            )]
+            .into(),
         }
     }
 
@@ -691,12 +715,37 @@ mod tests {
             problems,
             [
                 "issues[0].subject: setting \"made_up\" is not in this bundle (settings are the \
-                 keys of github/settings.json, files are bundle paths such as \
-                 github/workflows/ci.yml)",
+                 keys of github/settings.json or mac/settings.json, files are bundle paths such \
+                 as github/workflows/ci.yml, items are the paths in mac/persistence.jsonl)",
                 "issues[1].subject: file \"../etc/passwd\" is not in this bundle (settings are \
-                 the keys of github/settings.json, files are bundle paths such as \
-                 github/workflows/ci.yml)",
+                 the keys of github/settings.json or mac/settings.json, files are bundle paths \
+                 such as github/workflows/ci.yml, items are the paths in \
+                 mac/persistence.jsonl)",
                 "issues[1].explanation has control or invisible characters",
+            ]
+        );
+
+        // A launch item is named by its path, only one the bundle lists, and fixed by hand.
+        let item = json!({"item": "/Library/LaunchDaemons/x.plist"});
+        let text = json!({"findings": [], "issues": [issue(&item)]});
+        let verdict = validate(&text.to_string(), &known).unwrap();
+        assert!(matches!(
+            &verdict.issues[0].subject,
+            Subject::Item(path) if path == "/Library/LaunchDaemons/x.plist"
+        ));
+        let mut removed = issue(&item);
+        removed["fix"]["commands"] = json!(["launchctl bootout system/x"]);
+        let other = json!({"item": "/Library/LaunchDaemons/y.plist"});
+        let text = json!({"findings": [], "issues": [removed, issue(&other)]});
+        assert_eq!(
+            validate(&text.to_string(), &known).unwrap_err(),
+            [
+                "issues[0].fix.commands: a launch item is removed by hand; leave commands empty \
+                 and say how in steps",
+                "issues[1].subject: launch item \"/Library/LaunchDaemons/y.plist\" is not in this \
+                 bundle (settings are the keys of github/settings.json or mac/settings.json, \
+                 files are bundle paths such as github/workflows/ci.yml, items are the paths in \
+                 mac/persistence.jsonl)",
             ]
         );
 
