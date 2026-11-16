@@ -15,12 +15,12 @@
 //!
 //! An item's issue is keyed by the item's path and what it runs ([`Item::identity`]): the
 //! program's and the script's paths and identities ([`Signature::identity`]), the arguments,
-//! the environment, the user, and whether it runs at load or is disabled. A file's identity is its signing team
-//! when Apple issued a Developer ID or App Store certificate to that team, and its content
-//! otherwise. A dismissed item whose command line changes, or whose program is replaced by one
-//! from someone else, is then a new issue, while an update from the same developer keeps the
-//! dismissal. The identity is part of every item issue's key, so changing its shape clears
-//! every item dismissal once.
+//! the environment, the user, and whether it runs at load or is disabled. A file's identity is
+//! its signing team when Apple issued a Developer ID or App Store certificate to that team, and
+//! its content otherwise. A dismissed item whose command line changes, or whose program is
+//! replaced by one from someone else, is then a new issue, while an update from the same
+//! developer keeps the dismissal. The identity is part of every item issue's key, so changing
+//! its shape clears every item dismissal once.
 //!
 //! Not read yet: login items (Background Task Management, readable only with Full Disk
 //! Access), cron, kernel and system extensions, and the other persistence locations.
