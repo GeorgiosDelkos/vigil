@@ -230,8 +230,9 @@ struct Item {
     /// shell), and the sweep's agent cannot send anything off this Mac.
     arguments: Vec<String>,
     /// The files an interpreter in [`INTERPRETERS`] runs besides itself, in order: its first
-    /// argument that is an absolute path, unless inline code comes first, and through `env`
-    /// the program it starts and that program's script (see [`scripts`]).
+    /// argument that is an absolute path, unless inline code comes first, and, through `env`,
+    /// an interpreter given by absolute path and that interpreter's script (see [`scripts`]).
+    /// A bare name `env` finds on `PATH` is not resolved or checked.
     scripts: Vec<Program>,
     run_at_load: bool,
     /// Whether `KeepAlive` is set: `true`, or conditions under which launchd restarts it.
@@ -276,18 +277,10 @@ impl Item {
     /// What the item runs, as one key part (see the module docs). JSON, so no two different
     /// items can join into the same text.
     fn identity(&self) -> String {
-        let file = |program: &Option<Program>| {
-            program
-                .as_ref()
-                .map(|p| json!([p.path, p.signature.identity()]))
-        };
+        let file = |p: &Program| json!([p.path, p.signature.identity()]);
         json!({
-            "program": file(&self.program),
-            "scripts": self
-                .scripts
-                .iter()
-                .map(|p| json!([p.path, p.signature.identity()]))
-                .collect::<Vec<_>>(),
+            "program": self.program.as_ref().map(file),
+            "scripts": self.scripts.iter().map(file).collect::<Vec<_>>(),
             "arguments": self.arguments,
             "environment": self.environment,
             "user_name": self.user_name,
@@ -475,8 +468,11 @@ fn resolve(name: &str, working_directory: Option<&str>) -> PathBuf {
 /// Only `env` runs its argument as a program; every other interpreter runs it as a script,
 /// whatever its name (`sh /x/sh` runs `/x/sh` as a shell script). So only after `env` does an
 /// interpreter found there count as a program whose own script is looked for too, and both are
-/// listed (`env /x/python3 /y.py` gives `/x/python3` and `/y.py`). Each step reads a shorter
-/// list, so it ends.
+/// listed (`env /x/python3 /y.py` gives `/x/python3` and `/y.py`). A bare name `env` finds on
+/// `PATH` (`env python3 /y.py`) is not resolved, so only `/y.py` is checked. The chain starts
+/// at any interpreter-named path after `env`, even one a bare-named interpreter runs as its
+/// script (`env python3 /x/python3 /y.py`): that checks one file too many, never one too few.
+/// Each step reads a shorter list, so it ends.
 fn scripts(program: &Path, arguments: &[String]) -> Vec<PathBuf> {
     if !is_interpreter(program) {
         return Vec::new();
@@ -1078,6 +1074,11 @@ TeamIdentifier=not set
         );
         // Any other interpreter runs a file named like one as a script, so it is checked.
         assert_eq!(ran(&["/bin/sh", "/opt/x/sh"]), just(Path::new("/opt/x/sh")));
+        // Only `env` chains: `sh` runs `/opt/x/python3` as a shell script, passing it `file`.
+        assert_eq!(
+            ran(&["/bin/sh", "/opt/x/python3", file]),
+            just(Path::new("/opt/x/python3"))
+        );
         assert_eq!(ran(&["/bin/sh", "-c", file]), Vec::<PathBuf>::new());
         assert_eq!(ran(&["/bin/bash", "-lc", file]), Vec::<PathBuf>::new());
         assert_eq!(

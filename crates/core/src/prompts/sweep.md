@@ -25,8 +25,8 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   has the property list's `path`, its `kind` (`launch_daemon` runs as root unless it names a
   `user_name`, `launch_agent` runs for every user, `user_launch_agent` for this user), its
   `label`, the `program` launchd starts and its `arguments`, the `scripts` an interpreter runs
-  (its first argument that is a file path, unless inline code such as `-c` comes first, and
-  through `env` the program it starts and that program's script),
+  (its first argument that is a file path, unless inline code such as `-c` comes first, and,
+  through `env`, an interpreter given by its full path and that interpreter's script),
   `run_at_load`, `keep_alive`, `disabled` (the property list's own key only), and the
   `environment` it sets (names only, with values for `DYLD_` variables and `PATH`). An `error`
   says the property list could not be read, with its `stamp` (size and time). The `program`
@@ -129,6 +129,8 @@ Write `findings.json` in this folder, following `findings.schema.json`:
       `osascript -e`, `python3 -c`, `perl -e`), a download (`curl`, `wget`) or anything piped
       to a shell, or a script Vigil did not check because it is not a plain path argument.
       The program being `apple` does not make this safe: `/bin/sh` runs whatever it is told;
+    - it starts an interpreter by bare name through `env` (`env python3 ...`): Vigil did not
+      check which file that is, so judge it from `environment.PATH`;
     - a `launch_daemon` (root) runs a file this user or any user could replace, such as one
       under `/Users`, `/tmp` or `/Users/Shared`;
     - it sets a `DYLD_` variable, or a `PATH` that puts a writable folder first;
