@@ -384,6 +384,11 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
   signer's claim, and a self-signed certificate can carry any of them. `other` covers Apple
   Development certificates, which every Apple ID gets for free. `spctl --assess` is not
   used, since it rejects every bare executable as "not an app".
+- Every `codesign --verify` passes `--ignore-resources`: for a bundle's main executable it
+  otherwise hashes the whole bundle (Keynote: 1.43 s against 0.16 s), and the end-to-end
+  tests' Mac sweeps then ran past the mutation job's time limit on a GitHub runner. KnockKnock
+  validates the same way, with `kSecCSDoNotValidateResources`
+  ([Results/File.m](https://github.com/objective-see/KnockKnock/blob/914f2c0c2d3f058f40b6d98ed303e8a1a6715eb3/Results/File.m#L44)).
 - An item's key is its path plus what it runs: the program's and script's paths and
   identities, the arguments, the environment, the user and run-at-load. A file's identity is
   its team for a Developer ID or App Store certificate, otherwise its content (CDHash or
@@ -407,14 +412,15 @@ Accepted gaps, in the order planned:
   costs a 60-second `shasum` and marks `launch_items` unchecked.
 - A program behind a folder this user may not enter cannot be `stat`ed, so its identity is the
   error alone, and a replacement there is not seen until the error changes.
-- The four to six `codesign` runs per file are not atomic: a file swapped between them can
+- The `codesign` runs per file (up to six) are not atomic: a file swapped between them can
   be reported as another signer's. A one-time scan of a path the attacker writes can be
   dodged anyway.
 - Login items (Background Task Management), which need Full Disk Access; the owner chose to
   ask for it when that check lands.
 - Applications in `/Applications` outside Homebrew, for both CVE matching and the dylib scan.
 - Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
-  programs without library validation.
+  programs without library validation. Until then a changed file inside a program's bundle,
+  such as a framework it loads, is not seen, since signatures skip the bundle's resources.
 - Kernel and system extensions, keyboard event taps, browser extensions, cron, periodic
   scripts, shell startup files, and whether a root daemon's program is writable by the user.
 

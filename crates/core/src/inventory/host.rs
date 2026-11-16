@@ -676,7 +676,17 @@ fn signature(path: &Path, cancel: &Cancel) -> Result<Signature, InventoryError> 
         return Ok(unreadable("codesign -d printed no CDHash".to_owned()));
     };
 
-    let verified = tool(CODESIGN, &["--verify", "--strict", file], cancel)?;
+    // `--ignore-resources`: for a bundle's main executable, `--verify` otherwise hashes every
+    // resource of the bundle, which for Keynote took 1.43 s against 0.16 s (macOS 27.2), and a
+    // sweep checks every launch item's program again. KnockKnock skips them the same way
+    // (kSecCSDoNotValidateResources; docs/spec.md, Mac host checks, links its source).
+    // Accepted: a changed file elsewhere in the bundle, such as a framework the program loads,
+    // is not seen; that is for the dylib check to find.
+    let verified = tool(
+        CODESIGN,
+        &["--verify", "--strict", "--ignore-resources", file],
+        cancel,
+    )?;
     if !verified.success {
         let detail = first_line(&verified.stderr);
         return Ok(Signature::Invalid { detail, cdhash });
@@ -728,13 +738,8 @@ fn apple_certificate(
     Ok(None)
 }
 
-/// Whether the signature of `file`, already verified whole by `signature`, satisfies
-/// `requirement`.
-///
-/// `--ignore-resources`: for a bundle's main executable, `--verify` also hashes every resource
-/// of the bundle, which for Keynote took 1.43 s against 0.16 s without (macOS 27.2), and one
-/// file takes up to four of these checks. A requirement is about who signed the code, which the
-/// resources do not change, and `--verify --strict` in `signature` has checked them once.
+/// Whether the signature of `file` satisfies `requirement`, leaving out the bundle's resources
+/// as `signature` does.
 fn satisfies(file: &str, requirement: &str, cancel: &Cancel) -> Result<bool, InventoryError> {
     let requirement = format!("-R={requirement}");
     let args = ["--verify", "--ignore-resources", &requirement, file];
