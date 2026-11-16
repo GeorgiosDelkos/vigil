@@ -684,7 +684,7 @@ fn signature(path: &Path, cancel: &Cancel) -> Result<Signature, InventoryError> 
     if shown.adhoc {
         return Ok(Signature::AdHoc { cdhash });
     }
-    if tool(CODESIGN, &["--verify", "-R=anchor apple", file], cancel)?.success {
+    if satisfies(file, "anchor apple", cancel)? {
         return Ok(Signature::Apple);
     }
     let Shown {
@@ -720,12 +720,25 @@ fn apple_certificate(
         Certificate::AppStore,
         Certificate::Other,
     ] {
-        let requirement = format!("-R=anchor apple generic{}{to_team}", certificate.clause());
-        if tool(CODESIGN, &["--verify", &requirement, file], cancel)?.success {
+        let requirement = format!("anchor apple generic{}{to_team}", certificate.clause());
+        if satisfies(file, &requirement, cancel)? {
             return Ok(Some(certificate));
         }
     }
     Ok(None)
+}
+
+/// Whether the signature of `file`, already verified whole by `signature`, satisfies
+/// `requirement`.
+///
+/// `--ignore-resources`: for a bundle's main executable, `--verify` also hashes every resource
+/// of the bundle, which for Keynote took 1.43 s against 0.16 s without (macOS 27.2), and one
+/// file takes up to four of these checks. A requirement is about who signed the code, which the
+/// resources do not change, and `--verify --strict` in `signature` has checked them once.
+fn satisfies(file: &str, requirement: &str, cancel: &Cancel) -> Result<bool, InventoryError> {
+    let requirement = format!("-R={requirement}");
+    let args = ["--verify", "--ignore-resources", &requirement, file];
+    Ok(tool(CODESIGN, &args, cancel)?.success)
 }
 
 /// The requirement clause that binds the leaf certificate to the claimed `team`: empty when
