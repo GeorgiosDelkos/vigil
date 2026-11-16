@@ -130,7 +130,8 @@ Write `findings.json` in this folder, following `findings.schema.json`:
       to a shell, or a script Vigil did not check because it is not a plain path argument.
       The program being `apple` does not make this safe: `/bin/sh` runs whatever it is told;
     - it starts an interpreter by bare name through `env` (`env python3 ...`): Vigil did not
-      check which file that is, so judge it from `environment.PATH`;
+      check which file that is, so judge it from `environment.PATH` (launchd's default
+      `/usr/bin:/bin:/usr/sbin:/sbin` when it sets none);
     - a `launch_daemon` (root) runs a file this user or any user could replace, such as one
       under `/Users`, `/tmp` or `/Users/Shared`;
     - it sets a `DYLD_` variable, or a `PATH` that puts a writable folder first;
