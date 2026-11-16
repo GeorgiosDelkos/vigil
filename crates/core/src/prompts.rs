@@ -97,6 +97,7 @@ impl Prompt {
                 0xfee7_d752_b460_89ca,
                 0xb55a_2c79_1904_b9d2,
                 0xb41b_6b20_a677_ad29,
+                0xa8ce_6a81_a65f_ce4a,
             ],
             Self::GitHub => &[
                 0x61c0_4d78_7cf2_cfd0,

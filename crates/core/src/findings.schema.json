@@ -48,7 +48,7 @@
       }
     },
     "issues": {
-      "description": "Risky settings and files of a GitHub repository; always empty for a Mac.",
+      "description": "Risks no advisory names: settings and files of a GitHub repository, exposure on a server, or this Mac's settings and launch items.",
       "type": "array",
       "items": {
         "type": "object",

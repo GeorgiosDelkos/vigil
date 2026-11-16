@@ -48,6 +48,7 @@ use crate::findings;
 use crate::findings::Finding;
 use crate::findings::Fix;
 use crate::findings::Issue;
+use crate::findings::IssueScope;
 use crate::findings::Known;
 use crate::findings::Severity;
 use crate::findings::Subject;
@@ -578,6 +579,8 @@ struct Collected {
     settings: Vec<String>,
     /// The launch items an issue may name, by path, with the identity of what each runs.
     items: BTreeMap<String, String>,
+    /// What its issues may name and carry.
+    scope: IssueScope,
     problems: Vec<String>,
     /// The inventory sources that failed, for the report's `unchecked`.
     failed: BTreeSet<InventorySource>,
@@ -601,6 +604,7 @@ fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Collected {
         files: host.files,
         settings: host.settings,
         items: host.items,
+        scope: IssueScope::Host,
         problems,
         failed: inventory.failed,
     }
@@ -639,6 +643,7 @@ impl Shared<'_> {
             files: collected.files,
             settings: collected.settings,
             items: BTreeMap::new(),
+            scope: IssueScope::Bundle,
             problems: collected.problems,
             failed: collected.failed,
         };
@@ -672,6 +677,7 @@ impl Shared<'_> {
             files: collected.files,
             settings: Vec::new(),
             items: BTreeMap::new(),
+            scope: IssueScope::Bundle,
             problems: collected.problems,
             failed: collected.failed,
         };
@@ -746,6 +752,7 @@ impl Shared<'_> {
             files: &collected.files,
             settings: &collected.settings,
             items: &collected.items,
+            scope: collected.scope,
         };
         let known = bundle::write(&dir.join("bundle"), &contents, self.sources.kev)?;
 
@@ -2770,6 +2777,7 @@ mod tests {
                 files: Vec::new(),
                 settings: Vec::new(),
                 items: BTreeMap::new(),
+                scope: IssueScope::Host,
                 problems: Vec::new(),
                 failed: BTreeSet::new(),
             };
@@ -2865,6 +2873,7 @@ mod tests {
                 files: Vec::new(),
                 settings: Vec::new(),
                 items: BTreeMap::new(),
+                scope: IssueScope::Host,
                 problems: Vec::new(),
                 failed,
             };

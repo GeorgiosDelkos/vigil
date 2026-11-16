@@ -182,6 +182,22 @@ pub(crate) struct Known {
     /// The launch items an issue may name, by path on this Mac, each with the identity of what
     /// it runs, which goes into the issue's key.
     pub(crate) items: BTreeMap<String, String>,
+    /// Whether the target's issues may carry commands.
+    pub(crate) scope: IssueScope,
+}
+
+/// What an issue on a target may name and carry.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum IssueScope {
+    /// A repository or a server: settings and bundle files, fixed by commands the user
+    /// confirms.
+    #[default]
+    Bundle,
+    /// This Mac: settings and launch items, fixed by hand. Its bundle files hold every setting
+    /// and item, so an issue naming one would lump them under one key, and one dismissal would
+    /// hide items added later. Removing a launch item can stop what the Mac needs, and a
+    /// setting needs an administrator, while a fix runs with full access once confirmed.
+    Host,
 }
 
 /// A `findings.json` that passed validation.
@@ -307,12 +323,10 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Verdict, Vec<String>
                 plain_subject(&issue.subject)
             ));
         }
-        // Removing a launch item can stop what the Mac needs, and a fix runs with full access
-        // once confirmed, so the user removes one by hand after reading the steps.
-        if matches!(issue.subject, Subject::Item(_)) && !issue.fix.commands.is_empty() {
+        if known.scope == IssueScope::Host && !issue.fix.commands.is_empty() {
             problems.push(format!(
-                "{at}.fix.commands: a launch item is removed by hand; leave commands empty and \
-                 say how in steps"
+                "{at}.fix.commands: an issue on this Mac is fixed by hand; leave commands empty \
+                 and say how in steps"
             ));
         }
         check_text(
@@ -651,6 +665,8 @@ mod tests {
                 "missing none".to_owned(),
             )]
             .into(),
+
+            scope: IssueScope::Bundle,
         }
     }
 
@@ -737,11 +753,24 @@ mod tests {
         removed["fix"]["commands"] = json!(["launchctl bootout system/x"]);
         let other = json!({"item": "/Library/LaunchDaemons/y.plist"});
         let text = json!({"findings": [], "issues": [removed, issue(&other)]});
+        // A repository's issue may carry commands; any issue on this Mac may not.
+        assert_eq!(validate(&text.to_string(), &known).unwrap_err().len(), 1);
+        let mac = Known {
+            scope: IssueScope::Host,
+            ..self::known(None)
+        };
+        let mut setting = issue(&json!({"setting": "default_branch_protection"}));
+        setting["fix"]["commands"] = json!(["sudo spctl --master-enable"]);
+        let only_setting = json!({"findings": [], "issues": [setting]});
         assert_eq!(
-            validate(&text.to_string(), &known).unwrap_err(),
+            validate(&only_setting.to_string(), &mac).unwrap_err().len(),
+            1
+        );
+        assert_eq!(
+            validate(&text.to_string(), &mac).unwrap_err(),
             [
-                "issues[0].fix.commands: a launch item is removed by hand; leave commands empty \
-                 and say how in steps",
+                "issues[0].fix.commands: an issue on this Mac is fixed by hand; leave commands \
+                 empty and say how in steps",
                 "issues[1].subject: launch item \"/Library/LaunchDaemons/y.plist\" is not in this \
                  bundle (settings are the keys of github/settings.json or mac/settings.json, \
                  files are bundle paths such as github/workflows/ci.yml, items are the paths in \

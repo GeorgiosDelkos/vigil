@@ -19,6 +19,7 @@ use crate::feeds::Advisory;
 use crate::feeds::Kev;
 use crate::feeds::Source;
 use crate::feeds::cache_key;
+use crate::findings::IssueScope;
 use crate::findings::Known;
 use crate::findings::SCHEMA;
 use crate::inventory::Component;
@@ -56,6 +57,8 @@ pub(crate) struct Contents<'a> {
     pub(crate) settings: &'a [String],
     /// The launch items an issue may name, by path, each with the identity of what it runs.
     pub(crate) items: &'a BTreeMap<String, String>,
+    /// What the target's issues may name and carry: on this Mac, no bundle file.
+    pub(crate) scope: IssueScope,
 }
 
 /// The folder of a bundle that holds a target's own files, so they cannot replace the
@@ -78,6 +81,7 @@ pub(crate) fn write(
         files,
         settings,
         items,
+        scope,
     } = *contents;
     let io_err = |path: &Path| {
         let path = path.to_owned();
@@ -159,7 +163,10 @@ pub(crate) fn write(
         fs::write(&path, text).map_err(io_err(&path))?;
     }
     write_target_files(dir, files)?;
-    known.files = files.iter().map(|(name, _)| name.clone()).collect();
+    if scope == IssueScope::Bundle {
+        known.files = files.iter().map(|(name, _)| name.clone()).collect();
+    }
+    known.scope = scope;
     known.settings = settings.iter().cloned().collect();
     known.items = items.clone();
     Ok(known)
@@ -386,6 +393,7 @@ mod tests {
             files: &[],
             settings: &[],
             items: &NO_ITEMS,
+            scope: IssueScope::Bundle,
         }
     }
 
@@ -723,6 +731,16 @@ mod tests {
             .into()
         );
         assert_eq!(known.settings, ["rulesets".to_owned()].into());
+
+        // This Mac's files are written, but an issue names a setting or an item, never them.
+        let mac_files = [("mac/persistence.jsonl".to_owned(), "{}\n".to_owned())];
+        let mut mac = contents("p", &[], &[]);
+        mac.files = &mac_files;
+        mac.scope = IssueScope::Host;
+        let known = write(&tmp.path().join("m"), &mac, None).unwrap();
+        assert!(tmp.path().join("m/mac/persistence.jsonl").is_file());
+        assert!(known.files.is_empty());
+        assert_eq!(known.scope, IssueScope::Host);
 
         for bad in [
             "PROMPT.md",

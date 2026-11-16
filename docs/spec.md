@@ -371,22 +371,29 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 | File | What it holds | An issue names it as |
 |---|---|---|
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
-| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs, run-at-load, keep-alive, user, environment variable names (values only for `DYLD_`), and the signature of the program and script | `{"item": "<path of the property list>"}` |
+| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error` | `{"item": "<path of the property list>"}` |
 
 - Tools run by absolute path (`/usr/bin/codesign`): they decide whether a program is
   trusted, and a shim earlier on the login shell's `PATH` could answer for them.
-- A signature is `apple`, `apple_issued` (Developer ID, App Store), `other_issuer`, `ad_hoc`,
-  `unsigned` (with its SHA-256), `invalid`, `missing` or `unreadable`. Apple and Apple-issued
-  are told apart by requirement checks (`codesign --verify -R="anchor apple"`, then
-  `"anchor apple generic"`): the certificate names `codesign -d` prints are the signer's
-  claim, and a self-signed certificate can carry any of them. `spctl --assess` is not used,
-  since it rejects every bare executable as "not an app".
-- An item's key is its path plus the identity of what it runs: the team of an Apple-issued
-  certificate, otherwise the content hash. A dismissed item comes back when its program is
-  replaced by someone else's or an unsigned script changes, and stays dismissed across a
-  signed update from the same team.
-- An item's fix is manual: validation refuses commands for it, since removing a launch item
-  can stop what the Mac needs and a fix runs with full access.
+- A signature is `apple`, `apple_issued` (with its certificate: `developer_id`, `app_store`
+  or `other`), `other_issuer`, `ad_hoc`, `unsigned` (with its SHA-256), `invalid`, `missing`
+  or `unreadable`. They are told apart by requirement checks (`codesign --verify
+  -R="anchor apple"`, then `"anchor apple generic"` with Apple's Developer ID or App Store
+  marker extension, `1.2.840.113635.100.6.1.13` or `...6.1.9`, and `certificate
+  leaf[subject.OU]` bound to the claimed team): the names `codesign -d` prints are the
+  signer's claim, and a self-signed certificate can carry any of them. `other` covers Apple
+  Development certificates, which every Apple ID gets for free. `spctl --assess` is not
+  used, since it rejects every bare executable as "not an app".
+- An item's key is its path plus what it runs: the program's and script's paths and
+  identities, the arguments, the environment, the user and run-at-load. A file's identity is
+  its team for a Developer ID or App Store certificate, otherwise its content (CDHash or
+  SHA-256, or size and modification time when it cannot be read). A dismissed item comes back
+  when any of that changes, and stays dismissed across a signed update from the same team.
+  The identity's shape is part of the key: changing it clears every item dismissal once.
+- Every issue on this Mac is fixed by hand: validation refuses commands for it, since
+  removing a launch item can stop what the Mac needs, a setting needs an administrator, and a
+  fix runs with full access. An issue may not name a `mac/` bundle file, which would lump
+  items under one key that a single dismissal hides.
 - A folder that cannot be listed for lack of permission is a note, as elsewhere in the
   inventory; any other failure marks `posture` or `launch_items` unchecked.
 
@@ -395,6 +402,12 @@ Accepted gaps, in the order planned:
 - Issues are not carried over when their source fails (`lifecycle::carried_over` carries
   findings only), so a failed `launch_items` read shows the target as not clear but drops last
   sweep's item issues from the report. GitHub and server issues have the same gap.
+- Each file is `stat`ed with no time limit, so a program on a network share that does not
+  answer blocks the sweep, as a version manager's folder there does. A huge unsigned file
+  costs a 60-second `shasum` and marks `launch_items` unchecked.
+- The four to six `codesign` runs per file are not atomic: a file swapped between them can
+  be reported as another signer's. A one-time scan of a path the attacker writes can be
+  dodged anyway.
 - Login items (Background Task Management), which need Full Disk Access; the owner chose to
   ask for it when that check lands.
 - Applications in `/Applications` outside Homebrew, for both CVE matching and the dylib scan.
