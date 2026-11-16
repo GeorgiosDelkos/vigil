@@ -15,7 +15,7 @@
 //!
 //! An item's issue is keyed by the item's path and what it runs ([`Item::identity`]): the
 //! program's and the script's paths and identities ([`Signature::identity`]), the arguments,
-//! the environment, the user and whether it runs at load. A file's identity is its signing team
+//! the environment, the user, and whether it runs at load or is disabled. A file's identity is its signing team
 //! when Apple issued a Developer ID or App Store certificate to that team, and its content
 //! otherwise. A dismissed item whose command line changes, or whose program is replaced by one
 //! from someone else, is then a new issue, while an update from the same developer keeps the
@@ -287,6 +287,7 @@ impl Item {
             "environment": self.environment,
             "user_name": self.user_name,
             "run_at_load": self.run_at_load,
+            "disabled": self.disabled,
             "unread": self.stamp,
         })
         .to_string()
@@ -437,17 +438,17 @@ fn read_job(path: &Path) -> Result<Job, String> {
 }
 
 /// The file launchd runs for `name`: an absolute path as it is; a relative one under the job's
-/// `WorkingDirectory` when that is absolute; a bare name at its first match on launchd's
-/// `PATH`. Anything else is returned as it is and checked as unreadable or missing.
+/// `WorkingDirectory`, or under `/`, where launchd starts a job without one (checked with
+/// `launchctl submit` on macOS 27.2); a bare name at its first match on launchd's `PATH`. A
+/// relative `WorkingDirectory` is returned unresolved and checked as unreadable, and a bare
+/// name with no match as missing.
 fn resolve(name: &str, working_directory: Option<&str>) -> PathBuf {
     if name.starts_with('/') {
         return PathBuf::from(name);
     }
     if name.contains('/') {
-        return match working_directory {
-            Some(folder) if folder.starts_with('/') => Path::new(folder).join(name),
-            _ => PathBuf::from(name),
-        };
+        let folder = working_directory.unwrap_or("/");
+        return Path::new(folder).join(name);
     }
     LAUNCHD_PATH
         .iter()
@@ -459,12 +460,15 @@ fn resolve(name: &str, working_directory: Option<&str>) -> PathBuf {
 /// The script `program` runs, when it is an interpreter: the first argument after the
 /// program's own name that is an absolute path, unless an [`INLINE_CODE`] option comes first.
 /// Options and their values before it are skipped (`python3 -u /x.py`, `osascript -l
-/// JavaScript /x.js`, `env python3 /x.py`).
+/// JavaScript /x.js`, `env python3 /x.py`). The first absolute path is taken even when it is
+/// an option's value (`ruby -I /lib /x.rb` gives `/lib`); the agent reads the arguments too.
+/// When that path is itself an interpreter (`env /usr/bin/python3 /x.py`), the search goes on
+/// after it; each step reads a shorter list, so it ends.
 fn script(program: &Path, arguments: &[String]) -> Option<PathBuf> {
     if !is_interpreter(program) {
         return None;
     }
-    for argument in arguments.iter().skip(1) {
+    for (i, argument) in arguments.iter().enumerate().skip(1) {
         let cluster_ending_in_c = argument.len() > 2
             && argument.starts_with('-')
             && !argument.starts_with("--")
@@ -473,7 +477,11 @@ fn script(program: &Path, arguments: &[String]) -> Option<PathBuf> {
             return None;
         }
         if argument.starts_with('/') {
-            return Some(PathBuf::from(argument));
+            let path = Path::new(argument);
+            if is_interpreter(path) {
+                return script(path, &arguments[i..]);
+            }
+            return Some(path.to_owned());
         }
     }
     None
@@ -581,8 +589,11 @@ impl Signature {
     fn identity(&self) -> String {
         match self {
             Self::Missing => "missing".to_owned(),
-            Self::Unreadable { stamp, .. } => {
-                format!("unreadable:{}", stamp.as_deref().unwrap_or("unknown"))
+            // Without a stamp (a folder on the way this user may not enter) the reason is all
+            // there is: a replacement there is not seen until the reason changes. Accepted, as
+            // nothing about the file can be read.
+            Self::Unreadable { stamp, detail } => {
+                format!("unreadable:{}", stamp.as_deref().unwrap_or(detail))
             }
             Self::Unsigned { sha256 } => format!("sha256:{sha256}"),
             Self::Invalid { cdhash, .. } => format!("invalid:{cdhash}"),
@@ -611,7 +622,7 @@ fn signature(path: &Path, cancel: &Cancel) -> Result<Signature, InventoryError> 
         if path.components().count() == 1 {
             return Ok(Signature::Missing);
         }
-        let detail = "a relative path with no absolute WorkingDirectory; not checked".to_owned();
+        let detail = "a relative path under a relative WorkingDirectory; not checked".to_owned();
         return Ok(Signature::Unreadable {
             detail,
             stamp: None,
@@ -693,12 +704,14 @@ fn apple_certificate(
     cancel: &Cancel,
 ) -> Result<Option<Certificate>, InventoryError> {
     let to_team = match team {
-        // A team ID is ten letters and digits. Anything else is not put into the requirement,
-        // whose language it could otherwise extend, and the team is not bound.
-        Some(team) if team.bytes().all(|b| b.is_ascii_alphanumeric()) => {
+        // A team ID is ten letters and digits. A claim of anything else is no team Apple
+        // issued a certificate to, and is kept out of the requirement, whose language it could
+        // otherwise extend.
+        Some(team) if team.len() == 10 && team.bytes().all(|b| b.is_ascii_alphanumeric()) => {
             format!(" and certificate leaf[subject.OU] = \"{team}\"")
         }
-        Some(_) | None => String::new(),
+        Some(_) => return Ok(None),
+        None => String::new(),
     };
     for certificate in [
         Certificate::DeveloperId,
@@ -885,8 +898,12 @@ TeamIdentifier=not set
         let cancel = Cancel::new();
         assert_eq!(
             apple_certificate("/bin/ls", Some("X\" or anchor apple or \"Y"), &cancel).unwrap(),
-            Some(Certificate::Other),
-            "the team is dropped, so only `anchor apple generic` is checked"
+            None,
+            "a claim that is not a team ID is no team Apple issued to"
+        );
+        assert_eq!(
+            apple_certificate("/bin/ls", None, &cancel).unwrap(),
+            Some(Certificate::Other)
         );
         assert_eq!(
             apple_certificate("/bin/ls", Some("AAAAAAAAAA"), &cancel).unwrap(),
@@ -1018,6 +1035,10 @@ TeamIdentifier=not set
             ran(&["/usr/bin/env", "python3", file]),
             Some(script.clone())
         );
+        assert_eq!(
+            ran(&["/usr/bin/env", "/usr/bin/python3", "-u", file]),
+            Some(script.clone())
+        );
         assert_eq!(ran(&["/bin/bash", "-l", file]), Some(script.clone()));
         assert_eq!(
             ran(&["/usr/bin/osascript", "-l", "JavaScript", file]),
@@ -1048,6 +1069,8 @@ TeamIdentifier=not set
         assert_ne!(base, identity(&["/bin/sh", file], as_nobody), "the user");
         let at_load = "<key>RunAtLoad</key><true/>";
         assert_ne!(base, identity(&["/bin/sh", file], at_load), "run at load");
+        let disabled = "<key>Disabled</key><true/>";
+        assert_ne!(base, identity(&["/bin/sh", file], disabled), "disabled");
         let dyld = "<key>EnvironmentVariables</key><dict>\
                     <key>DYLD_INSERT_LIBRARIES</key><string>/tmp/a.dylib</string></dict>";
         assert_ne!(base, identity(&["/bin/sh", file], dyld), "DYLD_");
@@ -1108,7 +1131,11 @@ TeamIdentifier=not set
         );
         let item = job(tmp.path(), "rel.plist", &["bin/tool"], &extra);
         assert_eq!(item.program.unwrap().path, tmp.path().join("bin/tool"));
+        // Without one, launchd starts the job in `/`.
         let item = job(tmp.path(), "rel.plist", &["bin/tool"], "");
+        assert_eq!(item.program.unwrap().path, Path::new("/bin/tool"));
+        let relative = "<key>WorkingDirectory</key><string>here</string>";
+        let item = job(tmp.path(), "rel.plist", &["bin/tool"], relative);
         assert!(matches!(
             item.program.unwrap().signature,
             Signature::Unreadable { detail, .. } if detail.starts_with("a relative path")

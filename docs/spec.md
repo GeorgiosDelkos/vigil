@@ -405,6 +405,8 @@ Accepted gaps, in the order planned:
 - Each file is `stat`ed with no time limit, so a program on a network share that does not
   answer blocks the sweep, as a version manager's folder there does. A huge unsigned file
   costs a 60-second `shasum` and marks `launch_items` unchecked.
+- A program behind a folder this user may not enter cannot be `stat`ed, so its identity is the
+  error alone, and a replacement there is not seen until the error changes.
 - The four to six `codesign` runs per file are not atomic: a file swapped between them can
   be reported as another signer's. A one-time scan of a path the attacker writes can be
   dodged anyway.

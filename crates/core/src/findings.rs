@@ -182,7 +182,7 @@ pub(crate) struct Known {
     /// The launch items an issue may name, by path on this Mac, each with the identity of what
     /// it runs, which goes into the issue's key.
     pub(crate) items: BTreeMap<String, String>,
-    /// Whether the target's issues may carry commands.
+    /// What the target's issues may name and carry (see [`IssueScope`]).
     pub(crate) scope: IssueScope,
 }
 
