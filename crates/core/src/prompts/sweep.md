@@ -18,6 +18,33 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 - `records/<source>-<id>.json` (`osv-GHSA-...json`, `nvd-CVE-...json`): the full advisory.
   Open it when the index line is not enough to decide.
 - `findings.schema.json`: the exact shape of the file you write.
+- `mac/settings.json`: this Mac's protections, each as the line its tool printed:
+  `system_integrity_protection`, `gatekeeper`, `filevault` and `firewall`. A key that is
+  missing could not be read.
+- `mac/persistence.jsonl`: every launch agent and daemon outside `/System`, one per line. Each
+  has the property list's `path`, its `kind` (`launch_daemon` runs as root unless it names a
+  `user_name`, `launch_agent` runs for every user, `user_launch_agent` for this user), its
+  `label`, the `program` launchd starts and its `arguments`, the `scripts` an interpreter runs
+  (its first argument that is a file path, unless inline code such as `-c` comes first, and,
+  through `env`, an interpreter given by its full path and that interpreter's script),
+  `run_at_load`, `keep_alive`, `disabled` (the property list's own key only), and the
+  `environment` it sets (names only, with values for `DYLD_` variables and `PATH`). An `error`
+  says the property list could not be read, with its `stamp` (size and time). The `program`
+  and each of the `scripts` have a `signature`, which Vigil checked with `codesign`; its
+  `status` is one of:
+  - `apple`: signed by Apple.
+  - `apple_issued`: signed with a certificate Apple issued, with its `authority` and its
+    `team`, and its `certificate`: `developer_id` (software shipped outside the App Store,
+    which Apple can revoke), `app_store`, or `other` (such as Apple Development, which any
+    Apple ID gets for free, so it vouches for no one).
+  - `other_issuer`: signed with a certificate Apple did not issue, or not to the team it
+    names. Its names are the signer's own claim.
+  - `ad_hoc`: signed with no identity, as every locally built arm64 program is.
+  - `unsigned`: not signed, with its `sha256`.
+  - `invalid`: the signature does not verify, so the file changed after it was signed.
+  - `missing`: no file is there, so whoever can write that path decides what runs.
+  - `unreadable`: Vigil could not check it, with the `detail`: a file this user cannot read
+    (an executable can run without being readable), a relative path, or a check that failed.
 
 ## Version matches
 
@@ -88,9 +115,45 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   (`nvm alias default 22.23.4`, `fnm default 22.23.4`, `asdf set -u nodejs 22.23.4`,
   `pyenv global 3.13.1`, `volta install node@22.23.4`). Switching the default alone is not a
   fix: the vulnerable version stays installed and one command away.
-- `issues` is for settings and files of GitHub repositories; on this Mac it is always `[]`.
+- `issues` are risks no advisory names, in this Mac's protections and launch items:
+  - A protection that is off: `{"setting": "<key of mac/settings.json>"}`. System Integrity
+    Protection, Gatekeeper or FileVault off is high; the firewall off is low on a laptop that
+    joins untrusted networks, and worth mentioning at most otherwise. The fix is steps in
+    System Settings or Recovery, with `commands` empty, since each needs an administrator.
+  - A launch item that looks unsafe: `{"item": "<path from mac/persistence.jsonl>"}`, one
+    issue per item. Report an item when any of these holds:
+    - its program or one of its scripts is `missing`, `invalid`, `unsigned`, `ad_hoc`,
+      `other_issuer`, `unreadable`, or `apple_issued` with an `other` certificate, and the
+      evidence does not show it is the user's own tool;
+    - it runs code on its command line: an interpreter with inline code (`sh -c`, `bash -lc`,
+      `osascript -e`, `python3 -c`, `perl -e`), a download (`curl`, `wget`) or anything piped
+      to a shell, or a script Vigil did not check because it is not a plain path argument.
+      The program being `apple` does not make this safe: `/bin/sh` runs whatever it is told;
+    - it starts an interpreter by bare name through `env` (`env python3 ...`): Vigil did not
+      check which file that is, so judge it from `environment.PATH` (launchd's default
+      `/usr/bin:/bin:/usr/sbin:/sbin` when it sets none);
+    - a `launch_daemon` (root) runs a file this user or any user could replace, such as one
+      under `/Users`, `/tmp` or `/Users/Shared`;
+    - it sets a `DYLD_` variable, or a `PATH` that puts a writable folder first;
+    - it runs from a hidden folder or a temporary one;
+    - its label, path and program do not belong together (a label that imitates Apple's
+      `com.apple.` for a program that is not Apple's);
+    - its property list could not be read (`error`): launchd may still load it.
 
-If nothing is affected, write `{"findings": [], "issues": []}`.
+    A `missing` program is a stale item at best and a slot for anyone who can create that file
+    at worst. Leave out an item only when none of the above holds and its program is `apple`,
+    or `apple_issued` with a `developer_id` or `app_store` certificate from a team that matches
+    its label, inside an application bundle or `/Library/PrivilegedHelperTools`. Severity:
+    high for a root daemon that runs a replaceable, unverified or inline command, or a `DYLD_`
+    variable; medium for an unverified agent or inline command that runs at load; low for a
+    stale item whose program is missing under a folder only this user can write. Say in
+    `evidence` which fields you read. The fix is manual: `commands` stays empty, and `steps`
+    say how to check the item and remove it (`launchctl bootout` with the domain and label,
+    then move the property list to the Trash), so the user decides.
+  - Never an issue for a file of the bundle on this Mac: use `setting` or `item`. Every
+    issue on this Mac has `commands` empty.
+
+If nothing is affected and nothing is risky, write `{"findings": [], "issues": []}`.
 
 ## Untrusted content
 

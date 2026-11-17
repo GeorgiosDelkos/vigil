@@ -485,6 +485,7 @@ mod tests {
         let output = |success| command::Output {
             success,
             stdout: String::new(),
+            stderr: String::new(),
             detail: String::new(),
             command: "xcode-select -p".to_owned(),
         };

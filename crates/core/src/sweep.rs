@@ -48,9 +48,11 @@ use crate::findings;
 use crate::findings::Finding;
 use crate::findings::Fix;
 use crate::findings::Issue;
+use crate::findings::IssueScope;
 use crate::findings::Known;
 use crate::findings::Severity;
 use crate::findings::Subject;
+use crate::findings::Valid;
 use crate::findings::Verdict;
 use crate::findings::is_forging;
 use crate::github;
@@ -59,6 +61,7 @@ use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
+use crate::inventory::host;
 use crate::lifecycle;
 use crate::lifecycle::CarriedFinding;
 use crate::lifecycle::Changes;
@@ -574,6 +577,10 @@ struct Collected {
     files: Vec<(String, String)>,
     /// The settings an issue may name.
     settings: Vec<String>,
+    /// The launch items an issue may name, by path, with the identity of what each runs.
+    items: BTreeMap<String, String>,
+    /// What its issues may name and carry.
+    scope: IssueScope,
     problems: Vec<String>,
     /// The inventory sources that failed, for the report's `unchecked`.
     failed: BTreeSet<InventorySource>,
@@ -581,7 +588,8 @@ struct Collected {
 
 /// This Mac's inventory as a target.
 fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Collected {
-    let inventory = Inventory::collect_mac(project_dirs, cancel);
+    let mut inventory = Inventory::collect_mac(project_dirs, cancel);
+    let host = host::collect(&mut inventory, cancel);
     let mut problems: Vec<String> = inventory.problems.iter().map(error_chain).collect();
     if !inventory.not_installed.is_empty() {
         let tools = inventory.not_installed.join(", ");
@@ -593,8 +601,10 @@ fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Collected {
         title: target_name(&inventory),
         prompt: Prompt::Mac,
         components: inventory.components,
-        files: Vec::new(),
-        settings: Vec::new(),
+        files: host.files,
+        settings: host.settings,
+        items: host.items,
+        scope: IssueScope::Host,
         problems,
         failed: inventory.failed,
     }
@@ -632,6 +642,8 @@ impl Shared<'_> {
             components: collected.components,
             files: collected.files,
             settings: collected.settings,
+            items: BTreeMap::new(),
+            scope: IssueScope::Bundle,
             problems: collected.problems,
             failed: collected.failed,
         };
@@ -664,6 +676,8 @@ impl Shared<'_> {
             components: collected.components,
             files: collected.files,
             settings: Vec::new(),
+            items: BTreeMap::new(),
+            scope: IssueScope::Bundle,
             problems: collected.problems,
             failed: collected.failed,
         };
@@ -737,6 +751,8 @@ impl Shared<'_> {
             entries: &entries,
             files: &collected.files,
             settings: &collected.settings,
+            items: &collected.items,
+            scope: collected.scope,
         };
         let known = bundle::write(&dir.join("bundle"), &contents, self.sources.kev)?;
 
@@ -747,10 +763,11 @@ impl Shared<'_> {
             Ok(verdict) => (verdict, None),
             Err(failure) => (Verdict::default(), Some(plain(&failure))),
         };
-        let (mut findings, mut issues) = self.keyed(
+        let mut issues = self.keyed_issues(&collected.target, &known, verdict.issues);
+        let mut findings = self.keyed(
             &collected.target,
             &collected.components,
-            verdict,
+            verdict.findings,
             &fetched.linked,
         );
         // Each keeps the first-seen time the target's last report gave it, or is new now.
@@ -914,27 +931,24 @@ impl Shared<'_> {
         ))
     }
 
-    /// Keys the verdict's findings and issues, marks the dismissed ones, and sorts each list
-    /// most severe first.
+    /// Keys the verdict's findings, marks the dismissed ones, and sorts them most severe first.
     fn keyed(
         &self,
         target: &str,
         components: &[Component],
-        verdict: Verdict,
+        validated: Vec<Valid>,
         fetched: &[Linked],
-    ) -> (Vec<ReportFinding>, Vec<ReportIssue>) {
+    ) -> Vec<ReportFinding> {
         let modified: BTreeMap<&str, Option<Timestamp>> = fetched
             .iter()
             .map(|(a, _)| (a.id.as_str(), a.modified))
             .collect();
-        let primaries: Vec<(&str, &Component)> = verdict
-            .findings
+        let primaries: Vec<(&str, &Component)> = validated
             .iter()
             .map(|v| (v.advisory.as_str(), &components[v.component]))
             .collect();
         let keys = finding_keys(target, &primaries);
-        let mut findings: Vec<ReportFinding> = verdict
-            .findings
+        let mut findings: Vec<ReportFinding> = validated
             .into_iter()
             .zip(keys)
             .map(|(valid, key)| {
@@ -967,16 +981,18 @@ impl Shared<'_> {
             })
             .collect();
         findings.sort_by_key(|f| f.finding.severity);
-        let mut issues: Vec<ReportIssue> = verdict
-            .issues
+        findings
+    }
+
+    /// Keys the verdict's issues, marks the dismissed ones, and sorts them most severe first.
+    fn keyed_issues(&self, target: &str, known: &Known, issues: Vec<Issue>) -> Vec<ReportIssue> {
+        let mut issues: Vec<ReportIssue> = issues
             .into_iter()
             .map(|issue| {
-                // Data, not the `Display` text, so rewording that keeps every key.
-                let (kind, name) = match &issue.subject {
-                    Subject::Setting(key) => ("setting", key),
-                    Subject::File(path) => ("file", path),
+                let key = issue_key(target, &issue.subject, known);
+                let name = match &issue.subject {
+                    Subject::Setting(name) | Subject::File(name) | Subject::Item(name) => name,
                 };
-                let key = FindingKey::new(&[target, kind, name]);
                 ReportIssue {
                     key,
                     title: plain(&issue.subject.to_string()),
@@ -988,7 +1004,25 @@ impl Shared<'_> {
             })
             .collect();
         issues.sort_by_key(|i| i.issue.severity);
-        (findings, issues)
+        issues
+    }
+}
+
+/// The key of an issue about `subject`, from its data rather than its `Display` text, so
+/// rewording that text keeps every key.
+fn issue_key(target: &str, subject: &Subject, known: &Known) -> FindingKey {
+    match subject {
+        Subject::Setting(key) => FindingKey::new(&[target, "setting", key]),
+        Subject::File(path) => FindingKey::new(&[target, "file", path]),
+        // With what it runs, so a dismissed item that starts running something else is a new
+        // issue (see `inventory::host`).
+        Subject::Item(path) => {
+            let runs = known
+                .items
+                .get(path)
+                .expect("validation keeps only items the bundle lists");
+            FindingKey::new(&[target, "item", path, runs])
+        }
     }
 }
 
@@ -2192,6 +2226,28 @@ mod tests {
     }
 
     #[test]
+    fn an_item_key_follows_what_it_runs() {
+        let path = "/Library/LaunchDaemons/x.plist";
+        let known = |runs: &str| Known {
+            items: [(path.to_owned(), runs.to_owned())].into(),
+            ..Known::default()
+        };
+        let item = Subject::Item(path.to_owned());
+        let key = |runs| issue_key("mac", &item, &known(runs));
+
+        assert_eq!(key("team:T1 none"), key("team:T1 none"));
+        assert_ne!(key("team:T1 none"), key("sha256:ab none"));
+        assert_ne!(
+            key("team:T1 none"),
+            issue_key(
+                "mac",
+                &Subject::File(path.to_owned()),
+                &known("team:T1 none")
+            )
+        );
+    }
+
+    #[test]
     fn finding_keys_survive_upgrades_and_package_lists_but_not_collisions() {
         let os = |version: &str, packages: &[&str]| Component {
             found_in: FoundIn::OsPackage {
@@ -2720,6 +2776,8 @@ mod tests {
                 components: vec![component("npm:lodash", "4.17.20")],
                 files: Vec::new(),
                 settings: Vec::new(),
+                items: BTreeMap::new(),
+                scope: IssueScope::Host,
                 problems: Vec::new(),
                 failed: BTreeSet::new(),
             };
@@ -2814,6 +2872,8 @@ mod tests {
                 components,
                 files: Vec::new(),
                 settings: Vec::new(),
+                items: BTreeMap::new(),
+                scope: IssueScope::Host,
                 problems: Vec::new(),
                 failed,
             };

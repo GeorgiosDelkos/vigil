@@ -25,7 +25,7 @@ It sweeps three kinds of target in one pass:
 
 | Target | What Vigil reads |
 |---|---|
-| **This Mac** | macOS, Homebrew formulae and casks, Rust, Node.js and Python toolchains, global npm, cargo, uv and pipx packages, and the lockfiles (`Cargo.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `uv.lock`, `poetry.lock`) in the project folders you choose |
+| **This Mac** | macOS, Homebrew formulae and casks, Rust, Node.js and Python toolchains, global npm, cargo, uv and pipx packages, and the lockfiles (`Cargo.lock`, `package-lock.json`, `npm-shrinkwrap.json`, `uv.lock`, `poetry.lock`) in the project folders you choose; System Integrity Protection, Gatekeeper, FileVault and the firewall; and every launch agent and daemon with the code signature of what it runs |
 | **GitHub repositories** | The dependency graph, Dependabot, code scanning and secret scanning alerts, Actions workflows, and security settings such as branch protection |
 | **Servers** | OS packages (Debian, Ubuntu and Alpine are matched to advisories; RPM packages are listed for the agent), the kernel, listening sockets, Docker containers and images, and lockfiles, read over SSH by a fixed read-only script |
 

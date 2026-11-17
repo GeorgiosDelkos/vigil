@@ -42,6 +42,11 @@ copy_vcs = true
 # `replace | with ^ in entered` changes the mask `UF_HIDDEN | SF_DATALESS` in the lockfile
 # walk. The two flags are separate bits (0x8000 and 0x4000_0000, <sys/stat.h>), so `|` and `^`
 # build the same mask: an equivalent mutant.
+#
+# `replace match guard output.success with true in sha256` (inventory/host.rs) drops the exit
+# status check on `shasum -a 256 -- <one file>`. Given one file, shasum prints a digest only once
+# it has read the whole file, so a failed run prints none and `digest` rejects its output either
+# way: an equivalent mutant. The guard stays, so a shasum that prints and then fails is refused.
 exclude_re = [
     "NvdAccess::has_keychain_key",
     "NvdAccess::save_to_keychain",
@@ -53,4 +58,5 @@ exclude_re = [
     "replace \\| with \\^ in entered$",
     "findings\\.rs:.*replace \\| with \\^ in read$",
     "replace \\| with \\^ in open_regular$",
+    "replace match guard output.success with true in sha256$",
 ]

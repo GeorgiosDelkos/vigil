@@ -224,6 +224,11 @@ impl Sandbox {
             .arg("--data-dir")
             .arg(self.path().join("data"))
             .env("HOME", self.path())
+            // The machine's launch items are not this test's: checking each one's signature
+            // made every sweep seconds slower on CI (crates/core/src/inventory/host.rs,
+            // `system_root`). A folder of its own, which stays empty: under the home, its
+            // Library/LaunchAgents would be the user's too, and each agent read twice.
+            .env("VIGIL_TEST_LAUNCH_ROOT", self.path().join("system"))
             .env("PATH", self.bin())
             .env("SHELL", self.path().join("login-shell"))
             .env("CLAUDE_FAKE_MODE", mode)
