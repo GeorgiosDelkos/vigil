@@ -74,9 +74,8 @@ impl Unchecked {
     /// Which sources failed, in a few words for a person: "Homebrew, 4 places with lockfiles,
     /// CISA KEV, OSV, NVD for 3 products". `None` when every source was checked.
     ///
-    /// Lockfiles, settings, launch items and workflow files are counted rather than named once
-    /// there are several of a sort ([`InventorySource::counted_as`]): one cause can fail many,
-    /// and this is one line in the popover.
+    /// Several sources of one sort ([`InventorySource::counted_as`]) are counted rather than
+    /// named: one cause can fail many, and this is one line in the popover.
     pub fn describe(&self) -> Option<String> {
         let mut parts = Vec::new();
         let mut counted: BTreeMap<&str, Vec<&InventorySource>> = BTreeMap::new();

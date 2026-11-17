@@ -160,12 +160,13 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
     } else {
         // Covers no item: their paths are not known without the home folder. Accepted, since
         // `home_dir` falls back to the user database, so this does not happen on a Mac.
-        let path = PathBuf::from("~/Library/LaunchAgents");
-        let folder = path.to_string_lossy().into_owned();
+        let folder = "~/Library/LaunchAgents";
         inventory.fail(
-            InventorySource::LaunchFolder { path: folder },
+            InventorySource::LaunchFolder {
+                path: folder.to_owned(),
+            },
             InventoryError::Io {
-                path,
+                path: PathBuf::from(folder),
                 source: io::Error::new(io::ErrorKind::NotFound, "no home folder: set HOME"),
             },
         );
@@ -372,9 +373,10 @@ fn launch_items(
             }
             let mut failures = Vec::new();
             items.push(read_item(*kind, &path, cancel, &mut failures));
+            // As `read_item` names the item.
+            let shown = path.to_string_lossy();
             for e in failures {
-                // As `read_item` names the item.
-                let path = path.to_string_lossy().into_owned();
+                let path = shown.clone().into_owned();
                 inventory.fail(InventorySource::LaunchItem { path }, e);
             }
         }
