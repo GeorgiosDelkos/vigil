@@ -139,8 +139,9 @@ const PLIST_LIMIT: u64 = 1024 * 1024;
 const CODESIGN: &str = "/usr/bin/codesign";
 const SHASUM: &str = "/usr/bin/shasum";
 
-/// Reads the settings and launch items, recording what failed in `inventory` as problems of
-/// [`InventorySource::Posture`] and [`InventorySource::LaunchItems`].
+/// Reads the settings and launch items, recording what failed in `inventory`: each setting
+/// ([`InventorySource::Setting`]), launch folder ([`InventorySource::LaunchFolder`]) and launch
+/// item ([`InventorySource::LaunchItem`]) on its own.
 ///
 /// Runs `codesign` up to six times per file an item runs, and `shasum` for an unsigned one,
 /// each with the inventory's time limit. Once `cancel` is set it reads no more items, and
@@ -154,15 +155,19 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
         .iter()
         .map(|(kind, folder)| (*kind, root.join(folder)))
         .collect();
-    match std::env::home_dir() {
-        Some(home) => folders.push((ItemKind::UserLaunchAgent, home.join("Library/LaunchAgents"))),
-        None => inventory.fail(
-            InventorySource::LaunchItems,
+    if let Some(home) = std::env::home_dir() {
+        folders.push((ItemKind::UserLaunchAgent, home.join("Library/LaunchAgents")));
+    } else {
+        // Covers no item: their paths are not known without the home folder. Accepted, since
+        // `home_dir` falls back to the user database, so this does not happen on a Mac.
+        let path = PathBuf::from("~/Library/LaunchAgents");
+        inventory.fail(
+            InventorySource::LaunchFolder { path: path.clone() },
             InventoryError::Io {
-                path: PathBuf::from("~/Library/LaunchAgents"),
+                path,
                 source: io::Error::new(io::ErrorKind::NotFound, "no home folder: set HOME"),
             },
-        ),
+        );
     }
     let items = launch_items(inventory, &folders, cancel);
     Host::new(&settings, &items)
@@ -206,7 +211,10 @@ fn posture(inventory: &mut Inventory, cancel: &Cancel) -> BTreeMap<&'static str,
                 settings.insert(key, text.trim().to_owned());
             }
             Ok(None) => inventory.missing(program),
-            Err(e) => inventory.fail(InventorySource::Posture, e),
+            Err(e) => {
+                let key = key.to_owned();
+                inventory.fail(InventorySource::Setting { key }, e);
+            }
         }
     }
     settings
@@ -325,7 +333,7 @@ struct Job {
 }
 
 /// Reads every item in `folders`. A folder that does not exist has none; one that cannot be
-/// listed is recorded as a problem of [`InventorySource::LaunchItems`], a failure unless
+/// listed is recorded as a problem of its [`InventorySource::LaunchFolder`], a failure unless
 /// permission was denied (see [`InventoryError::is_failure`]). A signature check that could not
 /// run is a failure too, and its item is kept with the program `unreadable`, so the agent still
 /// sees it.
@@ -342,7 +350,7 @@ fn launch_items(
             Err(source) => {
                 let path = folder.clone();
                 inventory.fail(
-                    InventorySource::LaunchItems,
+                    InventorySource::LaunchFolder { path: path.clone() },
                     InventoryError::Io { path, source },
                 );
                 continue;
@@ -351,8 +359,11 @@ fn launch_items(
         for path in paths {
             if cancel.is_cancelled() {
                 let what = "reading launch items".to_owned();
+                // The sweep keeps no report of a cancelled inventory, so which source does not
+                // matter.
+                let path = folder.clone();
                 inventory.fail(
-                    InventorySource::LaunchItems,
+                    InventorySource::LaunchFolder { path },
                     InventoryError::Cancelled { what },
                 );
                 return items;
@@ -360,7 +371,8 @@ fn launch_items(
             let mut failures = Vec::new();
             items.push(read_item(*kind, &path, cancel, &mut failures));
             for e in failures {
-                inventory.fail(InventorySource::LaunchItems, e);
+                let path = path.clone();
+                inventory.fail(InventorySource::LaunchItem { path }, e);
             }
         }
     }
@@ -1326,7 +1338,12 @@ TeamIdentifier=not set
         let mut inventory = Inventory::default();
         let folders = [(ItemKind::UserLaunchAgent, open.clone())];
         assert!(launch_items(&mut inventory, &folders, &cancel).is_empty());
-        assert!(inventory.failed.contains(&InventorySource::LaunchItems));
+        let path = open.clone();
+        assert!(
+            inventory
+                .failed
+                .contains(&InventorySource::LaunchFolder { path })
+        );
     }
 
     #[test]

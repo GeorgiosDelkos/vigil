@@ -421,7 +421,8 @@ struct Saved {
     started: Timestamp,
     target: String,
     findings: Vec<Value>,
-    /// Findings carried over from an earlier sweep, open until a sweep checks them again.
+    /// Findings and issues carried over from an earlier sweep, open until a sweep checks them
+    /// again.
     #[serde(default)]
     carried: Vec<Value>,
     issues: Vec<Value>,

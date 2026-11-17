@@ -3,7 +3,9 @@
 //!
 //! A source that fails leaves its part out of the bundle, so the agent cannot find what it would
 //! have shown: an advisory feed (KEV, OSV, NVD) its advisories, an inventory source (a listing
-//! command, a lockfile, the folder walk) its components. Before this record the failure was a
+//! command, a lockfile, the folder walk) its components, and a source of issues (the Mac's
+//! settings and launch items, a GitHub setting or workflow) the settings and files an issue
+//! names. Before this record the failure was a
 //! line of text in the report, and the popover read an empty result as "All clear", the tray
 //! turned green, and the lifecycle took every finding the failed source had produced as
 //! resolved and every pending fix of one as confirmed. Now:
@@ -12,11 +14,14 @@
 //!   sources failed (the popover's target line and banner, the tray's failure look);
 //! - a finding of the target's previous report that this sweep did not find, and that a failed
 //!   source could have produced ([`Unchecked::covers`]), is carried into the new report as it
-//!   was, so it stays open and its fix unconfirmed until a sweep that checks it.
+//!   was, so it stays open and its fix unconfirmed until a sweep that checks it;
+//! - so is an issue of that report whose subject a failed source covers
+//!   ([`Unchecked::covers_issue`]), unless this sweep reported an issue about the same subject.
 //!
 //! What is cached counts as checked: a stale cached copy used when its source could not be
 //! asked again is a note in the report, not a failure.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
@@ -69,18 +74,27 @@ impl Unchecked {
     /// Which sources failed, in a few words for a person: "Homebrew, lockfiles in 4 places,
     /// CISA KEV, OSV, NVD for 3 products". `None` when every source was checked.
     ///
-    /// Lockfiles are counted rather than named once there are several: an unreadable folder
-    /// tree can fail in many places, and this is one line in the popover.
+    /// Lockfiles, settings, launch items and workflow files are counted rather than named once
+    /// there are several of a sort ([`InventorySource::counted_as`]): one cause can fail many,
+    /// and this is one line in the popover.
     pub fn describe(&self) -> Option<String> {
-        let (lockfiles, others): (Vec<_>, Vec<_>) = self
-            .inventory
-            .iter()
-            .partition(|source| source.is_lockfiles());
-        let mut parts: Vec<String> = others.iter().map(ToString::to_string).collect();
-        match lockfiles[..] {
-            [] => {}
-            [one] => parts.push(one.to_string()),
-            ref many => parts.push(format!("lockfiles in {} places", many.len())),
+        let mut parts = Vec::new();
+        let mut counted: BTreeMap<&str, Vec<&InventorySource>> = BTreeMap::new();
+        for source in &self.inventory {
+            match source.counted_as() {
+                Some(sort) => counted.entry(sort).or_default().push(source),
+                None => parts.push(source.to_string()),
+            }
+        }
+        for (sort, sources) in counted {
+            match sources[..] {
+                [one] => parts.push(one.to_string()),
+                // "lockfiles in 3 places": a place is a lockfile or a folder tree of them.
+                ref many if sort == "lockfiles" => {
+                    parts.push(format!("lockfiles in {} places", many.len()));
+                }
+                ref many => parts.push(format!("{} {sort}", many.len())),
+            }
         }
         if self.kev {
             parts.push("CISA KEV".to_owned());
@@ -249,6 +263,26 @@ mod tests {
             ..Unchecked::default()
         };
         assert_eq!(one.describe().unwrap(), "lockfile /a/Cargo.lock");
+        let workflow = |name: &str| InventorySource::Workflow {
+            name: name.to_owned(),
+        };
+        let rate_limited = Unchecked {
+            inventory: [
+                workflow("a.yml"),
+                workflow("b.yml"),
+                workflow("c.yml"),
+                InventorySource::Setting {
+                    key: "rulesets".to_owned(),
+                },
+            ]
+            .into(),
+            ..Unchecked::default()
+        };
+        assert_eq!(
+            rate_limited.describe().unwrap(),
+            "the setting rulesets, 3 workflow files",
+            "one of a sort is named, several are counted"
+        );
         let forged = Unchecked {
             inventory: [lockfile("/a/\u{1b}]52;c;x\u{7}\n/Cargo.lock")].into(),
             ..Unchecked::default()

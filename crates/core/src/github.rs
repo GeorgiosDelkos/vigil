@@ -63,7 +63,6 @@ const ALERT_PAGES: usize = 5;
 /// Alerts asked for per page: GitHub's most.
 const ALERTS_PER_PAGE: usize = 100;
 
-/// The value of a setting that could not be collected; the reason is a problem in the report.
 /// Where the workflow files are in the bundle; an issue names one by its path there.
 pub(crate) const WORKFLOWS: &str = "github/workflows/";
 
@@ -77,6 +76,7 @@ pub(crate) fn alerts_file(name: &str) -> String {
     format!("github/{name}-alerts.json")
 }
 
+/// The value of a setting that could not be collected; the reason is a problem in the report.
 const NOT_COLLECTED: &str = "not collected; see the problems in the report";
 
 /// The `settings.json` key of the organization's 2FA requirement.
@@ -97,7 +97,8 @@ pub(crate) struct Repo {
     pub(crate) settings: Vec<String>,
     /// Parts that could not be collected.
     pub(crate) problems: Vec<String>,
-    /// The dependency graph, when it could not be read for a reason that may pass.
+    /// The parts that could not be read for a reason that may pass (a rate limit, `gh`
+    /// offline, an answer of the wrong shape). A refusal lasts and is only a problem.
     pub(crate) failed: BTreeSet<InventorySource>,
 }
 
@@ -270,11 +271,16 @@ impl Repo {
     fn workflow(&mut self, gh: &str, base: &str, name: &str) {
         let path = format!("{base}/contents/.github/workflows/{name}");
         match raw(gh, &path) {
-            Ok(text) if text.len() > WORKFLOW_SIZE_LIMIT => self.problems.push(format!(
+            Ok(Raw::Text(text)) if text.len() > WORKFLOW_SIZE_LIMIT => self.problems.push(format!(
                 "workflow {name}: {} bytes, over the {WORKFLOW_SIZE_LIMIT}-byte limit; not read",
                 text.len()
             )),
-            Ok(text) => self.files.push((format!("{WORKFLOWS}{name}"), text)),
+            Ok(Raw::Text(text)) => self.files.push((format!("{WORKFLOWS}{name}"), text)),
+            // Lasting, like a refused setting: the listing named it, yet this login may not
+            // read it, or the branch moved.
+            Ok(Raw::Refused { status, message }) => self
+                .problems
+                .push(format!("workflow {name}: {status}: {message}")),
             Err(e) => {
                 self.failed.insert(InventorySource::Workflow {
                     name: name.to_owned(),
@@ -290,7 +296,7 @@ impl Repo {
             Ok(Answer::Ok(value)) => value,
             Ok(Answer::Refused { status, message }) => refused(status, &message),
             Err(e) => {
-                self.failed.insert(InventorySource::RepoSetting {
+                self.failed.insert(InventorySource::Setting {
                     key: key.to_owned(),
                 });
                 self.problems.push(format!("setting {key}: {e}"));
@@ -310,7 +316,7 @@ impl Repo {
                 .unwrap_or_else(|| json!(NOT_VISIBLE)),
             Ok(Answer::Refused { status, message }) => refused(status, &message),
             Err(e) => {
-                self.failed.insert(InventorySource::RepoSetting {
+                self.failed.insert(InventorySource::Setting {
                     key: TWO_FACTOR.to_owned(),
                 });
                 self.problems.push(format!("setting {TWO_FACTOR}: {e}"));
@@ -672,10 +678,15 @@ fn answer(path: &str, body: &str, output: &command::Output) -> Result<Answer, Gi
         })?;
         return Ok(Answer::Ok(body));
     }
+    let (status, message) = refusal(path, body, output)?;
+    Ok(Answer::Refused { status, message })
+}
+
+/// The status and message of a request that failed with GitHub's refusal (a 403 or 404 that
+/// says nothing about rate limits or permissions of the token), or the error it was.
+fn refusal(path: &str, body: &str, output: &command::Output) -> Result<(u16, String), GitHubError> {
     match error_body(body) {
-        Some((status @ (403 | 404), message)) if !is_failure(&message) => {
-            Ok(Answer::Refused { status, message })
-        }
+        Some((status @ (403 | 404), message)) if !is_failure(&message) => Ok((status, message)),
         Some((status, message)) => Err(GitHubError::Api {
             path: path.to_owned(),
             status,
@@ -700,13 +711,26 @@ fn error_body(body: &str) -> Option<(u16, String)> {
     Some((status, error["message"].as_str()?.to_owned()))
 }
 
+/// What a fetch of a file's raw text answered.
+#[derive(Debug)]
+enum Raw {
+    Text(String),
+    /// GitHub's refusal, as [`api`] tells one apart.
+    Refused {
+        status: u16,
+        message: String,
+    },
+}
+
 /// Fetches a file's raw text through the contents API.
-fn raw(gh: &str, path: &str) -> Result<String, GitHubError> {
+fn raw(gh: &str, path: &str) -> Result<Raw, GitHubError> {
     let args = ["api", "-H", "Accept: application/vnd.github.raw", path];
-    match command::run(gh, &args, &Cancel::new())? {
-        Some(text) => Ok(text),
-        None => Err(GitHubError::NoGh),
+    let output = command::run_any_status(gh, &args, &Cancel::new())?.ok_or(GitHubError::NoGh)?;
+    if output.success {
+        return Ok(Raw::Text(output.stdout));
     }
+    let (status, message) = refusal(path, &output.stdout, &output)?;
+    Ok(Raw::Refused { status, message })
 }
 
 /// The packages of an SPDX SBOM as components, and the count of packages that cannot be
@@ -907,6 +931,13 @@ case "$last" in
   repos/o/over/contents/.github/workflows) ok many-workflows ;;
   repos/o/over/contents/.github/workflows/*) file "$@"; echo 'on: push' ;;
   repos/o/over/*) echo '[]' ;;
+  repos/o/broken/contents/.github/workflows) echo '[{"type":"file","name":"ci.yml","size":9}]' ;;
+  repos/o/broken/contents/.github/workflows/ci.yml) echo 'HTTP 502' >&2; exit 1 ;;
+  repos/o/flaky|repos/o/shape|repos/o/broken) echo '{"default_branch":"main"}' ;;
+  repos/o/flaky/contents/.github/workflows) echo 'HTTP 502' >&2; exit 1 ;;
+  repos/o/flaky/dependabot/alerts*) echo '{"alerts":[]}' ;;
+  repos/o/shape/contents/.github/workflows) echo '{"name":"workflows"}' ;;
+  repos/o/flaky/*|repos/o/shape/*|repos/o/broken/*) echo '[]' ;;
   repos/o/missing) refuse 404 "Not Found" ;;
   repos/o/offline) echo 'error connecting to api.github.com' >&2; exit 1 ;;
   *) echo "unexpected $last" >&2; exit 2 ;;
@@ -1135,20 +1166,42 @@ esac
         let tmp = tempfile::tempdir().unwrap();
         let gh = fake_gh(tmp.path());
         let repo = collect(&gh, &slug("o/r")).unwrap();
-        // Files left out by a limit or a name stay so on the next sweep, so only the failed
-        // requests are failures.
+        // Files left out by a limit or a name stay so on the next sweep, as does the refused
+        // gone.yml, so only the broken answer is a failure.
         assert_eq!(
             repo.failed,
-            [
-                InventorySource::Workflow {
-                    name: "gone.yml".to_owned()
-                },
-                InventorySource::RepoSetting {
-                    key: "actions_workflow_permissions".to_owned()
-                },
-            ]
+            [InventorySource::Setting {
+                key: "actions_workflow_permissions".to_owned()
+            },]
             .into()
         );
+    }
+
+    #[test]
+    fn a_listing_or_alerts_that_could_not_be_read_are_failed_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = fake_gh(tmp.path());
+
+        let flaky = collect(&gh, &slug("o/flaky")).unwrap();
+        let dependabot = InventorySource::Alerts {
+            name: "dependabot".to_owned(),
+        };
+        assert_eq!(
+            flaky.failed,
+            [dependabot, InventorySource::Workflows].into(),
+            "a listing that failed, and alerts that are no list"
+        );
+        let shape = collect(&gh, &slug("o/shape")).unwrap();
+        assert_eq!(
+            shape.failed,
+            [InventorySource::Workflows].into(),
+            "a listing that is no folder"
+        );
+        let broken = collect(&gh, &slug("o/broken")).unwrap();
+        let ci = InventorySource::Workflow {
+            name: "ci.yml".to_owned(),
+        };
+        assert_eq!(broken.failed, [ci].into(), "a file that failed");
     }
 
     #[test]
@@ -1206,7 +1259,7 @@ esac
         let alerts = |name: &str| InventorySource::Alerts {
             name: name.to_owned(),
         };
-        let two_factor = InventorySource::RepoSetting {
+        let two_factor = InventorySource::Setting {
             key: TWO_FACTOR.to_owned(),
         };
         assert_eq!(

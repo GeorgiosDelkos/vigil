@@ -180,11 +180,14 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   new report's `carried` as that report saved it, with `carried_from`, the start
   of the last sweep that checked it. So does an issue that this sweep did not find and that a
   failed source could have produced, unless this sweep reported an issue about the same
-  subject (decided 2026-11-17): every Mac setting for `posture`, every launch item for
-  `launch_items`, the setting for `repo_setting`, the setting and file of one kind of alerts
-  for `alerts`, the workflow files for `workflows` and one for `workflow`. A GitHub refusal
-  (403, 404) lasts and fails nothing; an error `gh` gives without GitHub's answer, or an answer
-  of the wrong shape, fails the part. A server's issues are not carried: what fails there (`ss`
+  subject (decided 2026-11-17). Each failed source covers only what it failed to read: its
+  setting for `setting` (a Mac settings tool, or a GitHub setting), the items directly in the
+  folder for `launch_folder`, its item for `launch_item`, the setting and file of one kind of
+  alerts for `alerts`, the workflow files for `workflows` and one for `workflow`. Never a whole
+  kind: a failure that repeats on every sweep (a tool that always times out, a program too
+  large to hash in time) would keep every issue of the kind open, a removed launch agent's
+  included. A GitHub refusal (403, 404), of a setting or of a file, lasts and fails nothing; an
+  error `gh` gives without GitHub's answer, or an answer of the wrong shape, fails the part. A server's issues are not carried: what fails there (`ss`
   missing, a login outside the docker group) lasts. It stays open, is neither
   resolved nor new, and its fix is not confirmed until a sweep that checks it; a fix planned
   from any report since `carried_from` is still "fix reported". A target whose newest report
@@ -194,7 +197,9 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   before these fields ignores `carried`, so after a downgrade a carried finding reads as
   resolved and its fix as confirmed; likewise a build from before `inventory` ignores it, so
   after a downgrade a report whose only failure was an inventory source reads as fully
-  checked.
+  checked; and a build from before carried issues does not carry one again, so its next
+  degraded sweep reads it as resolved. A source kind a build does not know reads as unknown,
+  which still keeps the target from being clear.
 - Reading: one report or state file that cannot be read is a problem of the targets it
   touches, never of all of them (decided 2026-11-12, after one broken `report.json` blanked
   the popover and greyed a red icon). A target whose newest report cannot be read shows the
@@ -410,15 +415,16 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
   fix runs with full access. An issue may not name a `mac/` bundle file, which would lump
   items under one key that a single dismissal hides.
 - A folder that cannot be listed for lack of permission is a note, as elsewhere in the
-  inventory; any other failure marks `posture` or `launch_items` unchecked.
+  inventory; any other failure marks that setting (`setting`), folder (`launch_folder`) or
+  item (`launch_item`) unchecked.
 
 Accepted gaps, in the order planned:
 
-- A failed settings tool carries every Mac setting's issue, so a setting fixed in that same
-  sweep stays open until the next one.
+- A dismissed launch item shows again when one check of it fails: its key follows what it
+  runs, and an unreadable signature reads differently from the one dismissed.
 - Each file is `stat`ed with no time limit, so a program on a network share that does not
   answer blocks the sweep, as a version manager's folder there does. A huge unsigned file
-  costs a 60-second `shasum` and marks `launch_items` unchecked.
+  costs a 60-second `shasum` and marks its item unchecked.
 - A program behind a folder this user may not enter cannot be `stat`ed, so its identity is the
   error alone, and a replacement there is not seen until the error changes.
 - The `codesign` runs per file (up to six) are not atomic: a file swapped between them can

@@ -395,7 +395,7 @@ pub(crate) fn carried_over(
     let (Some((path, last)), _) = newest_readable_verdict(sweeps, dir_name) else {
         return Ok(Vec::new());
     };
-    // Read again whole: `Saved` keeps only what the lifecycle uses, and a carried finding is
+    // Read again whole: `Saved` keeps only what the lifecycle uses, and a carried entry is
     // written back with every field it had.
     let invalid = |e: serde_json::Error| StateError::Read {
         path: path.clone(),
@@ -407,8 +407,10 @@ pub(crate) fn carried_over(
     })?;
     let entries: Entries = serde_json::from_str(&text).map_err(invalid)?;
     let mut carried = Vec::new();
-    let all = entries.findings.into_iter().chain(entries.carried);
-    for mut entry in all.chain(entries.issues) {
+    let saved_entries = (entries.findings.into_iter())
+        .chain(entries.carried)
+        .chain(entries.issues);
+    for mut entry in saved_entries {
         let saved =
             SavedEntry::deserialize(&serde_json::Value::Object(entry.clone())).map_err(invalid)?;
         // A subject of a kind a later build saved is not carried: what covers it is not known
@@ -974,8 +976,8 @@ pub(crate) struct SavedEntry {
     /// Only whether it is there matters.
     #[serde(default)]
     dismissed: Option<IgnoredAny>,
-    /// When the last sweep that checked it started, for a finding carried over since; `None`
-    /// for one this report checked.
+    /// When the last sweep that checked it started, for a finding or issue carried over since;
+    /// `None` for one this report checked.
     #[serde(default)]
     carried_from: Option<Timestamp>,
 }
@@ -2327,22 +2329,26 @@ mod tests {
             carried.iter().map(|c| c.key).collect::<Vec<_>>()
         };
 
-        let all = carried(InventorySource::LaunchItems, Found::default());
+        let folder = || InventorySource::LaunchFolder {
+            path: "/Library/LaunchAgents".into(),
+        };
         assert_eq!(
-            all,
+            carried(folder(), Found::default()),
             [earlier, agent],
             "carried before, and from this report"
         );
-        assert_eq!(
-            carried(InventorySource::Posture, Found::default()),
-            [firewall]
-        );
+        let one = InventorySource::LaunchItem { path: plist.into() };
+        assert_eq!(carried(one, Found::default()), [agent], "only its own");
+        let setting = InventorySource::Setting {
+            key: "firewall".to_owned(),
+        };
+        assert_eq!(carried(setting, Found::default()), [firewall]);
         let same_subject = Found {
             subjects: [Subject::Item(plist.to_owned())].into(),
             ..Found::default()
         };
         assert_eq!(
-            carried(InventorySource::LaunchItems, same_subject),
+            carried(folder(), same_subject),
             [earlier],
             "this sweep judged the item again, under another key"
         );
@@ -2350,11 +2356,11 @@ mod tests {
             keys: [agent].into(),
             ..Found::default()
         };
-        assert_eq!(carried(InventorySource::LaunchItems, same_key), [earlier]);
+        assert_eq!(carried(folder(), same_key), [earlier]);
         assert_eq!(carried(InventorySource::Homebrew, Found::default()), []);
 
         let unchecked = Unchecked {
-            inventory: [InventorySource::LaunchItems].into(),
+            inventory: [folder()].into(),
             ..Unchecked::default()
         };
         let again = carried_over(&sweeps, "mac", &unchecked, &Found::default(), &none).unwrap();
