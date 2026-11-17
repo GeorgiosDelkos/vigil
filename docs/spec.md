@@ -1346,7 +1346,9 @@ toml, reqwest, clap, zip) before adding them.
 - Property tests for config round-trip, feed parsing, and the name-index pre-filter.
 - Fake agent: a test script on `PATH` that writes canned `findings.json` (valid, invalid,
   missing) to exercise the sweep, retry, and failure paths without a real agent.
-- `cargo-mutants` over core logic; kill or explain survivors.
+- `cargo-mutants` over core logic; kill or explain survivors. The author runs it locally over
+  the pull request's diff and posts the result; CI runs it only on a pull request labelled
+  `mutants` (decided 2026-11-17: about 2 hours per shard on CI against 18 minutes locally).
 - End to end: `vigil sweep` against this Mac with a real agent and a test repo;
   then `cargo tauri dev`, run a sweep from the tray, confirm icon state, notification,
   report files, and a fix plan + apply on a deliberately outdated Homebrew formula.
