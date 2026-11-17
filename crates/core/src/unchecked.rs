@@ -3,7 +3,9 @@
 //!
 //! A source that fails leaves its part out of the bundle, so the agent cannot find what it would
 //! have shown: an advisory feed (KEV, OSV, NVD) its advisories, an inventory source (a listing
-//! command, a lockfile, the folder walk) its components. Before this record the failure was a
+//! command, a lockfile, the folder walk) its components, and a source of issues (the Mac's
+//! settings and launch items, a GitHub setting or workflow) the settings and files an issue
+//! names. Before this record the failure was a
 //! line of text in the report, and the popover read an empty result as "All clear", the tray
 //! turned green, and the lifecycle took every finding the failed source had produced as
 //! resolved and every pending fix of one as confirmed. Now:
@@ -12,17 +14,21 @@
 //!   sources failed (the popover's target line and banner, the tray's failure look);
 //! - a finding of the target's previous report that this sweep did not find, and that a failed
 //!   source could have produced ([`Unchecked::covers`]), is carried into the new report as it
-//!   was, so it stays open and its fix unconfirmed until a sweep that checks it.
+//!   was, so it stays open and its fix unconfirmed until a sweep that checks it;
+//! - so is an issue of that report whose subject a failed source covers
+//!   ([`Unchecked::covers_issue`]), unless this sweep reported an issue about the same subject.
 //!
 //! What is cached counts as checked: a stale cached copy used when its source could not be
 //! asked again is a note in the report, not a failure.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::findings::Subject;
 use crate::inventory::FoundIn;
 use crate::inventory::InventorySource;
 use crate::sweep;
@@ -65,21 +71,25 @@ impl Unchecked {
         !self.kev && self.osv.is_none() && self.nvd.is_empty() && self.inventory.is_empty()
     }
 
-    /// Which sources failed, in a few words for a person: "Homebrew, lockfiles in 4 places,
+    /// Which sources failed, in a few words for a person: "Homebrew, 4 places with lockfiles,
     /// CISA KEV, OSV, NVD for 3 products". `None` when every source was checked.
     ///
-    /// Lockfiles are counted rather than named once there are several: an unreadable folder
-    /// tree can fail in many places, and this is one line in the popover.
+    /// Several sources of one sort ([`InventorySource::counted_as`]) are counted rather than
+    /// named: one cause can fail many, and this is one line in the popover.
     pub fn describe(&self) -> Option<String> {
-        let (lockfiles, others): (Vec<_>, Vec<_>) = self
-            .inventory
-            .iter()
-            .partition(|source| source.is_lockfiles());
-        let mut parts: Vec<String> = others.iter().map(ToString::to_string).collect();
-        match lockfiles[..] {
-            [] => {}
-            [one] => parts.push(one.to_string()),
-            ref many => parts.push(format!("lockfiles in {} places", many.len())),
+        let mut parts = Vec::new();
+        let mut counted: BTreeMap<&str, Vec<&InventorySource>> = BTreeMap::new();
+        for source in &self.inventory {
+            match source.counted_as() {
+                Some(sort) => counted.entry(sort).or_default().push(source),
+                None => parts.push(source.to_string()),
+            }
+        }
+        for (sort, sources) in counted {
+            match sources[..] {
+                [one] => parts.push(one.to_string()),
+                ref many => parts.push(format!("{} {sort}", many.len())),
+            }
         }
         if self.kev {
             parts.push("CISA KEV".to_owned());
@@ -147,6 +157,14 @@ impl Unchecked {
             .get("product")
             .and_then(Value::as_str)
             .is_some_and(|product| self.nvd.contains(product))
+    }
+
+    /// Whether a source that failed could have produced an issue about `subject`
+    /// ([`InventorySource::covers_issue`]). The feeds produce no issues.
+    pub(crate) fn covers_issue(&self, subject: &Subject) -> bool {
+        self.inventory
+            .iter()
+            .any(|source| source.covers_issue(subject))
     }
 }
 
@@ -232,7 +250,7 @@ mod tests {
         };
         assert_eq!(
             lockfiles.describe().unwrap(),
-            "pipx, lockfiles in 3 places",
+            "pipx, 3 places with lockfiles",
             "lockfiles are counted once there are several"
         );
         let one = Unchecked {
@@ -240,6 +258,56 @@ mod tests {
             ..Unchecked::default()
         };
         assert_eq!(one.describe().unwrap(), "lockfile /a/Cargo.lock");
+        let workflow = |name: &str| InventorySource::Workflow {
+            name: name.to_owned(),
+        };
+        let rate_limited = Unchecked {
+            inventory: [
+                workflow("a.yml"),
+                workflow("b.yml"),
+                workflow("c.yml"),
+                InventorySource::Setting {
+                    key: "rulesets".to_owned(),
+                },
+            ]
+            .into(),
+            ..Unchecked::default()
+        };
+        assert_eq!(
+            rate_limited.describe().unwrap(),
+            "the setting rulesets, 3 workflow files",
+            "one of a sort is named, several are counted"
+        );
+        let item = |path: &str| InventorySource::LaunchItem {
+            path: path.to_owned(),
+        };
+        let folder = |path: &str| InventorySource::LaunchFolder {
+            path: path.to_owned(),
+        };
+        let alerts = |name: &str| InventorySource::Alerts {
+            name: name.to_owned(),
+        };
+        let setting = |key: &str| InventorySource::Setting {
+            key: key.to_owned(),
+        };
+        let each_sort = Unchecked {
+            inventory: [
+                item("/L/a.plist"),
+                item("/L/b.plist"),
+                folder("/L"),
+                folder("/M"),
+                alerts("dependabot"),
+                alerts("code-scanning"),
+                setting("firewall"),
+                setting("filevault"),
+            ]
+            .into(),
+            ..Unchecked::default()
+        };
+        assert_eq!(
+            each_sort.describe().unwrap(),
+            "2 kinds of alerts, 2 launch folders, 2 launch items, 2 settings"
+        );
         let forged = Unchecked {
             inventory: [lockfile("/a/\u{1b}]52;c;x\u{7}\n/Cargo.lock")].into(),
             ..Unchecked::default()

@@ -75,7 +75,7 @@ pub struct Issue {
 
 /// What an [`Issue`] is about: a key of the bundle's `github/settings.json` or
 /// `mac/settings.json`, a bundle file, or one of this Mac's launch items.
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Subject {
     /// A setting, by its key in `github/settings.json` or `mac/settings.json`.
