@@ -373,6 +373,9 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
 | `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error` | `{"item": "<path of the property list>"}` |
 
+- A debug build reads the two system folders under `VIGIL_TEST_LAUNCH_ROOT` when it is set,
+  so the CLI's end-to-end tests check no launch item of the machine they run on (each sweep
+  took seconds longer on a GitHub runner). Release builds ignore it.
 - Tools run by absolute path (`/usr/bin/codesign`): they decide whether a program is
   trusted, and a shim earlier on the login shell's `PATH` could answer for them.
 - A signature is `apple`, `apple_issued` (with its certificate: `developer_id`, `app_store`

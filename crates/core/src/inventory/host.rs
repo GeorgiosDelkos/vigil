@@ -73,12 +73,28 @@ const POSTURE: [(&str, &str, &[&str]); 4] = [
     ),
 ];
 
-/// The folders launchd reads jobs from, outside the sealed system volume. The user's own
-/// `~/Library/LaunchAgents` is added at run time.
+/// The folders launchd reads jobs from, outside the sealed system volume, under
+/// [`system_root`]. The user's own `~/Library/LaunchAgents` is added at run time.
 const LAUNCH_FOLDERS: [(ItemKind, &str); 2] = [
-    (ItemKind::LaunchDaemon, "/Library/LaunchDaemons"),
-    (ItemKind::LaunchAgent, "/Library/LaunchAgents"),
+    (ItemKind::LaunchDaemon, "Library/LaunchDaemons"),
+    (ItemKind::LaunchAgent, "Library/LaunchAgents"),
 ];
+
+/// The folder [`LAUNCH_FOLDERS`] are under: `/`, or in a debug build `VIGIL_TEST_LAUNCH_ROOT`
+/// when set.
+///
+/// The CLI's end-to-end tests set it, with `HOME`, to their sandbox: each of their many sweeps
+/// otherwise runs `codesign` on every launch item of the machine, which took a GitHub runner
+/// over 3 s per sweep and the mutation job past its time limit (PR #69). Release builds ignore
+/// it, so a shipped Vigil cannot be pointed away from the real folders. The real folders are
+/// read by `this_macs_settings_and_items_are_read`.
+fn system_root() -> PathBuf {
+    #[cfg(debug_assertions)]
+    if let Some(root) = std::env::var_os("VIGIL_TEST_LAUNCH_ROOT") {
+        return PathBuf::from(root);
+    }
+    PathBuf::from("/")
+}
 
 /// Where launchd looks for a program named without a folder: its default `PATH`, per
 /// launchd.plist(5) (`ProgramArguments`, searched with execvp(3)).
@@ -133,9 +149,10 @@ const SHASUM: &str = "/usr/bin/shasum";
 /// does.
 pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
     let settings = posture(inventory, cancel);
+    let root = system_root();
     let mut folders: Vec<(ItemKind, PathBuf)> = LAUNCH_FOLDERS
         .iter()
-        .map(|(kind, folder)| (*kind, PathBuf::from(folder)))
+        .map(|(kind, folder)| (*kind, root.join(folder)))
         .collect();
     match std::env::home_dir() {
         Some(home) => folders.push((ItemKind::UserLaunchAgent, home.join("Library/LaunchAgents"))),
@@ -1333,6 +1350,8 @@ TeamIdentifier=not set
         );
         assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
 
+        // No test of this crate sets `VIGIL_TEST_LAUNCH_ROOT`, so this reads the real folders.
+        assert_eq!(system_root(), Path::new("/"));
         let host = collect(&mut Inventory::default(), &Cancel::new());
         assert_eq!(host.settings.len(), POSTURE.len());
         assert_eq!(host.files.len(), 2);
