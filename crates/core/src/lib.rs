@@ -102,7 +102,7 @@ pub use crate::inventory::InventoryError;
 pub use crate::inventory::InventorySource;
 pub use crate::inventory::Lookup;
 pub use crate::inventory::VersionManager;
-pub use crate::lifecycle::CarriedFinding;
+pub use crate::lifecycle::CarriedEntry;
 pub use crate::lifecycle::Changes;
 pub use crate::lifecycle::ComponentKey;
 pub use crate::lifecycle::Dismissal;

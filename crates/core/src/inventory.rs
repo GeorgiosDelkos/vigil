@@ -26,6 +26,8 @@ use serde::Serialize;
 
 use crate::cancel::Cancel;
 use crate::feeds::Product;
+use crate::findings::Subject;
+use crate::github;
 use crate::package::Package;
 
 /// Everything found installed, plus what could not be collected.
@@ -346,8 +348,9 @@ impl VersionManager {
     }
 }
 
-/// A source of components that failed in a sweep, as [`Inventory::failed`] and a report's
-/// `unchecked` name it: coarser than [`FoundIn`], one entry per thing listed or read at once.
+/// A source of components or issues that failed in a sweep, as [`Inventory::failed`] and a
+/// report's `unchecked` name it: coarser than [`FoundIn`], one entry per thing listed or read
+/// at once.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum InventorySource {
@@ -387,10 +390,40 @@ pub enum InventorySource {
     OsPackages,
     /// A GitHub repository's dependency graph.
     DependencyGraph,
-    /// This Mac's security settings: SIP, Gatekeeper, `FileVault`, the firewall.
-    Posture,
-    /// This Mac's launch agents and daemons, and the signatures of what they run.
-    LaunchItems,
+    /// One setting of the target that could not be read, by its key in the bundle's
+    /// `settings.json`: a Mac's settings tool that could not run, or a GitHub repository's
+    /// setting `gh` could not fetch. A GitHub refusal (the feature off, or not visible to the
+    /// login) lasts, so it is not a failure.
+    Setting {
+        /// The setting's key.
+        key: String,
+    },
+    /// A folder of launch agents or daemons on this Mac that could not be listed.
+    LaunchFolder {
+        /// The folder, decoded lossily as the items in it are.
+        path: String,
+    },
+    /// A launch agent or daemon on this Mac whose property list or signatures could not be
+    /// checked. It is still in the bundle, as far as it was read.
+    LaunchItem {
+        /// Its property list as `mac/persistence.jsonl` and an issue name it: decoded lossily,
+        /// so a planted file with a name that is not UTF-8 is still listed, and still saved in
+        /// `report.json`, which a `PathBuf` of such a name cannot be.
+        path: String,
+    },
+    /// A GitHub repository's open alerts of one kind, by the name its file has
+    /// (`code-scanning`), which `gh` could not fetch.
+    Alerts {
+        /// The kind's name.
+        name: String,
+    },
+    /// The listing of a GitHub repository's `.github/workflows`.
+    Workflows,
+    /// One workflow file that `gh` could not fetch, by its file name.
+    Workflow {
+        /// The file name (`ci.yml`).
+        name: String,
+    },
     /// A kind a later build saved, read back by this one: the report then still reads, as not
     /// fully checked, instead of failing to parse after a downgrade. Never collected.
     #[serde(other)]
@@ -424,14 +457,92 @@ impl InventorySource {
             }
             Self::OsPackages => matches!(place, FoundIn::OsPackage { .. }),
             Self::DependencyGraph => matches!(place, FoundIn::DependencyGraph { .. }),
-            // The host checks give issues, not components.
-            Self::Posture | Self::LaunchItems | Self::Unknown => false,
+            // These give issues, not components.
+            Self::Setting { .. }
+            | Self::LaunchFolder { .. }
+            | Self::LaunchItem { .. }
+            | Self::Alerts { .. }
+            | Self::Workflows
+            | Self::Workflow { .. }
+            | Self::Unknown => false,
         }
     }
 
-    /// Whether it is a lockfile or a folder of them, which a summary counts together.
-    pub(crate) fn is_lockfiles(&self) -> bool {
-        matches!(self, Self::Lockfile { .. } | Self::LockfileWalk { .. })
+    /// Whether an issue about `subject` comes from this source, so a failure of this source
+    /// could have left it out. A report's failed sources are its target's, so a Mac's failed
+    /// setting is never asked about a GitHub setting's issue.
+    ///
+    /// Each covers only what it failed to read, never a whole kind: a failure that repeats on
+    /// every sweep (a settings tool that always times out, a program too large to hash in time)
+    /// would otherwise keep every issue of the kind open, a removed launch agent's included,
+    /// and none could resolve.
+    pub(crate) fn covers_issue(&self, subject: &Subject) -> bool {
+        match self {
+            Self::Setting { key } => matches!(subject, Subject::Setting(s) if s == key),
+            // Not recursive: launchd reads only a folder's own entries, and so does the listing.
+            Self::LaunchFolder { path } => matches!(
+                subject,
+                Subject::Item(item) if Path::new(item).parent() == Some(Path::new(path))
+            ),
+            Self::LaunchItem { path } => matches!(subject, Subject::Item(item) if item == path),
+            Self::Alerts { name } => match subject {
+                Subject::Setting(key) => *key == github::alerts_key(name),
+                Subject::File(path) => *path == github::alerts_file(name),
+                Subject::Item(_) => false,
+            },
+            Self::Workflows => {
+                matches!(subject, Subject::File(path) if path.starts_with(github::WORKFLOWS))
+            }
+            Self::Workflow { name } => matches!(
+                subject,
+                Subject::File(path) if path.strip_prefix(github::WORKFLOWS) == Some(name.as_str())
+            ),
+            // These give components, not issues.
+            Self::MacOs
+            | Self::Homebrew
+            | Self::Rustup
+            | Self::CargoInstall
+            | Self::Node
+            | Self::NpmGlobal
+            | Self::Python
+            | Self::UvTool
+            | Self::Pipx
+            | Self::VersionManagers
+            | Self::Lockfile { .. }
+            | Self::LockfileWalk { .. }
+            | Self::OsPackages
+            | Self::DependencyGraph
+            | Self::Unknown => false,
+        }
+    }
+
+    /// What a summary calls several sources of this sort, which it counts together rather
+    /// than name one by one: an unreadable folder tree fails in many places, a rate limit in
+    /// many files. `None` for a sort that fails once at most.
+    pub(crate) fn counted_as(&self) -> Option<&'static str> {
+        match self {
+            // A place is one lockfile or a folder tree of them.
+            Self::Lockfile { .. } | Self::LockfileWalk { .. } => Some("places with lockfiles"),
+            Self::Setting { .. } => Some("settings"),
+            Self::LaunchFolder { .. } => Some("launch folders"),
+            Self::LaunchItem { .. } => Some("launch items"),
+            Self::Alerts { .. } => Some("kinds of alerts"),
+            Self::Workflow { .. } => Some("workflow files"),
+            Self::MacOs
+            | Self::Homebrew
+            | Self::Rustup
+            | Self::CargoInstall
+            | Self::Node
+            | Self::NpmGlobal
+            | Self::Python
+            | Self::UvTool
+            | Self::Pipx
+            | Self::VersionManagers
+            | Self::OsPackages
+            | Self::DependencyGraph
+            | Self::Workflows
+            | Self::Unknown => None,
+        }
     }
 }
 
@@ -453,8 +564,12 @@ impl std::fmt::Display for InventorySource {
             Self::LockfileWalk { root } => write!(f, "lockfiles under {}", root.display()),
             Self::OsPackages => f.write_str("OS packages"),
             Self::DependencyGraph => f.write_str("the dependency graph"),
-            Self::Posture => f.write_str("macOS security settings"),
-            Self::LaunchItems => f.write_str("launch agents and daemons"),
+            Self::Setting { key } => write!(f, "the setting {key}"),
+            Self::LaunchFolder { path } => write!(f, "launch folder {path}"),
+            Self::LaunchItem { path } => write!(f, "launch item {path}"),
+            Self::Alerts { name } => write!(f, "{name} alerts"),
+            Self::Workflows => f.write_str("the list of workflows"),
+            Self::Workflow { name } => write!(f, "workflow {name}"),
             Self::Unknown => f.write_str("a source this version does not know"),
         }
     }
@@ -1034,8 +1149,9 @@ mod tests {
             path: "/a/uv.lock".into(),
         };
         assert_eq!(one.to_string(), "lockfile /a/uv.lock");
-        assert!(walk.is_lockfiles() && one.is_lockfiles());
-        assert!(!InventorySource::Homebrew.is_lockfiles());
+        assert_eq!(walk.counted_as(), Some("places with lockfiles"));
+        assert_eq!(one.counted_as(), Some("places with lockfiles"));
+        assert_eq!(InventorySource::Homebrew.counted_as(), None);
         assert_eq!(
             serde_json::to_value(&walk).unwrap(),
             serde_json::json!({"kind": "lockfile_walk", "root": "/Users/me/code"})
@@ -1070,14 +1186,9 @@ mod tests {
                 "dependency_graph",
             ),
             (
-                InventorySource::Posture,
-                "macOS security settings",
-                "posture",
-            ),
-            (
-                InventorySource::LaunchItems,
-                "launch agents and daemons",
-                "launch_items",
+                InventorySource::Workflows,
+                "the list of workflows",
+                "workflows",
             ),
         ];
         for (source, text, kind) in names {
@@ -1086,5 +1197,103 @@ mod tests {
             assert_eq!(value, serde_json::json!({ "kind": kind }));
             assert_eq!(InventorySource::deserialize(&value).unwrap(), source);
         }
+    }
+
+    #[test]
+    fn a_failed_source_covers_the_issues_it_could_have_produced() {
+        let setting = |key: &str| Subject::Setting(key.to_owned());
+        let file = |path: &str| Subject::File(path.to_owned());
+        let item = Subject::Item("/Library/LaunchAgents/a.plist".to_owned());
+
+        let firewall = InventorySource::Setting {
+            key: "firewall".to_owned(),
+        };
+        assert!(firewall.covers_issue(&setting("firewall")));
+        assert!(
+            !firewall.covers_issue(&setting("filevault")),
+            "only its own"
+        );
+        assert!(!firewall.covers_issue(&file("firewall")) && !firewall.covers_issue(&item));
+
+        let folder = InventorySource::LaunchFolder {
+            path: "/Library/LaunchAgents".into(),
+        };
+        assert!(folder.covers_issue(&item));
+        let nested = Subject::Item("/Library/LaunchAgents/x/b.plist".to_owned());
+        assert!(!folder.covers_issue(&nested), "launchd reads no subfolder");
+        let other = Subject::Item("/Library/LaunchDaemons/a.plist".to_owned());
+        assert!(!folder.covers_issue(&other));
+        let agent = InventorySource::LaunchItem {
+            path: "/Library/LaunchAgents/a.plist".into(),
+        };
+        assert!(agent.covers_issue(&item) && !agent.covers_issue(&other));
+        assert!(!agent.covers_issue(&setting("/Library/LaunchAgents/a.plist")));
+
+        let alerts = InventorySource::Alerts {
+            name: "code-scanning".to_owned(),
+        };
+        assert!(alerts.covers_issue(&setting("code_scanning_alerts")));
+        assert!(alerts.covers_issue(&file("github/code-scanning-alerts.json")));
+        assert!(!alerts.covers_issue(&setting("dependabot_alerts")));
+        assert!(!alerts.covers_issue(&file("github/dependabot-alerts.json")));
+        assert!(!alerts.covers_issue(&item));
+
+        let workflows = InventorySource::Workflows;
+        assert!(workflows.covers_issue(&file("github/workflows/ci.yml")));
+        assert!(!workflows.covers_issue(&file("github/settings.json")));
+        let ci = InventorySource::Workflow {
+            name: "ci.yml".to_owned(),
+        };
+        assert!(ci.covers_issue(&file("github/workflows/ci.yml")));
+        assert!(!ci.covers_issue(&file("github/workflows/ci.yml.bak")));
+        assert!(!ci.covers_issue(&file("ci.yml")));
+
+        assert!(!InventorySource::Homebrew.covers_issue(&setting("firewall")));
+        assert!(!InventorySource::Unknown.covers_issue(&item));
+
+        // As a report saves them.
+        for (source, saved, text) in [
+            (
+                firewall,
+                serde_json::json!({"kind": "setting", "key": "firewall"}),
+                "the setting firewall",
+            ),
+            (
+                folder,
+                serde_json::json!({"kind": "launch_folder", "path": "/Library/LaunchAgents"}),
+                "launch folder /Library/LaunchAgents",
+            ),
+            (
+                agent,
+                serde_json::json!({"kind": "launch_item", "path": "/Library/LaunchAgents/a.plist"}),
+                "launch item /Library/LaunchAgents/a.plist",
+            ),
+            (
+                alerts,
+                serde_json::json!({"kind": "alerts", "name": "code-scanning"}),
+                "code-scanning alerts",
+            ),
+            (
+                workflows,
+                serde_json::json!({"kind": "workflows"}),
+                "the list of workflows",
+            ),
+            (
+                ci,
+                serde_json::json!({"kind": "workflow", "name": "ci.yml"}),
+                "workflow ci.yml",
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&source).unwrap(), saved);
+            assert_eq!(InventorySource::deserialize(&saved).unwrap(), source);
+            assert_eq!(source.to_string(), text);
+        }
+        // A kind with fields from a later build reads as unknown, as a build from before these
+        // reads these, so a report still parses after an upgrade or a downgrade.
+        let later = serde_json::json!({"kind": "login_items", "folder": "/x"});
+        assert_eq!(
+            InventorySource::deserialize(&later).unwrap(),
+            InventorySource::Unknown
+        );
     }
 }

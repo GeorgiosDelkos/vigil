@@ -63,12 +63,13 @@ use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
 use crate::inventory::host;
 use crate::lifecycle;
-use crate::lifecycle::CarriedFinding;
+use crate::lifecycle::CarriedEntry;
 use crate::lifecycle::Changes;
 use crate::lifecycle::ComponentKey;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
+use crate::lifecycle::Found;
 use crate::matching;
 use crate::matching::Linked;
 use crate::matching::Match;
@@ -218,11 +219,12 @@ pub struct Report {
     pub out_of_range: usize,
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
-    /// Findings of the target's last report that this sweep did not find and could not check
-    /// again, because a source that could have produced them failed (see [`Unchecked`]). Each
-    /// stays open, as that report saved it, until a sweep checks it. Every reader of a report's
-    /// `findings` reads these too: they are open findings, only not checked again.
-    pub carried: Vec<CarriedFinding>,
+    /// Findings and issues of the target's last report that this sweep did not find and could
+    /// not check again, because a source that could have produced them failed (see
+    /// [`Unchecked`]). Each stays open, as that report saved it, until a sweep checks it. Every
+    /// reader of a report's `findings` and `issues` reads these too: they are open, only not
+    /// checked again. An issue among them has its `subject`; a finding has none.
+    pub carried: Vec<CarriedEntry>,
     /// Risky settings and files, most severe first.
     pub issues: Vec<ReportIssue>,
     /// What changed since this target's last sweep with a verdict; `None` without a verdict
@@ -791,7 +793,13 @@ impl Shared<'_> {
             (Vec::new(), None, false)
         } else {
             let dir_name = &collected.dir_name;
-            let carried = self.carry_over(dir_name, &unchecked, &findings, &mut problems);
+            let found = Found {
+                keys: (findings.iter().map(|f| f.key))
+                    .chain(issues.iter().map(|i| i.key))
+                    .collect(),
+                subjects: issues.iter().map(|i| i.issue.subject.clone()).collect(),
+            };
+            let carried = self.carry_over(dir_name, &unchecked, &found, &mut problems);
             let shown: Vec<(FindingKey, bool)> = (findings.iter())
                 .map(|f| (f.key, f.dismissed.is_some()))
                 .chain(carried.iter().map(|c| (c.key, c.dismissed.is_some())))
@@ -817,22 +825,23 @@ impl Shared<'_> {
         Ok(report)
     }
 
-    /// The findings of the target's newest readable report with a verdict that this sweep,
-    /// which found `findings`, could not check again ([`lifecycle::carried_over`]); none, with a
-    /// note, when the report it picked cannot be read again whole.
+    /// The findings and issues of the target's newest readable report with a verdict that this
+    /// sweep, which found `found`, could not check again
+    /// ([`lifecycle::carried_over`]); none, with a note, when the report it picked cannot be
+    /// read again whole.
     fn carry_over(
         &self,
         dir_name: &str,
         unchecked: &Unchecked,
-        findings: &[ReportFinding],
+        found: &Found,
         problems: &mut Vec<String>,
-    ) -> Vec<CarriedFinding> {
-        let found = findings.iter().map(|f| f.key).collect();
+    ) -> Vec<CarriedEntry> {
         let sweeps = self.data_dir.sweeps_dir();
-        lifecycle::carried_over(&sweeps, dir_name, unchecked, &found, self.dismissals)
+        lifecycle::carried_over(&sweeps, dir_name, unchecked, found, self.dismissals)
             .unwrap_or_else(|e| {
                 problems.push(format!(
-                    "the last sweep's findings, so those of failed sources were not kept: {}",
+                    "the last sweep's findings and issues, so those of failed sources were not \
+                     kept: {}",
                     error_chain(&e)
                 ));
                 Vec::new()
@@ -1578,8 +1587,9 @@ pub fn report_markdown(report: &Report) -> String {
     out
 }
 
-/// The section listing the findings carried over from an earlier sweep; nothing without any.
-fn carried_markdown(carried: &[CarriedFinding]) -> String {
+/// The section listing the findings and issues carried over from an earlier sweep; nothing
+/// without any.
+fn carried_markdown(carried: &[CarriedEntry]) -> String {
     if carried.is_empty() {
         return String::new();
     }
@@ -2937,6 +2947,108 @@ mod tests {
         assert_eq!(view.warning.as_deref(), Some("This Mac: Homebrew"));
     }
 
+    /// Four sweeps of one Mac with one launch agent, whose issue an agent reports while the
+    /// file `report` exists: reported; the item's check failing and the issue reported again
+    /// under a new key; failing with no issue; read again with no issue.
+    #[test]
+    fn an_issue_of_a_failed_source_stays_open_unless_its_subject_is_judged_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = DataDir::new(tmp.path().join("data"));
+        let server = feeds_server();
+        let endpoints = Endpoints {
+            osv: server.url.clone(),
+            nvd: server.url.clone(),
+            kev: server.url.clone(),
+        };
+        let feeds = Feeds::with_endpoints(data_dir.feeds_dir(), NvdAccess::Anonymous, endpoints);
+        let plist = "/Library/LaunchAgents/a.plist";
+        let report = tmp.path().join("report");
+        let issue = format!(
+            r#"{{"findings": [], "issues": [{{"subject": {{"item": "{plist}"}},
+            "severity": "high", "evidence": "e", "explanation": "x",
+            "fix": {{"summary": "remove it", "steps": ["remove it"], "commands": []}}}}]}}"#
+        );
+        let agent = tmp.path().join("agent");
+        let script = format!(
+            "#!/bin/sh\nif [ -e '{}' ]; then\necho '{issue}' > findings.json\nelse\n\
+             echo '{{\"findings\": [], \"issues\": []}}' > findings.json\nfi\n",
+            report.display()
+        );
+        fs::write(&agent, script).unwrap();
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+        let located = Located::at(&agent);
+        let kev = Kev::from_ids(&[]);
+        let cancel = Cancel::new();
+        let dismissals = Dismissals::default();
+        let shared = Shared {
+            data_dir: &data_dir,
+            dismissals: &dismissals,
+            sources: Sources {
+                feeds: &feeds,
+                history: Config::default_for_tests().history,
+                kev: Some(&kev),
+                cancel: &cancel,
+            },
+            agent: AgentKind::Claude,
+            located: &located,
+            notes: &[],
+        };
+        let sweep = |stamp: &str, identity: &str, failed| {
+            let collected = Collected {
+                target: "mac".to_owned(),
+                dir_name: "mac".to_owned(),
+                title: "this Mac".to_owned(),
+                prompt: Prompt::Mac,
+                components: Vec::new(),
+                files: Vec::new(),
+                settings: Vec::new(),
+                items: [(plist.to_owned(), identity.to_owned())].into(),
+                scope: IssueScope::Host,
+                problems: Vec::new(),
+                failed,
+            };
+            let dir = data_dir.sweeps_dir().join(stamp);
+            fs::create_dir_all(&dir).unwrap();
+            shared.sweep_target(&dir, collected, &mut |_| {}).unwrap()
+        };
+        let keys = |issues: &[ReportIssue]| issues.iter().map(|i| i.key).collect::<Vec<_>>();
+        let failed = || {
+            let path = plist.to_owned();
+            BTreeSet::from([InventorySource::LaunchItem { path }])
+        };
+
+        fs::write(&report, "").unwrap();
+        let first = sweep("20261105T100000Z", "cdhash:1", BTreeSet::new());
+        let [old] = keys(&first.issues)[..] else {
+            panic!("{:?}", first.issues)
+        };
+
+        // A changed program gives the item a new key; the agent judged it again.
+        let second = sweep("20261105T130000Z", "cdhash:2", failed());
+        let [new] = keys(&second.issues)[..] else {
+            panic!("{:?}", second.issues)
+        };
+        assert_ne!(new, old);
+        assert!(second.carried.is_empty(), "{:?}", second.carried);
+
+        // Not reported while the item's check failed: carried, open, not resolved.
+        fs::remove_file(&report).unwrap();
+        let third = sweep("20261105T160000Z", "cdhash:2", failed());
+        assert!(third.issues.is_empty());
+        let carried: Vec<FindingKey> = third.carried.iter().map(|c| c.key).collect();
+        assert_eq!(carried, [new]);
+        assert_eq!(third.changes.as_ref().unwrap().resolved, []);
+        let config = Config::default_for_tests();
+        let open = lifecycle::latest(&data_dir, &config).remove(0);
+        let open: Vec<FindingKey> = open.open.iter().map(|o| o.key).collect();
+        assert_eq!(open, [new]);
+
+        // Read again: resolved.
+        let fourth = sweep("20261105T190000Z", "cdhash:2", BTreeSet::new());
+        assert!(fourth.carried.is_empty());
+        assert_eq!(fourth.changes.as_ref().unwrap().resolved, [new]);
+    }
+
     #[test]
     fn a_report_lists_and_saves_what_it_carried_over() {
         let tmp = tempfile::tempdir().unwrap();
@@ -2953,7 +3065,7 @@ mod tests {
             &sweeps,
             "mac",
             &nvd_down,
-            &BTreeSet::new(),
+            &Found::default(),
             &Dismissals::default(),
         )
         .unwrap();
@@ -2985,7 +3097,7 @@ mod tests {
             &sweeps,
             "mac",
             &nvd_down,
-            &BTreeSet::new(),
+            &Found::default(),
             &Dismissals::default(),
         )
         .unwrap();
