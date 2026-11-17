@@ -398,9 +398,10 @@ cargo test -p vigil-app --features custom-protocol
 For a live-reloading app, run `cargo tauri dev` in `app/src-tauri` (needs `cargo install
 tauri-cli`).
 
-CI runs the same checks (tests with `cargo nextest`, on all features), the interface's checks
-and tests, and `cargo mutants` over each ready pull request's changes; `cargo deny` runs when
-dependencies change and daily. Tests use a fake agent on `PATH` to exercise sweeps, retries
+CI runs the same checks (tests with `cargo nextest`, on all features), and the interface's
+checks and tests; `cargo deny` runs when dependencies change and daily. Before a pull request
+goes ready, run `cargo mutants -j 2 --in-diff` over its changes and post the result on it; a
+pull request labelled `mutants` also runs it in CI. Tests use a fake agent on `PATH` to exercise sweeps, retries
 and failures without a real one.
 See [`docs/spec.md`](docs/spec.md) for the full design.
 
