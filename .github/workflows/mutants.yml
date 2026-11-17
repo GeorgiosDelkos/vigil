@@ -2,81 +2,58 @@
 # breaks each changed function in small ways (returns a default, flips a comparison) and fails
 # when the tests still pass, which means the tests do not check that code (TST-19). From the
 # cargo-mutants guide, https://mutants.rs/pr-diff.html (`--in-diff`), with house pinning.
-# Delete for a crate whose test suite takes more than a few minutes: every mutant reruns it.
-# Advisory: no branch protection or ruleset requires it (checked 2026-11-11), which is why the
-# `paths:` filter below may skip the whole workflow. If it is ever made required, replace the
-# filter with a skip step, or a docs-only PR waits on a check that never reports.
 #
-# Kept fast and cheap (decided with the owner on 2026-11-11, when mutants took 618 of 884 macOS
-# minutes, about 4 of each shard's 6.4 spent on an uncached build):
+# Runs only on a PR labelled `mutants` (decided with the owner on 2026-11-17). The evidence
+# a PR needs is the author's local `cargo mutants -j 2 --in-diff` run, posted on the PR before it
+# goes ready: on a Mac the run over PR 69's host checks took 18 minutes, and the same mutants
+# took about 2 hours per shard here, where the suite runs about 5 times slower and the
+# account allows 5 macOS jobs at once. Label a PR to have it run here as well. No ruleset
+# requires it (checked 2026-11-17), so it may skip.
+#
 # - It runs only when a PR changes Rust under crates/, the only code that can produce a mutant.
 #   `--in-diff` ignores every non-Rust file and the menu-bar app (`exclude_globs` in
-#   .cargo/mutants.toml), so a PR that touches only docs, Cargo.lock, prompts or the app has no
-#   mutants: the other workflows test those. A PR that changes only tests or comments still
-#   runs and finds nothing to mutate; telling those apart needs the diff, so it is accepted.
-#   Changes to this file and to the mutants config run it too, to check the setup.
-# - The dependencies come from a cache that the `warm` job below fills daily on main. A PR's
-#   cache is scoped to that PR, so without a main-branch writer every PR's first run would build
-#   from scratch on every shard.
-# - `--in-place` builds in that cached `target/`. cargo-mutants' default copies the tree, and a
-#   copy cannot reuse the build (https://mutants.rs/in-place.html). The runner's checkout is
-#   disposable, as in-place needs, and it is a git checkout with the whole history, which the
-#   prompt tests read (`copy_vcs` in .cargo/mutants.toml provides that only for copies).
+#   .cargo/mutants.toml). Changes to this file and to the mutants config run it too, to check
+#   the setup.
+# - No build cache: a run is rare, so a daily job keeping one warm would cost more than it
+#   saves (about 4 minutes of build per shard).
+# - `--in-place` builds in the runner's `target/`, which needs no copy of the tree
+#   (https://mutants.rs/in-place.html). The runner's checkout is disposable, as in-place needs,
+#   and it is a git checkout with the whole history, which the prompt tests read (`copy_vcs` in
+#   .cargo/mutants.toml provides that only for copies).
 permissions:
   contents: read
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # `labeled`: adding the label starts a run, on a PR that is not a draft and changes what
+    # `paths` lists; a draft's run starts when it is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
     paths:
       - "crates/**/*.rs"
       - ".cargo/mutants.toml"
       - ".github/workflows/mutants.yml"
-  schedule:
-    # Daily, before the working day, so the day's PRs restore a cache built from today's main.
-    - cron: '37 4 * * *'
-  # Warms the cache by hand, as the schedule does; it runs no mutants, which need a PR's diff.
-  workflow_dispatch:
-concurrency:
-  # Ends in the draft flag, so a skipped draft run cannot cancel the ready run that follows it.
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ github.event.pull_request.draft }}
-  cancel-in-progress: true
 name: mutants
 jobs:
-  # Builds what cargo-mutants builds, so the shards restore every dependency already compiled.
-  # The only job that saves the cache: rust-cache keeps the dependencies and drops the
-  # workspace crates, which every shard rebuilds for its own mutants anyway.
-  warm:
-    if: ${{ github.event_name != 'pull_request' }}
-    runs-on: macos-latest
-    name: warm the mutants build cache
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # tag=v7.0.1
-        with:
-          persist-credentials: false
-      - name: Install stable
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # branch=master
-        with:
-          toolchain: stable
-      - name: cargo install cargo-nextest
-        uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # tag=v2.88.0
-        with:
-          tool: cargo-nextest@0.9.150
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # tag=v2.9.3
-        with:
-          shared-key: mutants
-      # cargo-mutants' build phase under nextest, with the packages of `test_package` in
-      # .cargo/mutants.toml: another package set unifies the dependencies' features
-      # differently and would miss the cache.
-      - name: cargo nextest run --no-run
-        run: cargo nextest run --no-run --locked --package vigil-core --package vigil
   mutants:
-    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
+    # Adding another label also sends `labeled`; only the `mutants` label itself starts a run
+    # then, so labelling a PR "bug" does not run it again. The quoted name in the JSON list is
+    # an exact match: `contains` on a lone label's name would match `no-mutants` too.
+    if: >-
+      ${{ !github.event.pull_request.draft
+      && contains(toJSON(github.event.pull_request.labels.*.name), '"mutants"')
+      && (github.event.action != 'labeled' || github.event.label.name == 'mutants') }}
+    # On the job, not the workflow: a skipped run (another label, a draft) takes no slot, so it
+    # cannot cancel a run in progress. One group per shard, or the shards cancel each other.
+    # `github.ref` is `refs/pull/<number>/merge`: one per PR, where the head branch's name can
+    # be the same in two forks.
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.shard }}
+      cancel-in-progress: true
     # macOS, as in test.yml: a test runs the server script on the runner itself and expects no
     # dpkg database there. PR 50's 45 mutants took 7 to 17 minutes per shard on 8 shards.
     #
     # 4 shards: the account allows 5 concurrent macOS jobs, and a PR also starts 4 other macOS
     # jobs (stable clippy, release build, stable tests, app). More shards only queue behind those
-    # and repeat the per-shard setup (toolchain, cache restore, workspace build, baseline test).
+    # and repeat the per-shard setup (toolchain, build, baseline test).
     # The shard count must match the `/4` below (https://mutants.rs/shards.html).
     runs-on: macos-latest
     name: cargo mutants (PR diff, shard ${{ matrix.shard }})
@@ -108,10 +85,6 @@ jobs:
         uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # tag=v2.88.0
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.150
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # tag=v2.9.3
-        with:
-          shared-key: mutants
-          save-if: false
       # nextest runs every test binary's tests in parallel, each in its own process, and stops
       # starting tests at the first failure, where `cargo test` runs the binaries one after
       # another and each to its end; about 60 s of each mutant was the tests. test.yml runs the
