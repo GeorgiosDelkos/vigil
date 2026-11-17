@@ -71,7 +71,7 @@ impl Unchecked {
         !self.kev && self.osv.is_none() && self.nvd.is_empty() && self.inventory.is_empty()
     }
 
-    /// Which sources failed, in a few words for a person: "Homebrew, lockfiles in 4 places,
+    /// Which sources failed, in a few words for a person: "Homebrew, 4 places with lockfiles,
     /// CISA KEV, OSV, NVD for 3 products". `None` when every source was checked.
     ///
     /// Lockfiles, settings, launch items and workflow files are counted rather than named once
@@ -89,10 +89,6 @@ impl Unchecked {
         for (sort, sources) in counted {
             match sources[..] {
                 [one] => parts.push(one.to_string()),
-                // "lockfiles in 3 places": a place is a lockfile or a folder tree of them.
-                ref many if sort == "lockfiles" => {
-                    parts.push(format!("lockfiles in {} places", many.len()));
-                }
                 ref many => parts.push(format!("{} {sort}", many.len())),
             }
         }
@@ -255,7 +251,7 @@ mod tests {
         };
         assert_eq!(
             lockfiles.describe().unwrap(),
-            "pipx, lockfiles in 3 places",
+            "pipx, 3 places with lockfiles",
             "lockfiles are counted once there are several"
         );
         let one = Unchecked {
@@ -282,6 +278,36 @@ mod tests {
             rate_limited.describe().unwrap(),
             "the setting rulesets, 3 workflow files",
             "one of a sort is named, several are counted"
+        );
+        let item = |path: &str| InventorySource::LaunchItem {
+            path: path.to_owned(),
+        };
+        let folder = |path: &str| InventorySource::LaunchFolder {
+            path: path.to_owned(),
+        };
+        let alerts = |name: &str| InventorySource::Alerts {
+            name: name.to_owned(),
+        };
+        let setting = |key: &str| InventorySource::Setting {
+            key: key.to_owned(),
+        };
+        let each_sort = Unchecked {
+            inventory: [
+                item("/L/a.plist"),
+                item("/L/b.plist"),
+                folder("/L"),
+                folder("/M"),
+                alerts("dependabot"),
+                alerts("code-scanning"),
+                setting("firewall"),
+                setting("filevault"),
+            ]
+            .into(),
+            ..Unchecked::default()
+        };
+        assert_eq!(
+            each_sort.describe().unwrap(),
+            "2 kinds of alerts, 2 launch folders, 2 launch items, 2 settings"
         );
         let forged = Unchecked {
             inventory: [lockfile("/a/\u{1b}]52;c;x\u{7}\n/Cargo.lock")].into(),

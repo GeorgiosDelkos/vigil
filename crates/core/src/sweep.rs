@@ -2948,7 +2948,7 @@ mod tests {
     }
 
     /// Four sweeps of one Mac with one launch agent, whose issue an agent reports while the
-    /// file `report` exists: reported; the launch items failing and the issue reported again
+    /// file `report` exists: reported; the item's check failing and the issue reported again
     /// under a new key; failing with no issue; read again with no issue.
     #[test]
     fn an_issue_of_a_failed_source_stays_open_unless_its_subject_is_judged_again() {
@@ -3013,7 +3013,7 @@ mod tests {
         };
         let keys = |issues: &[ReportIssue]| issues.iter().map(|i| i.key).collect::<Vec<_>>();
         let failed = || {
-            let path = PathBuf::from(plist);
+            let path = plist.to_owned();
             BTreeSet::from([InventorySource::LaunchItem { path }])
         };
 
@@ -3031,7 +3031,7 @@ mod tests {
         assert_ne!(new, old);
         assert!(second.carried.is_empty(), "{:?}", second.carried);
 
-        // Not reported while the launch items failed: carried, open, not resolved.
+        // Not reported while the item's check failed: carried, open, not resolved.
         fs::remove_file(&report).unwrap();
         let third = sweep("20261105T160000Z", "cdhash:2", failed());
         assert!(third.issues.is_empty());

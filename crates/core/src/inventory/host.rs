@@ -161,8 +161,9 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
         // Covers no item: their paths are not known without the home folder. Accepted, since
         // `home_dir` falls back to the user database, so this does not happen on a Mac.
         let path = PathBuf::from("~/Library/LaunchAgents");
+        let folder = path.to_string_lossy().into_owned();
         inventory.fail(
-            InventorySource::LaunchFolder { path: path.clone() },
+            InventorySource::LaunchFolder { path: folder },
             InventoryError::Io {
                 path,
                 source: io::Error::new(io::ErrorKind::NotFound, "no home folder: set HOME"),
@@ -349,8 +350,9 @@ fn launch_items(
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
             Err(source) => {
                 let path = folder.clone();
+                let folder = folder.to_string_lossy().into_owned();
                 inventory.fail(
-                    InventorySource::LaunchFolder { path: path.clone() },
+                    InventorySource::LaunchFolder { path: folder },
                     InventoryError::Io { path, source },
                 );
                 continue;
@@ -361,7 +363,7 @@ fn launch_items(
                 let what = "reading launch items".to_owned();
                 // The sweep keeps no report of a cancelled inventory, so which source does not
                 // matter.
-                let path = folder.clone();
+                let path = folder.to_string_lossy().into_owned();
                 inventory.fail(
                     InventorySource::LaunchFolder { path },
                     InventoryError::Cancelled { what },
@@ -371,7 +373,8 @@ fn launch_items(
             let mut failures = Vec::new();
             items.push(read_item(*kind, &path, cancel, &mut failures));
             for e in failures {
-                let path = path.clone();
+                // As `read_item` names the item.
+                let path = path.to_string_lossy().into_owned();
                 inventory.fail(InventorySource::LaunchItem { path }, e);
             }
         }
@@ -1338,7 +1341,7 @@ TeamIdentifier=not set
         let mut inventory = Inventory::default();
         let folders = [(ItemKind::UserLaunchAgent, open.clone())];
         assert!(launch_items(&mut inventory, &folders, &cancel).is_empty());
-        let path = open.clone();
+        let path = open.to_string_lossy().into_owned();
         assert!(
             inventory
                 .failed

@@ -400,14 +400,16 @@ pub enum InventorySource {
     },
     /// A folder of launch agents or daemons on this Mac that could not be listed.
     LaunchFolder {
-        /// The folder.
-        path: PathBuf,
+        /// The folder, decoded lossily as the items in it are.
+        path: String,
     },
     /// A launch agent or daemon on this Mac whose property list or signatures could not be
     /// checked. It is still in the bundle, as far as it was read.
     LaunchItem {
-        /// Its property list.
-        path: PathBuf,
+        /// Its property list as `mac/persistence.jsonl` and an issue name it: decoded lossily,
+        /// so a planted file with a name that is not UTF-8 is still listed, and still saved in
+        /// `report.json`, which a `PathBuf` of such a name cannot be.
+        path: String,
     },
     /// A GitHub repository's open alerts of one kind, by the name its file has
     /// (`code-scanning`), which `gh` could not fetch.
@@ -478,10 +480,11 @@ impl InventorySource {
         match self {
             Self::Setting { key } => matches!(subject, Subject::Setting(s) if s == key),
             // Not recursive: launchd reads only a folder's own entries, and so does the listing.
-            Self::LaunchFolder { path } => {
-                matches!(subject, Subject::Item(item) if Path::new(item).parent() == Some(path))
-            }
-            Self::LaunchItem { path } => matches!(subject, Subject::Item(item) if path == item),
+            Self::LaunchFolder { path } => matches!(
+                subject,
+                Subject::Item(item) if Path::new(item).parent() == Some(Path::new(path))
+            ),
+            Self::LaunchItem { path } => matches!(subject, Subject::Item(item) if item == path),
             Self::Alerts { name } => match subject {
                 Subject::Setting(key) => *key == github::alerts_key(name),
                 Subject::File(path) => *path == github::alerts_file(name),
@@ -518,7 +521,8 @@ impl InventorySource {
     /// many files. `None` for a sort that fails once at most.
     pub(crate) fn counted_as(&self) -> Option<&'static str> {
         match self {
-            Self::Lockfile { .. } | Self::LockfileWalk { .. } => Some("lockfiles"),
+            // A place is one lockfile or a folder tree of them.
+            Self::Lockfile { .. } | Self::LockfileWalk { .. } => Some("places with lockfiles"),
             Self::Setting { .. } => Some("settings"),
             Self::LaunchFolder { .. } => Some("launch folders"),
             Self::LaunchItem { .. } => Some("launch items"),
@@ -561,8 +565,8 @@ impl std::fmt::Display for InventorySource {
             Self::OsPackages => f.write_str("OS packages"),
             Self::DependencyGraph => f.write_str("the dependency graph"),
             Self::Setting { key } => write!(f, "the setting {key}"),
-            Self::LaunchFolder { path } => write!(f, "launch folder {}", path.display()),
-            Self::LaunchItem { path } => write!(f, "launch item {}", path.display()),
+            Self::LaunchFolder { path } => write!(f, "launch folder {path}"),
+            Self::LaunchItem { path } => write!(f, "launch item {path}"),
             Self::Alerts { name } => write!(f, "{name} alerts"),
             Self::Workflows => f.write_str("the list of workflows"),
             Self::Workflow { name } => write!(f, "workflow {name}"),
@@ -1145,8 +1149,8 @@ mod tests {
             path: "/a/uv.lock".into(),
         };
         assert_eq!(one.to_string(), "lockfile /a/uv.lock");
-        assert_eq!(walk.counted_as(), Some("lockfiles"));
-        assert_eq!(one.counted_as(), Some("lockfiles"));
+        assert_eq!(walk.counted_as(), Some("places with lockfiles"));
+        assert_eq!(one.counted_as(), Some("places with lockfiles"));
         assert_eq!(InventorySource::Homebrew.counted_as(), None);
         assert_eq!(
             serde_json::to_value(&walk).unwrap(),
