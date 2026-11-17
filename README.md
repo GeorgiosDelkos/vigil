@@ -401,7 +401,8 @@ tauri-cli`).
 CI runs the same checks (tests with `cargo nextest`, on all features), and the interface's
 checks and tests; `cargo deny` runs when dependencies change and daily. Before a pull request
 goes ready, run `cargo mutants -j 2 --in-diff` over its changes and post the result on it; a
-pull request labelled `mutants` also runs it in CI. Tests use a fake agent on `PATH` to exercise sweeps, retries
+pull request labelled `mutants` also runs it in CI once it is ready, when it changes Rust
+under `crates/`. Tests use a fake agent on `PATH` to exercise sweeps, retries
 and failures without a real one.
 See [`docs/spec.md`](docs/spec.md) for the full design.
 

@@ -4,7 +4,7 @@
 # cargo-mutants guide, https://mutants.rs/pr-diff.html (`--in-diff`), with house pinning.
 #
 # Runs only on a PR labelled `mutants` (decided with the owner on 2026-11-17). The evidence
-# a PR needs is the author's local `cargo mutants --in-diff` run, posted on the PR before it
+# a PR needs is the author's local `cargo mutants -j 2 --in-diff` run, posted on the PR before it
 # goes ready: on a Mac the run over PR 69's host checks took 18 minutes, and the same mutants
 # took about 2 hours per shard here, where the suite runs about 5 times slower and the
 # account allows 5 macOS jobs at once. Label a PR to have it run here as well. No ruleset
@@ -24,7 +24,8 @@ permissions:
   contents: read
 on:
   pull_request:
-    # `labeled`: adding the label starts a run.
+    # `labeled`: adding the label starts a run, on a PR that is not a draft and changes what
+    # `paths` lists; a draft's run starts when it is marked ready.
     types: [opened, synchronize, reopened, ready_for_review, labeled]
     paths:
       - "crates/**/*.rs"
@@ -34,15 +35,18 @@ name: mutants
 jobs:
   mutants:
     # Adding another label also sends `labeled`; only the `mutants` label itself starts a run
-    # then, so labelling a PR "bug" does not run it again.
+    # then, so labelling a PR "bug" does not run it again. The quoted name in the JSON list is
+    # an exact match: `contains` on a lone label's name would match `no-mutants` too.
     if: >-
       ${{ !github.event.pull_request.draft
-      && contains(github.event.pull_request.labels.*.name, 'mutants')
+      && contains(toJSON(github.event.pull_request.labels.*.name), '"mutants"')
       && (github.event.action != 'labeled' || github.event.label.name == 'mutants') }}
     # On the job, not the workflow: a skipped run (another label, a draft) takes no slot, so it
     # cannot cancel a run in progress. One group per shard, or the shards cancel each other.
+    # `github.ref` is `refs/pull/<number>/merge`: one per PR, where the head branch's name can
+    # be the same in two forks.
     concurrency:
-      group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}-${{ matrix.shard }}
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.shard }}
       cancel-in-progress: true
     # macOS, as in test.yml: a test runs the server script on the runner itself and expects no
     # dpkg database there. PR 50's 45 mutants took 7 to 17 minutes per shard on 8 shards.
