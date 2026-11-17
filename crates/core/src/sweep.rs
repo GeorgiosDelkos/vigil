@@ -63,12 +63,13 @@ use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
 use crate::inventory::host;
 use crate::lifecycle;
-use crate::lifecycle::CarriedFinding;
+use crate::lifecycle::CarriedEntry;
 use crate::lifecycle::Changes;
 use crate::lifecycle::ComponentKey;
 use crate::lifecycle::Dismissal;
 use crate::lifecycle::Dismissals;
 use crate::lifecycle::FindingKey;
+use crate::lifecycle::Found;
 use crate::matching;
 use crate::matching::Linked;
 use crate::matching::Match;
@@ -218,11 +219,12 @@ pub struct Report {
     pub out_of_range: usize,
     /// The affected components, most severe first.
     pub findings: Vec<ReportFinding>,
-    /// Findings of the target's last report that this sweep did not find and could not check
-    /// again, because a source that could have produced them failed (see [`Unchecked`]). Each
-    /// stays open, as that report saved it, until a sweep checks it. Every reader of a report's
-    /// `findings` reads these too: they are open findings, only not checked again.
-    pub carried: Vec<CarriedFinding>,
+    /// Findings and issues of the target's last report that this sweep did not find and could
+    /// not check again, because a source that could have produced them failed (see
+    /// [`Unchecked`]). Each stays open, as that report saved it, until a sweep checks it. Every
+    /// reader of a report's `findings` and `issues` reads these too: they are open, only not
+    /// checked again. An issue among them has its `subject`; a finding has none.
+    pub carried: Vec<CarriedEntry>,
     /// Risky settings and files, most severe first.
     pub issues: Vec<ReportIssue>,
     /// What changed since this target's last sweep with a verdict; `None` without a verdict
@@ -791,7 +793,8 @@ impl Shared<'_> {
             (Vec::new(), None, false)
         } else {
             let dir_name = &collected.dir_name;
-            let carried = self.carry_over(dir_name, &unchecked, &findings, &mut problems);
+            let found = (findings.as_slice(), issues.as_slice());
+            let carried = self.carry_over(dir_name, &unchecked, found, &mut problems);
             let shown: Vec<(FindingKey, bool)> = (findings.iter())
                 .map(|f| (f.key, f.dismissed.is_some()))
                 .chain(carried.iter().map(|c| (c.key, c.dismissed.is_some())))
@@ -817,22 +820,29 @@ impl Shared<'_> {
         Ok(report)
     }
 
-    /// The findings of the target's newest readable report with a verdict that this sweep,
-    /// which found `findings`, could not check again ([`lifecycle::carried_over`]); none, with a
-    /// note, when the report it picked cannot be read again whole.
+    /// The findings and issues of the target's newest readable report with a verdict that this
+    /// sweep, which found `findings` and `issues`, could not check again
+    /// ([`lifecycle::carried_over`]); none, with a note, when the report it picked cannot be
+    /// read again whole.
     fn carry_over(
         &self,
         dir_name: &str,
         unchecked: &Unchecked,
-        findings: &[ReportFinding],
+        (findings, issues): (&[ReportFinding], &[ReportIssue]),
         problems: &mut Vec<String>,
-    ) -> Vec<CarriedFinding> {
-        let found = findings.iter().map(|f| f.key).collect();
+    ) -> Vec<CarriedEntry> {
+        let found = Found {
+            keys: (findings.iter().map(|f| f.key))
+                .chain(issues.iter().map(|i| i.key))
+                .collect(),
+            subjects: issues.iter().map(|i| i.issue.subject.clone()).collect(),
+        };
         let sweeps = self.data_dir.sweeps_dir();
         lifecycle::carried_over(&sweeps, dir_name, unchecked, &found, self.dismissals)
             .unwrap_or_else(|e| {
                 problems.push(format!(
-                    "the last sweep's findings, so those of failed sources were not kept: {}",
+                    "the last sweep's findings and issues, so those of failed sources were not \
+                     kept: {}",
                     error_chain(&e)
                 ));
                 Vec::new()
@@ -1578,8 +1588,9 @@ pub fn report_markdown(report: &Report) -> String {
     out
 }
 
-/// The section listing the findings carried over from an earlier sweep; nothing without any.
-fn carried_markdown(carried: &[CarriedFinding]) -> String {
+/// The section listing the findings and issues carried over from an earlier sweep; nothing
+/// without any.
+fn carried_markdown(carried: &[CarriedEntry]) -> String {
     if carried.is_empty() {
         return String::new();
     }
@@ -2953,7 +2964,7 @@ mod tests {
             &sweeps,
             "mac",
             &nvd_down,
-            &BTreeSet::new(),
+            &Found::default(),
             &Dismissals::default(),
         )
         .unwrap();
@@ -2985,7 +2996,7 @@ mod tests {
             &sweeps,
             "mac",
             &nvd_down,
-            &BTreeSet::new(),
+            &Found::default(),
             &Dismissals::default(),
         )
         .unwrap();

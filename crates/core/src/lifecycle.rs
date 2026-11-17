@@ -1,6 +1,6 @@
 //! What carries over from one sweep to the next: finding keys, dismissals, what changed
-//! since the target's last sweep, the findings a degraded sweep could not check again
-//! ([`CarriedFinding`], see `unchecked`), and which reported fixes a later sweep confirmed
+//! since the target's last sweep, the findings and issues a degraded sweep could not check
+//! again ([`CarriedEntry`], see `unchecked`), and which reported fixes a later sweep confirmed
 //! (`state/fixes.jsonl`).
 //!
 //! A [`FindingKey`] names one finding or issue across sweeps, so a dismissal and the
@@ -28,6 +28,7 @@ use serde::de::IgnoredAny;
 use crate::config::Config;
 use crate::findings::Confidence;
 use crate::findings::Severity;
+use crate::findings::Subject;
 use crate::findings::is_forging;
 use crate::fix;
 use crate::inventory::FoundIn;
@@ -320,13 +321,15 @@ pub(crate) fn first_seen(
         .collect())
 }
 
-/// A finding of a target's last report that a sweep did not find again and could not have:
-/// a source that could have produced it failed in that sweep ([`Unchecked::covers`]). The new
-/// report keeps it as the last one saved it, so it stays open and its fix unconfirmed until a
-/// sweep checks it. Without this, a sweep with OSV offline read as every OSV finding resolved.
+/// A finding or issue of a target's last report that a sweep did not find again and could not
+/// have: a source that could have produced it failed in that sweep ([`Unchecked::covers`],
+/// [`Unchecked::covers_issue`]). The new report keeps it as the last one saved it, so it stays
+/// open and its fix unconfirmed until a sweep checks it. Without this, a sweep with OSV offline
+/// read as every OSV finding resolved, and one that could not list the launch agents as every
+/// launch item's issue resolved.
 #[derive(Debug, Serialize)]
 #[serde(transparent)]
-pub struct CarriedFinding {
+pub struct CarriedEntry {
     /// Its key.
     #[serde(skip)]
     pub(crate) key: FindingKey,
@@ -347,26 +350,43 @@ pub struct CarriedFinding {
     entry: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A report's findings and carried findings with all their fields, for [`carried_over`].
+/// A report's findings, carried entries and issues with all their fields, for
+/// [`carried_over`].
 #[derive(Debug, Deserialize)]
 struct Entries {
     findings: Vec<serde_json::Map<String, serde_json::Value>>,
     #[serde(default)]
     carried: Vec<serde_json::Map<String, serde_json::Value>>,
+    #[serde(default)]
+    issues: Vec<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// The findings of the target's newest readable report with a verdict in `<sweep>/<dir_name>`
-/// that are not in `found`, this sweep's findings, and that a source failed in `unchecked`
-/// could have produced, each with its dismissal in `dismissals`. Unreadable reports are passed
-/// over; the sweep notes their error with its changes. A finding carried before keeps the time
-/// it was first carried from.
+/// What a sweep found, against which [`carried_over`] picks what to carry.
+#[derive(Debug, Default)]
+pub(crate) struct Found {
+    /// The keys of its findings and issues.
+    pub(crate) keys: BTreeSet<FindingKey>,
+    /// The subjects of its issues.
+    pub(crate) subjects: BTreeSet<Subject>,
+}
+
+/// The findings and issues of the target's newest readable report with a verdict in
+/// `<sweep>/<dir_name>` that this sweep did not find again and that a source failed in
+/// `unchecked` could have produced, each with its dismissal in `dismissals`. Unreadable
+/// reports are passed over; the sweep notes their error with its changes. An entry carried
+/// before keeps the time it was first carried from.
+///
+/// An issue whose subject this sweep reported an issue about is not carried, whatever its
+/// key: that one is the current judgment of the subject. An item's key follows what it runs,
+/// so a launch item whose program's signature could not be checked this time has a new key
+/// and the old issue would otherwise show beside the new one.
 pub(crate) fn carried_over(
     sweeps: &Path,
     dir_name: &str,
     unchecked: &Unchecked,
-    found: &BTreeSet<FindingKey>,
+    found: &Found,
     dismissals: &Dismissals,
-) -> Result<Vec<CarriedFinding>, StateError> {
+) -> Result<Vec<CarriedEntry>, StateError> {
     if unchecked.is_empty() {
         return Ok(Vec::new());
     }
@@ -387,13 +407,23 @@ pub(crate) fn carried_over(
     })?;
     let entries: Entries = serde_json::from_str(&text).map_err(invalid)?;
     let mut carried = Vec::new();
-    for mut entry in entries.findings.into_iter().chain(entries.carried) {
+    let all = entries.findings.into_iter().chain(entries.carried);
+    for mut entry in all.chain(entries.issues) {
         let saved =
             SavedEntry::deserialize(&serde_json::Value::Object(entry.clone())).map_err(invalid)?;
-        let installed = saved.installed.as_ref();
-        let lookup = installed.map_or(&serde_json::Value::Null, |i| &i.lookup);
-        let place = installed.and_then(|i| FoundIn::deserialize(&i.found_in).ok());
-        if found.contains(&saved.key) || !unchecked.covers(lookup, place.as_ref()) {
+        // A subject of a kind a later build saved is not carried: what covers it is not known
+        // here.
+        let left_out = if let Some(subject) = entry.get("subject") {
+            Subject::deserialize(subject).is_ok_and(|subject| {
+                !found.subjects.contains(&subject) && unchecked.covers_issue(&subject)
+            })
+        } else {
+            let installed = saved.installed.as_ref();
+            let lookup = installed.map_or(&serde_json::Value::Null, |i| &i.lookup);
+            let place = installed.and_then(|i| FoundIn::deserialize(&i.found_in).ok());
+            unchecked.covers(lookup, place.as_ref())
+        };
+        if found.keys.contains(&saved.key) || !left_out {
             continue;
         }
         let carried_from = saved.carried_from.unwrap_or(last.started);
@@ -404,7 +434,7 @@ pub(crate) fn carried_over(
             "dismissed".to_owned(),
             serde_json::to_value(&dismissed).map_err(invalid)?,
         );
-        carried.push(CarriedFinding {
+        carried.push(CarriedEntry {
             key: saved.key,
             severity: saved.severity,
             title: saved.title,
@@ -2118,7 +2148,10 @@ mod tests {
             nvd: ["curl".to_owned()].into(),
             ..Unchecked::default()
         };
-        let found = BTreeSet::from([package]);
+        let found = Found {
+            keys: BTreeSet::from([package]),
+            ..Found::default()
+        };
         let none = Dismissals::default();
         let carried = carried_over(&sweeps, "mac", &nvd_down, &found, &none).unwrap();
         let [c] = &carried[..] else {
@@ -2226,7 +2259,10 @@ mod tests {
                 inventory: failed.iter().cloned().collect(),
                 ..Unchecked::default()
             };
-            let found = found.iter().copied().collect();
+            let found = Found {
+                keys: found.iter().copied().collect(),
+                ..Found::default()
+            };
             let carried = carried_over(&sweeps, "mac", &unchecked, &found, &none).unwrap();
             carried.iter().map(|c| c.key).collect::<Vec<_>>()
         };
@@ -2251,6 +2287,84 @@ mod tests {
             [],
             "nothing of theirs was found last time"
         );
+    }
+
+    #[test]
+    fn a_failed_source_carries_the_issues_it_could_have_produced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sweeps = tmp.path().join("sweeps");
+        let [agent, firewall, earlier, martian] = [1, 2, 3, 4].map(FindingKey);
+        let plist = "/Library/LaunchAgents/a.plist";
+        let issue = |key: FindingKey, subject: Value| {
+            json!({"key": key, "severity": "high", "title": format!("issue {key}"),
+                "subject": subject, "explanation": "kept as saved"})
+        };
+        let first = "2026-11-05T10:00:00Z";
+        let mut before = issue(earlier, json!({"item": "/Library/LaunchAgents/b.plist"}));
+        before["carried_from"] = json!(first);
+        let extra = json!({
+            "issues": [
+                issue(agent, json!({"item": plist})),
+                issue(firewall, json!({"setting": "firewall"})),
+                // A subject of a kind a later build saved.
+                issue(martian, json!({"extension": "x"})),
+            ],
+            "carried": [before],
+        });
+        save(
+            &sweeps,
+            "20261105T130000Z/mac",
+            &report_of("2026-11-05T13:00:00Z", &[], &extra),
+        );
+
+        let none = Dismissals::default();
+        let carried = |failed: InventorySource, found: Found| {
+            let unchecked = Unchecked {
+                inventory: [failed].into(),
+                ..Unchecked::default()
+            };
+            let carried = carried_over(&sweeps, "mac", &unchecked, &found, &none).unwrap();
+            carried.iter().map(|c| c.key).collect::<Vec<_>>()
+        };
+
+        let all = carried(InventorySource::LaunchItems, Found::default());
+        assert_eq!(
+            all,
+            [earlier, agent],
+            "carried before, and from this report"
+        );
+        assert_eq!(
+            carried(InventorySource::Posture, Found::default()),
+            [firewall]
+        );
+        let same_subject = Found {
+            subjects: [Subject::Item(plist.to_owned())].into(),
+            ..Found::default()
+        };
+        assert_eq!(
+            carried(InventorySource::LaunchItems, same_subject),
+            [earlier],
+            "this sweep judged the item again, under another key"
+        );
+        let same_key = Found {
+            keys: [agent].into(),
+            ..Found::default()
+        };
+        assert_eq!(carried(InventorySource::LaunchItems, same_key), [earlier]);
+        assert_eq!(carried(InventorySource::Homebrew, Found::default()), []);
+
+        let unchecked = Unchecked {
+            inventory: [InventorySource::LaunchItems].into(),
+            ..Unchecked::default()
+        };
+        let again = carried_over(&sweeps, "mac", &unchecked, &Found::default(), &none).unwrap();
+        let written = serde_json::to_value(&again[0]).unwrap();
+        assert_eq!(written["carried_from"], first, "from the last check");
+        assert_eq!(
+            written["subject"],
+            json!({"item": "/Library/LaunchAgents/b.plist"})
+        );
+        assert_eq!(written["explanation"], "kept as saved");
     }
 
     #[test]
@@ -2314,7 +2428,7 @@ mod tests {
             ..Unchecked::default()
         };
         let none = Dismissals::default();
-        let carried = carried_over(&sweeps, "mac", &nvd_down, &BTreeSet::new(), &none).unwrap();
+        let carried = carried_over(&sweeps, "mac", &nvd_down, &Found::default(), &none).unwrap();
         assert_eq!(carried.len(), 1, "past the unreadable report");
 
         // Dismissals that cannot be read dismiss nothing, on every target, which says so.

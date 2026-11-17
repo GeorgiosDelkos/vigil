@@ -64,6 +64,19 @@ const ALERT_PAGES: usize = 5;
 const ALERTS_PER_PAGE: usize = 100;
 
 /// The value of a setting that could not be collected; the reason is a problem in the report.
+/// Where the workflow files are in the bundle; an issue names one by its path there.
+pub(crate) const WORKFLOWS: &str = "github/workflows/";
+
+/// The key in `github/settings.json` of the open alerts of `name` (`code-scanning`).
+pub(crate) fn alerts_key(name: &str) -> String {
+    format!("{}_alerts", name.replace('-', "_"))
+}
+
+/// The bundle file listing the open alerts of `name` (`code-scanning`).
+pub(crate) fn alerts_file(name: &str) -> String {
+    format!("github/{name}-alerts.json")
+}
+
 const NOT_COLLECTED: &str = "not collected; see the problems in the report";
 
 /// The `settings.json` key of the organization's 2FA requirement.
@@ -150,12 +163,18 @@ impl Repo {
             }
             Ok(Alerts::Other(Answer::Ok(other))) => {
                 let what = kind_of(&other);
+                self.failed.insert(InventorySource::Alerts {
+                    name: name.to_owned(),
+                });
                 self.problems
                     .push(format!("{name} alerts: expected a list, got {what}"));
                 json!(NOT_COLLECTED)
             }
             Ok(Alerts::Other(Answer::Refused { status, message })) => refused(status, &message),
             Err(e) => {
+                self.failed.insert(InventorySource::Alerts {
+                    name: name.to_owned(),
+                });
                 self.problems.push(format!("{name} alerts: {e}"));
                 json!(NOT_COLLECTED)
             }
@@ -169,10 +188,8 @@ impl Repo {
             // secret never reaches the bundle or the agent's context.
             remove_secrets(alert);
         }
-        self.files.push((
-            format!("github/{name}-alerts.json"),
-            pretty(&Value::Array(alerts)),
-        ));
+        self.files
+            .push((alerts_file(name), pretty(&Value::Array(alerts))));
     }
 
     /// Adds the default branch's workflow files under `github/workflows/`.
@@ -185,6 +202,7 @@ impl Repo {
             Ok(Answer::Refused { status: 404, .. }) => return,
             Ok(Answer::Ok(other)) => {
                 let what = kind_of(&other);
+                self.failed.insert(InventorySource::Workflows);
                 self.problems
                     .push(format!("workflows: expected a folder listing, got {what}"));
                 return;
@@ -195,6 +213,7 @@ impl Repo {
                 return;
             }
             Err(e) => {
+                self.failed.insert(InventorySource::Workflows);
                 self.problems.push(format!("workflows: {e}"));
                 return;
             }
@@ -255,8 +274,13 @@ impl Repo {
                 "workflow {name}: {} bytes, over the {WORKFLOW_SIZE_LIMIT}-byte limit; not read",
                 text.len()
             )),
-            Ok(text) => self.files.push((format!("github/workflows/{name}"), text)),
-            Err(e) => self.problems.push(format!("workflow {name}: {e}")),
+            Ok(text) => self.files.push((format!("{WORKFLOWS}{name}"), text)),
+            Err(e) => {
+                self.failed.insert(InventorySource::Workflow {
+                    name: name.to_owned(),
+                });
+                self.problems.push(format!("workflow {name}: {e}"));
+            }
         }
     }
 
@@ -266,6 +290,9 @@ impl Repo {
             Ok(Answer::Ok(value)) => value,
             Ok(Answer::Refused { status, message }) => refused(status, &message),
             Err(e) => {
+                self.failed.insert(InventorySource::RepoSetting {
+                    key: key.to_owned(),
+                });
                 self.problems.push(format!("setting {key}: {e}"));
                 json!(NOT_COLLECTED)
             }
@@ -283,6 +310,9 @@ impl Repo {
                 .unwrap_or_else(|| json!(NOT_VISIBLE)),
             Ok(Answer::Refused { status, message }) => refused(status, &message),
             Err(e) => {
+                self.failed.insert(InventorySource::RepoSetting {
+                    key: TWO_FACTOR.to_owned(),
+                });
                 self.problems.push(format!("setting {TWO_FACTOR}: {e}"));
                 json!(NOT_COLLECTED)
             }
@@ -393,7 +423,7 @@ pub(crate) fn collect(gh: &str, repo: &RepoSlug) -> Result<Repo, GitHubError> {
         ),
     ] {
         let value = out.alerts(gh, name, &path);
-        settings.insert(format!("{}_alerts", name.replace('-', "_")), value);
+        settings.insert(alerts_key(name), value);
     }
     out.workflows(gh, &base);
 
@@ -1101,6 +1131,27 @@ esac
     }
 
     #[test]
+    fn only_requests_that_failed_are_failed_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = fake_gh(tmp.path());
+        let repo = collect(&gh, &slug("o/r")).unwrap();
+        // Files left out by a limit or a name stay so on the next sweep, so only the failed
+        // requests are failures.
+        assert_eq!(
+            repo.failed,
+            [
+                InventorySource::Workflow {
+                    name: "gone.yml".to_owned()
+                },
+                InventorySource::RepoSetting {
+                    key: "actions_workflow_permissions".to_owned()
+                },
+            ]
+            .into()
+        );
+    }
+
+    #[test]
     fn rate_limits_and_broken_answers_are_failures_not_settings() {
         let tmp = tempfile::tempdir().unwrap();
         let gh = fake_gh(tmp.path());
@@ -1152,10 +1203,22 @@ esac
             !problems.contains("turn on the dependency graph"),
             "{problems}"
         );
+        let alerts = |name: &str| InventorySource::Alerts {
+            name: name.to_owned(),
+        };
+        let two_factor = InventorySource::RepoSetting {
+            key: TWO_FACTOR.to_owned(),
+        };
         assert_eq!(
             repo.failed,
-            [InventorySource::DependencyGraph].into(),
-            "a rate limit passes"
+            [
+                InventorySource::DependencyGraph,
+                alerts("dependabot"),
+                alerts("code-scanning"),
+                two_factor,
+            ]
+            .into(),
+            "a rate limit and a broken answer pass; the workflows' refusal lasts"
         );
     }
 

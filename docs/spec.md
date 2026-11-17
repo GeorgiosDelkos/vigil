@@ -178,7 +178,14 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   place the failed inventory source lists: a Homebrew formula or cask for `homebrew`, a
   lockfile at the path or under the root for `lockfile` and `lockfile_walk`), goes into the
   new report's `carried` as that report saved it, with `carried_from`, the start
-  of the last sweep that checked it. It stays open, is neither
+  of the last sweep that checked it. So does an issue that this sweep did not find and that a
+  failed source could have produced, unless this sweep reported an issue about the same
+  subject (decided 2026-11-17): every Mac setting for `posture`, every launch item for
+  `launch_items`, the setting for `repo_setting`, the setting and file of one kind of alerts
+  for `alerts`, the workflow files for `workflows` and one for `workflow`. A GitHub refusal
+  (403, 404) lasts and fails nothing; an error `gh` gives without GitHub's answer, or an answer
+  of the wrong shape, fails the part. A server's issues are not carried: what fails there (`ss`
+  missing, a login outside the docker group) lasts. It stays open, is neither
   resolved nor new, and its fix is not confirmed until a sweep that checks it; a fix planned
   from any report since `carried_from` is still "fix reported". A target whose newest report
   has anything `unchecked` is never clear (see "UI"). A report saved before these fields reads
@@ -407,9 +414,8 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 
 Accepted gaps, in the order planned:
 
-- Issues are not carried over when their source fails (`lifecycle::carried_over` carries
-  findings only), so a failed `launch_items` read shows the target as not clear but drops last
-  sweep's item issues from the report. GitHub and server issues have the same gap.
+- A failed settings tool carries every Mac setting's issue, so a setting fixed in that same
+  sweep stays open until the next one.
 - Each file is `stat`ed with no time limit, so a program on a network share that does not
   answer blocks the sweep, as a version manager's folder there does. A huge unsigned file
   costs a 60-second `shasum` and marks `launch_items` unchecked.

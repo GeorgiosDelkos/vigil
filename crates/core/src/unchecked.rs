@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::findings::Subject;
 use crate::inventory::FoundIn;
 use crate::inventory::InventorySource;
 use crate::sweep;
@@ -147,6 +148,14 @@ impl Unchecked {
             .get("product")
             .and_then(Value::as_str)
             .is_some_and(|product| self.nvd.contains(product))
+    }
+
+    /// Whether a source that failed could have produced an issue about `subject`
+    /// ([`InventorySource::covers_issue`]). The feeds produce no issues.
+    pub(crate) fn covers_issue(&self, subject: &Subject) -> bool {
+        self.inventory
+            .iter()
+            .any(|source| source.covers_issue(subject))
     }
 }
 

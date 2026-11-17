@@ -26,6 +26,8 @@ use serde::Serialize;
 
 use crate::cancel::Cancel;
 use crate::feeds::Product;
+use crate::findings::Subject;
+use crate::github;
 use crate::package::Package;
 
 /// Everything found installed, plus what could not be collected.
@@ -346,8 +348,9 @@ impl VersionManager {
     }
 }
 
-/// A source of components that failed in a sweep, as [`Inventory::failed`] and a report's
-/// `unchecked` name it: coarser than [`FoundIn`], one entry per thing listed or read at once.
+/// A source of components or issues that failed in a sweep, as [`Inventory::failed`] and a
+/// report's `unchecked` name it: coarser than [`FoundIn`], one entry per thing listed or read
+/// at once.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum InventorySource {
@@ -391,6 +394,26 @@ pub enum InventorySource {
     Posture,
     /// This Mac's launch agents and daemons, and the signatures of what they run.
     LaunchItems,
+    /// A GitHub repository's setting that `gh` could not fetch, by its key in
+    /// `github/settings.json`. A refusal (the feature off, or not visible to the login) lasts,
+    /// so it is not a failure.
+    RepoSetting {
+        /// The setting's key.
+        key: String,
+    },
+    /// A GitHub repository's open alerts of one kind, by the name its file has
+    /// (`code-scanning`), which `gh` could not fetch.
+    Alerts {
+        /// The kind's name.
+        name: String,
+    },
+    /// The listing of a GitHub repository's `.github/workflows`.
+    Workflows,
+    /// One workflow file that `gh` could not fetch, by its file name.
+    Workflow {
+        /// The file name (`ci.yml`).
+        name: String,
+    },
     /// A kind a later build saved, read back by this one: the report then still reads, as not
     /// fully checked, instead of failing to parse after a downgrade. Never collected.
     #[serde(other)]
@@ -424,8 +447,58 @@ impl InventorySource {
             }
             Self::OsPackages => matches!(place, FoundIn::OsPackage { .. }),
             Self::DependencyGraph => matches!(place, FoundIn::DependencyGraph { .. }),
-            // The host checks give issues, not components.
-            Self::Posture | Self::LaunchItems | Self::Unknown => false,
+            // These give issues, not components.
+            Self::Posture
+            | Self::LaunchItems
+            | Self::RepoSetting { .. }
+            | Self::Alerts { .. }
+            | Self::Workflows
+            | Self::Workflow { .. }
+            | Self::Unknown => false,
+        }
+    }
+
+    /// Whether an issue about `subject` comes from this source, so a failure of this source
+    /// could have left it out. A report's failed sources are its target's, so `Posture` is
+    /// never asked about a GitHub setting.
+    ///
+    /// `Posture` covers every setting, though it fails one tool at a time: a setting read this
+    /// time is judged again, and when the agent still reports it, that issue keeps the old one
+    /// from being carried (see `lifecycle::carried_over`). So only a risk fixed in the same
+    /// sweep that another tool failed stays open, until the next sweep.
+    pub(crate) fn covers_issue(&self, subject: &Subject) -> bool {
+        match self {
+            Self::Posture => matches!(subject, Subject::Setting(_)),
+            Self::LaunchItems => matches!(subject, Subject::Item(_)),
+            Self::RepoSetting { key } => matches!(subject, Subject::Setting(s) if s == key),
+            Self::Alerts { name } => match subject {
+                Subject::Setting(key) => *key == github::alerts_key(name),
+                Subject::File(path) => *path == github::alerts_file(name),
+                Subject::Item(_) => false,
+            },
+            Self::Workflows => {
+                matches!(subject, Subject::File(path) if path.starts_with(github::WORKFLOWS))
+            }
+            Self::Workflow { name } => matches!(
+                subject,
+                Subject::File(path) if path.strip_prefix(github::WORKFLOWS) == Some(name.as_str())
+            ),
+            // These give components, not issues.
+            Self::MacOs
+            | Self::Homebrew
+            | Self::Rustup
+            | Self::CargoInstall
+            | Self::Node
+            | Self::NpmGlobal
+            | Self::Python
+            | Self::UvTool
+            | Self::Pipx
+            | Self::VersionManagers
+            | Self::Lockfile { .. }
+            | Self::LockfileWalk { .. }
+            | Self::OsPackages
+            | Self::DependencyGraph
+            | Self::Unknown => false,
         }
     }
 
@@ -455,6 +528,10 @@ impl std::fmt::Display for InventorySource {
             Self::DependencyGraph => f.write_str("the dependency graph"),
             Self::Posture => f.write_str("macOS security settings"),
             Self::LaunchItems => f.write_str("launch agents and daemons"),
+            Self::RepoSetting { key } => write!(f, "the repository setting {key}"),
+            Self::Alerts { name } => write!(f, "{name} alerts"),
+            Self::Workflows => f.write_str("the list of workflows"),
+            Self::Workflow { name } => write!(f, "workflow {name}"),
             Self::Unknown => f.write_str("a source this version does not know"),
         }
     }
@@ -1085,6 +1162,75 @@ mod tests {
             let value = serde_json::to_value(&source).unwrap();
             assert_eq!(value, serde_json::json!({ "kind": kind }));
             assert_eq!(InventorySource::deserialize(&value).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn a_failed_source_covers_the_issues_it_could_have_produced() {
+        let setting = |key: &str| Subject::Setting(key.to_owned());
+        let file = |path: &str| Subject::File(path.to_owned());
+        let item = Subject::Item("/Library/LaunchAgents/a.plist".to_owned());
+
+        let posture = InventorySource::Posture;
+        assert!(posture.covers_issue(&setting("firewall")) && !posture.covers_issue(&item));
+        let launch_items = InventorySource::LaunchItems;
+        assert!(launch_items.covers_issue(&item));
+        assert!(!launch_items.covers_issue(&setting("firewall")));
+
+        let rulesets = InventorySource::RepoSetting {
+            key: "rulesets".to_owned(),
+        };
+        assert!(rulesets.covers_issue(&setting("rulesets")));
+        assert!(!rulesets.covers_issue(&setting("actions_permissions")));
+        assert!(!rulesets.covers_issue(&file("rulesets")));
+
+        let alerts = InventorySource::Alerts {
+            name: "code-scanning".to_owned(),
+        };
+        assert!(alerts.covers_issue(&setting("code_scanning_alerts")));
+        assert!(alerts.covers_issue(&file("github/code-scanning-alerts.json")));
+        assert!(!alerts.covers_issue(&setting("dependabot_alerts")));
+        assert!(!alerts.covers_issue(&file("github/dependabot-alerts.json")));
+
+        let workflows = InventorySource::Workflows;
+        assert!(workflows.covers_issue(&file("github/workflows/ci.yml")));
+        assert!(!workflows.covers_issue(&file("github/settings.json")));
+        let ci = InventorySource::Workflow {
+            name: "ci.yml".to_owned(),
+        };
+        assert!(ci.covers_issue(&file("github/workflows/ci.yml")));
+        assert!(!ci.covers_issue(&file("github/workflows/ci.yml.bak")));
+        assert!(!ci.covers_issue(&file("ci.yml")));
+
+        assert!(!InventorySource::Homebrew.covers_issue(&setting("firewall")));
+        assert!(!InventorySource::Unknown.covers_issue(&item));
+
+        // As a report saves them.
+        for (source, saved, text) in [
+            (
+                rulesets,
+                serde_json::json!({"kind": "repo_setting", "key": "rulesets"}),
+                "the repository setting rulesets",
+            ),
+            (
+                alerts,
+                serde_json::json!({"kind": "alerts", "name": "code-scanning"}),
+                "code-scanning alerts",
+            ),
+            (
+                workflows,
+                serde_json::json!({"kind": "workflows"}),
+                "the list of workflows",
+            ),
+            (
+                ci,
+                serde_json::json!({"kind": "workflow", "name": "ci.yml"}),
+                "workflow ci.yml",
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&source).unwrap(), saved);
+            assert_eq!(InventorySource::deserialize(&saved).unwrap(), source);
+            assert_eq!(source.to_string(), text);
         }
     }
 }
