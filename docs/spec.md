@@ -453,11 +453,13 @@ Startup files and root's programs (added 2026-11-18):
   no arguments, so the agent reports a file whose quotes do not balance; and zsh expands a word that
   starts with `=` (`--token =ls`) to a program's path, which stays masked, since `=` ends base64
   tokens. An alias body is never masked by its name: a line that holds the word `alias` anywhere,
-  however quoted or escaped, has only its secret-shaped words masked, since which names it defines
-  depends on the shell's quoting (three reviews found quotings a narrower rule misread); accepted
-  downside: a short secret on such a line is shown. A file over the limit keeps only its whole
-  lines, so a token is never cut short. Property tests check
-  that a command after any prefix stays shown. The first design hid every assignment's value
+  once quotes, backslashes and `$` are removed, has only its secret-shaped words masked, since
+  which names it defines depends on the shell's quoting (three reviews found quotings a narrower
+  rule misread); accepted downside: a short secret on such a line is shown. Not seen: `alias`
+  spelled through an expansion or an escape (`${a}as`, `{al,}ias`, `$'\x61lias'`), whose values
+  are masked by name. A file over the limit keeps only its whole lines, so a token is never cut
+  short. Property tests check that a command after any prefix stays shown. The first design
+  hid every assignment's value
   with a shell lexer; five reviews each found a line it read differently from zsh or bash,
   leaking a token or letting a planted line (`# TOKEN="`) hide a later command. Accepted
   downside: a short password under an innocent name (`DB=hunter2`), and a secret-named value
