@@ -318,8 +318,7 @@ impl<'a> Archive<'a> {
             let store = self.dictionary(store).ok_or("userStore is not an object")?;
             let records = store
                 .get("records")
-                .map(|r| self.array(r))
-                .unwrap_or_default();
+                .map_or_else(Vec::new, |r| self.array(r));
             return Ok(vec![Self::records(&records)]);
         }
         if let Some(store) = self.top.get("store") {
