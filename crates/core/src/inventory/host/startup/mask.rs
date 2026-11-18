@@ -17,7 +17,8 @@
 //!   backslash, `$` (so a reference to another variable, `$TMPDIR/agent.sock`), a brace, a
 //!   glob character, a quote); a path (`/`, `~/`, `./`); and anything on a line that holds the
 //!   word `alias` ([`holds_alias`]), whose body is code (an `alias` spelled through an
-//!   expansion, `${a}as`, is not seen). The word rules still mask a token inside any of them;
+//!   expansion or an escape, `${a}as`, `$'\x61lias'`, is not seen). The word rules still mask
+//!   a token inside any of them;
 //! - the password in a URL (`postgres://app:x@db`), and a token as its user
 //!   (`https://<token>@github.com`).
 //!
@@ -433,8 +434,9 @@ fn narrow(form: Form, value: &str) -> Option<(usize, usize)> {
     Some((0, value.len()))
 }
 
-/// Whether `line` holds the word `alias` anywhere once quotes, backslashes and `$` are removed
-/// (`\alias`, `'al'ias`, `ali$'a's`, `eval 'alias ...'`). Such a line may define an alias, whose
+/// Whether `line` holds the word `alias` anywhere once quotes, backslashes and the `$` of `$'`
+/// are removed (`\alias`, `'al'ias`, `ali$'a's`, `eval 'alias ...'`). Such a line may define an
+/// alias, whose
 /// body is code that runs when its name is typed, so nothing on it is masked by name. Deciding
 /// which names an alias defines needs the shell's quoting rules, and three reviews in a row found a
 /// quoting this module read differently (`alias 'pass=x'`, `then alias`, `eval '...'`); a scan of
@@ -443,7 +445,11 @@ fn narrow(form: Form, value: &str) -> Option<(usize, usize)> {
 /// an expansion or an escape (`${a}as`, `{al,}ias`, `$'\x61lias'`), whose values are masked by
 /// name; each such value is still one word with no operator or space.
 fn holds_alias(line: &str) -> bool {
-    line.replace(['\\', '\'', '"', '$'], "")
+    // A `$` that opens `$'...'` or `$"..."` goes with its quote; any other `$` ends a word, so
+    // `alias$IFS'pass=x'` still holds `alias`.
+    line.replace("$'", "'")
+        .replace("$\"", "\"")
+        .replace(['\\', '\'', '"'], "")
         .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
         .any(|word| word == "alias")
 }
@@ -1040,6 +1046,8 @@ mod tests {
             "x;alias pass=evil-helper",
             "ali$'a's pass=evil-helper",
             "al$\"\"ias token=evil",
+            "alias$IFS'pass=evil-helper'",
+            "alias$x pass=evil-helper",
             "{alias pass=evilcmd}",
             "x=`alias pass=evil-helper`",
             "eval 'alias pass=evil-helper'",
@@ -1203,11 +1211,12 @@ mod tests {
             spelling in proptest::sample::select(vec![
                 "alias", "\\alias", "'alias'", "$'alias'", "ali$'a's", "al$\"\"ias",
             ]),
+            separator in proptest::sample::select(vec![" ", "$IFS", "${IFS}"]),
             name in proptest::sample::select(vec!["pass", "token", "GITHUB_TOKEN", "api_key"]),
             quote in proptest::sample::select(vec!["", "'", "\""]),
             body in "[a-z][a-z0-9-]{4,12}",
         ) {
-            let line = format!("{prefix}{spelling} ll=ls {quote}{name}={body}{quote}");
+            let line = format!("{prefix}{spelling}{separator}ll=ls {quote}{name}={body}{quote}");
             let shown = mask(&line);
             proptest::prop_assert!(shown.contains(&body), "{line} -> {shown}");
         }
