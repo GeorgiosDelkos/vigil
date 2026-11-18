@@ -214,13 +214,24 @@ fn listed(kind: FileKind, folder: &Path, root_run: Option<&Account>) -> Vec<Star
     files
 }
 
+/// The length of the whole lines at the start of `cut`, a file cut at [`FILE_LIMIT`]. A line cut
+/// part way is left out: a token cut short would fall below its shape's length and show, and
+/// a cut inside a character would show as U+FFFD.
+fn whole_lines(cut: &[u8]) -> usize {
+    cut.iter().rposition(|&b| b == b'\n').map_or(0, |at| at + 1)
+}
+
 /// The file at `path`, `None` when it is not there. `root_run` is the account to check
 /// replaceability against, for a file that runs as root.
 fn read(kind: FileKind, path: &Path, root_run: Option<&Account>) -> Option<StartupFile> {
     match read_following(path) {
         Ok(bytes) => {
             let truncated = bytes.len() > FILE_LIMIT;
-            let shown = &bytes[..bytes.len().min(FILE_LIMIT)];
+            let shown = if truncated {
+                &bytes[..whole_lines(&bytes[..FILE_LIMIT])]
+            } else {
+                &bytes[..]
+            };
             Some(StartupFile {
                 path: path.to_string_lossy().into_owned(),
                 kind,
@@ -287,8 +298,12 @@ fn user_crontab(root: &Path, account: &Account) -> Option<StartupFile> {
         Ok(None) => None,
         Ok(Some(output)) if output.success => {
             // Capped as a file is, so a planted crontab cannot fill every bundle.
-            let end = output.stdout.floor_char_boundary(FILE_LIMIT);
-            let truncated = end < output.stdout.len();
+            let truncated = output.stdout.len() > FILE_LIMIT;
+            let end = if truncated {
+                whole_lines(&output.stdout.as_bytes()[..FILE_LIMIT])
+            } else {
+                output.stdout.len()
+            };
             Some(file(None, lines(&output.stdout[..end]), truncated))
         }
         // What crontab(1) says, and exits 1 with, when the user has no crontab.
@@ -404,16 +419,15 @@ mod tests {
         // Decoded lossily, so a byte that is not UTF-8 keeps the other jobs; capped as a file.
         let lossy = crontab("printf 'a\\377b\\n@reboot /tmp/x\\n'").unwrap();
         assert_eq!(lossy.lines, ["a\u{FFFD}b", "@reboot /tmp/x"]);
-        // A three-byte character across the limit is cut before it, never in its middle.
+        // The line across the limit is left out whole, never cut in a character's middle.
         let script = format!(
-            "head -c {} /dev/zero | tr '\\\\0' z; printf '\\342\\234\\223tail'",
-            FILE_LIMIT - 1
+            "printf '@reboot /tmp/x\\n'; head -c {} /dev/zero | tr '\\\\0' z; \
+             printf '\\342\\234\\223tail'",
+            FILE_LIMIT - 16
         );
         let long = crontab(&script).unwrap();
         assert!(long.truncated);
-        let kept = long.lines.concat();
-        assert_eq!(kept.len(), FILE_LIMIT - 1);
-        assert!(!kept.contains('\u{FFFD}'));
+        assert_eq!(long.lines, ["@reboot /tmp/x"]);
         fs::remove_file(&tool).unwrap();
         assert!(user_crontab(tmp.path(), &account).is_none(), "no tool");
     }
@@ -434,6 +448,17 @@ mod tests {
             over.lines.len(),
             limit / 2,
             "the line past the limit is left out"
+        );
+        // A token across the limit is left out with its line, not shown cut below its shape.
+        let token = format!("ghp_{}", "A".repeat(40));
+        fs::write(&path, "a\n".repeat(limit / 2 - 4) + &token + "\n").unwrap();
+        let cut = read(FileKind::ShellStartup, &path, None).unwrap();
+        assert!(cut.truncated);
+        assert_eq!(cut.lines.len(), limit / 2 - 4);
+        assert!(
+            !cut.lines.concat().contains("ghp_"),
+            "{:?}",
+            cut.lines.last()
         );
     }
 

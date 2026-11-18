@@ -443,7 +443,8 @@ Startup files and root's programs (added 2026-11-18):
   says it is secret (`TOKEN`, `SECRET`, `PASS`, `AUTH`, `CREDENTIAL`, `KEY`, `COOKIE`, by name
   segment), the password or token in a URL, and secret headers and JSON keys. No shell is
   parsed and nothing carries from one line to the next, so no line can hide another (owner's
-  decision, 2026-11-18). A value masked by its name never holds a shell operator (`;`, `|`,
+  decision, 2026-11-18). One bit carries: a line continued by a trailing backslash may be an
+  alias's body, so only its secret-shaped words are masked; the carry can only show more. A value masked by its name never holds a shell operator (`;`, `|`,
   `&`, `<`, `>`, a parenthesis, a backquote), white space, a backslash or a `$`: a value that
   would is shown, unless a word of it looks like a secret (owner's choice, 2026-11-18, of
   narrowing over documenting the gap). So masked text is never a command with arguments, an
@@ -452,7 +453,8 @@ Startup files and root's programs (added 2026-11-18):
   no arguments, so the agent reports a file whose quotes do not balance; and zsh expands a word
   that starts with `=` (`--token =ls`) to a program's path, which stays masked, since `=` ends
   base64 tokens. An alias body is never masked by its name: any `alias` word in the command,
-  however quoted or escaped, shows the values after it. Property tests check
+  however quoted or escaped, or in quoted text it runs (`eval 'alias ...'`), shows the values
+  after it. A file over the limit keeps only its whole lines, so a token is never cut short. Property tests check
   that a command after any prefix stays shown. The first design hid every assignment's value
   with a shell lexer; five reviews each found a line it read differently from zsh or bash,
   leaking a token or letting a planted line (`# TOKEN="`) hide a later command. Accepted
