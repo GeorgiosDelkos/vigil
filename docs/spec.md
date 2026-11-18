@@ -449,7 +449,10 @@ Startup files and root's programs (added 2026-11-18):
   narrowing over documenting the gap). So masked text is never a command with arguments, an
   operator, a redirection or an expansion, even when a quote opened on an earlier line makes
   the shell read it as code. Left: such a quote could make one masked word a command name with
-  no arguments, so the agent reports a file whose quotes do not balance. Property tests check
+  no arguments, so the agent reports a file whose quotes do not balance; and zsh expands a word
+  that starts with `=` (`--token =ls`) to a program's path, which stays masked, since `=` ends
+  base64 tokens. An alias body is never masked by its name: any `alias` word in the command,
+  however quoted or escaped, shows the values after it. Property tests check
   that a command after any prefix stays shown. The first design hid every assignment's value
   with a shell lexer; five reviews each found a line it read differently from zsh or bash,
   leaking a token or letting a planted line (`# TOKEN="`) hide a later command. Accepted
