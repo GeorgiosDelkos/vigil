@@ -70,7 +70,8 @@ pub(super) enum Place {
     /// The app bundle, or the property list inside one.
     Found(PathBuf),
     /// A record that could not be placed: `shown` is its identifier and its own text for the
-    /// place, so no two records share it, and `why` says what is missing.
+    /// place, so records of different items stay apart, and `why` says what is missing. It is
+    /// never an absolute path, which tells it from a launch folder item.
     Unplaced { shown: String, why: String },
 }
 
@@ -85,7 +86,7 @@ pub(super) struct Switches {
 
 impl Switches {
     /// Whether the item runs: only while both are on.
-    pub(super) fn run(self) -> bool {
+    pub(super) fn runs(self) -> bool {
         self.enabled && self.allowed
     }
 }
@@ -154,7 +155,7 @@ fn newest_files(folder: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 /// What a file's name says about it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug)]
 struct Version {
     number: u32,
     /// Named for one user (`-<user>` after the number).
@@ -309,7 +310,8 @@ impl<'a> Archive<'a> {
         }
     }
 
-    /// Each user's records.
+    /// Each user's records. The index of the per-user layout holds none; it is read only when
+    /// no per-user file is beside it, such as before any user has a record.
     fn users(&self) -> Result<Vec<Vec<&'a Dictionary>>, String> {
         if let Some(store) = self.top.get("userStore") {
             let store = self.dictionary(store).ok_or("userStore is not an object")?;
@@ -331,6 +333,9 @@ impl<'a> Archive<'a> {
                 .iter()
                 .map(|records| Self::records(&self.array(records)))
                 .collect());
+        }
+        if self.top.contains_key("infoByUserIdentifier") {
+            return Ok(Vec::new());
         }
         let keys: Vec<&str> = self.top.keys().map(String::as_str).collect();
         Err(format!(
@@ -750,7 +755,6 @@ pub(super) mod tests {
         write(&tmp.path().join("BackgroundItems-v16.btm"), &old);
         let new = Archiver::user_file(&[record(APP, "2.new", Some("file:///New.app/"))]);
         write(&tmp.path().join("BackgroundItems-v18-a.btm"), &new);
-        // The index, which holds no records.
         // The index beside per-user files is not read, so a change to it fails nothing.
         fs::write(
             tmp.path().join("BackgroundItems-v18.btm"),
@@ -778,6 +782,17 @@ pub(super) mod tests {
             "{errors:?}"
         );
         assert!(failures.iter().all(InventoryError::is_failure));
+    }
+
+    #[test]
+    fn an_index_with_no_per_user_file_beside_it_has_no_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let users = Value::Dictionary(Dictionary::new());
+        let index = Archiver::new().finish(vec![("infoByUserIdentifier", users)]);
+        write(&tmp.path().join("BackgroundItems-v18.btm"), &index);
+        let mut failures = Vec::new();
+        assert!(read(tmp.path(), &mut failures).is_empty());
+        assert!(failures.is_empty(), "{failures:?}");
     }
 
     #[test]
@@ -851,11 +866,10 @@ pub(super) mod tests {
 
     #[test]
     fn file_names_give_their_version() {
-        let v = |name: &str| version(OsStr::new(name));
-        let at = |number, per_user| Some(Version { number, per_user });
-        assert_eq!(v("BackgroundItems-v18.btm"), at(18, false));
-        assert_eq!(v("BackgroundItems-v18-9AAA-56AB.btm"), at(18, true));
-        assert_eq!(v("BackgroundItems-v4.btm"), at(4, false));
+        let v = |name: &str| version(OsStr::new(name)).map(|v| (v.number, v.per_user));
+        assert_eq!(v("BackgroundItems-v18.btm"), Some((18, false)));
+        assert_eq!(v("BackgroundItems-v18-9AAA-56AB.btm"), Some((18, true)));
+        assert_eq!(v("BackgroundItems-v4.btm"), Some((4, false)));
         assert_eq!(v("BackgroundItems-v.btm"), None);
         assert_eq!(v("BackgroundItems-v18.btm.tmp"), None);
         assert_eq!(v("backgrounditems.btm"), None);

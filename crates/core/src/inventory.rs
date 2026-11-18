@@ -490,13 +490,14 @@ impl InventorySource {
                 Subject::Item(item) if Path::new(item).parent() == Some(Path::new(path))
             ),
             Self::LaunchItem { path } => matches!(subject, Subject::Item(item) if item == path),
-            // Every item these records give is an app bundle or a file inside one, and no
-            // launch folder item is, unless its own name ends in `.app`. A file that fails on
+            // Every item these records give is an app bundle, a file inside one, or a record
+            // that could not be placed (see `host::may_come_from_records`). A file that fails on
             // every sweep keeps these issues open, which is the truth: none of its items was
             // read.
-            Self::BackgroundItems => {
-                matches!(subject, Subject::Item(item) if host::is_in_app(Path::new(item)))
-            }
+            Self::BackgroundItems => matches!(
+                subject,
+                Subject::Item(item) if host::may_come_from_records(Path::new(item))
+            ),
             Self::Alerts { name } => match subject {
                 Subject::Setting(key) => *key == github::alerts_key(name),
                 Subject::File(path) => *path == github::alerts_file(name),
@@ -1234,6 +1235,30 @@ mod tests {
     }
 
     #[test]
+    fn failed_records_cover_the_items_they_could_have_produced() {
+        let item = Subject::Item("/Library/LaunchAgents/a.plist".to_owned());
+        let file = |path: &str| Subject::File(path.to_owned());
+        let setting = |key: &str| Subject::Setting(key.to_owned());
+        let records = InventorySource::BackgroundItems;
+        let login_item =
+            Subject::Item("/Applications/A.app/Contents/Library/LoginItems/H.app".into());
+        assert!(records.covers_issue(&login_item));
+        assert!(records.covers_issue(&Subject::Item("/Applications/Gone.app".into())));
+        let unplaced = Subject::Item("4.d: (no location)".into());
+        assert!(
+            records.covers_issue(&unplaced),
+            "an unplaced record's text is not absolute"
+        );
+        assert!(
+            !records.covers_issue(&item),
+            "a launch folder's item is read from the folder"
+        );
+        assert!(
+            !records.covers_issue(&file("A.app/x")) && !records.covers_issue(&setting("A.app"))
+        );
+    }
+
+    #[test]
     fn a_failed_source_covers_the_issues_it_could_have_produced() {
         let setting = |key: &str| Subject::Setting(key.to_owned());
         let file = |path: &str| Subject::File(path.to_owned());
@@ -1262,19 +1287,6 @@ mod tests {
         };
         assert!(agent.covers_issue(&item) && !agent.covers_issue(&other));
         assert!(!agent.covers_issue(&setting("/Library/LaunchAgents/a.plist")));
-
-        let records = InventorySource::BackgroundItems;
-        let login_item =
-            Subject::Item("/Applications/A.app/Contents/Library/LoginItems/H.app".into());
-        assert!(records.covers_issue(&login_item));
-        assert!(records.covers_issue(&Subject::Item("/Applications/Gone.app".into())));
-        assert!(
-            !records.covers_issue(&item),
-            "a launch folder's item is read from the folder"
-        );
-        assert!(
-            !records.covers_issue(&file("A.app/x")) && !records.covers_issue(&setting("A.app"))
-        );
 
         let alerts = InventorySource::Alerts {
             name: "code-scanning".to_owned(),

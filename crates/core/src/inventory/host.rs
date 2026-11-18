@@ -31,6 +31,8 @@
 //! `/System/Library/Launch*` is left out because it is on the sealed system volume.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
@@ -193,10 +195,14 @@ pub fn needs_full_disk_access() -> bool {
     background::needs_full_disk_access(&system_root().join(background::FOLDER))
 }
 
-/// Whether `path` is an app bundle or inside one, as every item [`background_items`] gives is.
-pub(crate) fn is_in_app(path: &Path) -> bool {
-    path.components()
-        .any(|part| Path::new(part.as_os_str()).extension() == Some("app".as_ref()))
+/// Whether an item at `path` can come from [`background_items`]: an app bundle or a file inside
+/// one, or a record that could not be placed, whose text is never an absolute path. No launch
+/// folder item is either, unless its own name ends in `.app`.
+pub(crate) fn may_come_from_records(path: &Path) -> bool {
+    !path.is_absolute()
+        || path
+            .components()
+            .any(|part| Path::new(part.as_os_str()).extension() == Some("app".as_ref()))
 }
 
 impl Host {
@@ -464,20 +470,28 @@ fn background_items(inventory: &mut Inventory, folder: &Path, cancel: &Cancel) -
     for e in failures {
         inventory.fail(InventorySource::BackgroundItems, e);
     }
-    let mut at: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    // By the item's path as the bundle and an issue name it, unplaced records included.
+    let mut at: HashMap<String, usize> = HashMap::new();
     let mut items: Vec<Item> = Vec::new();
     for entry in entries {
-        if let Place::Found(path) = &entry.place
-            && let Some(&index) = at.get(path)
-        {
-            let seen = items[index]
-                .login_items
-                .as_mut()
-                .expect("every item from the records has its switches");
-            if entry.switches.run() {
-                *seen = entry.switches;
+        let shown = match &entry.place {
+            Place::Found(path) => path.to_string_lossy().into_owned(),
+            Place::Unplaced { shown, .. } => shown.clone(),
+        };
+        match at.entry(shown.clone()) {
+            Entry::Occupied(index) => {
+                let seen = items[*index.get()]
+                    .login_items
+                    .as_mut()
+                    .expect("every item from the records has its switches");
+                if entry.switches.runs() {
+                    *seen = entry.switches;
+                }
+                continue;
             }
-            continue;
+            Entry::Vacant(slot) => {
+                slot.insert(items.len());
+            }
         }
         if cancel.is_cancelled() {
             let what = "reading login items".to_owned();
@@ -491,15 +505,10 @@ fn background_items(inventory: &mut Inventory, folder: &Path, cancel: &Cancel) -
         let mut item = match (entry.place, entry.kind) {
             (Place::Unplaced { shown, why }, kind) => Item::unread(kind, shown, why, None),
             (Place::Found(path), kind @ (ItemKind::LoginItem | ItemKind::OpenAtLogin)) => {
-                at.insert(path.clone(), items.len());
                 bundle_item(kind, &path, cancel, &mut failures)
             }
-            (Place::Found(path), kind) => {
-                at.insert(path.clone(), items.len());
-                read_item(kind, &path, cancel, &mut failures)
-            }
+            (Place::Found(path), kind) => read_item(kind, &path, cancel, &mut failures),
         };
-        let shown = item.path.clone();
         if item.label.is_none() {
             item.label = entry.name;
         }
@@ -1731,7 +1740,16 @@ TeamIdentifier=not set
             bits: 0x4,
             ..record(disposition, "4.b", Some(other_url.as_str()))
         };
-        let first = [record(0b01, "2.a", Some(url.as_str())), helper(0b01)];
+        // The same unplaced record for both users is one item too, merged the same way.
+        let unplaced = |disposition| Record {
+            bits: 0x4,
+            ..record(disposition, "4.x", None)
+        };
+        let first = [
+            record(0b01, "2.a", Some(url.as_str())),
+            helper(0b01),
+            unplaced(0b01),
+        ];
         let second = [
             record(0b11, "2.a", Some(url.as_str())),
             helper(0b10),
@@ -1806,7 +1824,10 @@ TeamIdentifier=not set
         // Exactly the limit is read; one byte more is not.
         let text = plist_text("<key>CFBundleExecutable</key><string>A</string>");
         let limit = usize::try_from(PLIST_LIMIT).unwrap();
-        let padded = format!("{text}<!-- {} -->", " ".repeat(limit - text.len() - 9));
+        let padded = format!(
+            "{text}<!-- {} -->",
+            " ".repeat(limit - text.len() - "<!--  -->".len())
+        );
         let at_limit = info("Limit.app", &padded);
         assert_eq!(error(&at_limit), "");
         let over = info("Over.app", &format!("{padded}\n"));
@@ -1888,12 +1909,12 @@ TeamIdentifier=not set
             app_of(Path::new("/A.app/Library/LaunchAgents/a.plist")),
             None
         );
-        assert!(is_in_app(Path::new("/Applications/A.app")));
-        assert!(is_in_app(Path::new(
-            "/A.app/Contents/Library/LaunchAgents/a.plist"
-        )));
-        assert!(!is_in_app(Path::new("/Library/LaunchAgents/a.plist")));
-        assert!(!is_in_app(Path::new("/Library/LaunchAgents/app")));
+        let from_records = |path: &str| may_come_from_records(Path::new(path));
+        assert!(from_records("/Applications/A.app"));
+        assert!(from_records("/A.app/Contents/Library/LaunchAgents/a.plist"));
+        assert!(from_records("4.d: (no location)"), "unplaced");
+        assert!(!from_records("/Library/LaunchAgents/a.plist"));
+        assert!(!from_records("/Library/LaunchAgents/app"));
     }
 
     #[test]
