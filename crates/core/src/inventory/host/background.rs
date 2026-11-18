@@ -71,7 +71,9 @@ pub(super) enum Place {
     Found(PathBuf),
     /// A record that could not be placed: `shown` is its identifier and its own text for the
     /// place, so records of different items stay apart, and `why` says what is missing. It is
-    /// never an absolute path, which tells it from a launch folder item.
+    /// never an absolute path, which tells it from a launch folder item: macOS starts every
+    /// identifier with the record's type number (`4.`), undocumented but seen in every version
+    /// read so far, and a missing one shows as `(no identifier)`.
     Unplaced { shown: String, why: String },
 }
 

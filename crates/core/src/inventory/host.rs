@@ -197,7 +197,7 @@ pub fn needs_full_disk_access() -> bool {
 
 /// Whether an item at `path` can come from [`background_items`]: an app bundle or a file inside
 /// one, or a record that could not be placed, whose text is never an absolute path. No launch
-/// folder item is either, unless its own name ends in `.app`.
+/// folder item is either, unless a folder on its path or its own name ends in `.app`.
 pub(crate) fn may_come_from_records(path: &Path) -> bool {
     !path.is_absolute()
         || path
@@ -1714,7 +1714,7 @@ TeamIdentifier=not set
     }
 
     #[test]
-    fn users_records_of_one_item_merge_and_unplaced_ones_stay_apart() {
+    fn the_same_record_for_several_users_is_one_item() {
         use background::tests::Archiver;
         use background::tests::Record;
 
@@ -1753,10 +1753,7 @@ TeamIdentifier=not set
         let second = [
             record(0b11, "2.a", Some(url.as_str())),
             helper(0b10),
-            Record {
-                bits: 0x4,
-                ..record(0b11, "4.x", None)
-            },
+            unplaced(0b11),
             Record {
                 bits: 0x4,
                 ..record(0b11, "4.y", None)
@@ -1909,12 +1906,10 @@ TeamIdentifier=not set
             app_of(Path::new("/A.app/Library/LaunchAgents/a.plist")),
             None
         );
-        let from_records = |path: &str| may_come_from_records(Path::new(path));
-        assert!(from_records("/Applications/A.app"));
-        assert!(from_records("/A.app/Contents/Library/LaunchAgents/a.plist"));
-        assert!(from_records("4.d: (no location)"), "unplaced");
-        assert!(!from_records("/Library/LaunchAgents/a.plist"));
-        assert!(!from_records("/Library/LaunchAgents/app"));
+        // Only an extension counts, not a name that ends in "app".
+        assert!(!may_come_from_records(Path::new(
+            "/Library/LaunchAgents/app"
+        )));
     }
 
     #[test]
