@@ -537,7 +537,7 @@ impl InventorySource {
             Self::Lockfile { .. } | Self::LockfileWalk { .. } => Some("places with lockfiles"),
             Self::Setting { .. } => Some("settings"),
             Self::LaunchFolder { .. } => Some("launch folders"),
-            Self::LaunchItem { .. } => Some("launch items"),
+            Self::LaunchItem { .. } => Some("startup items"),
             Self::Alerts { .. } => Some("kinds of alerts"),
             Self::Workflow { .. } => Some("workflow files"),
             Self::MacOs
@@ -580,7 +580,7 @@ impl std::fmt::Display for InventorySource {
             Self::Setting { key } => write!(f, "the setting {key}"),
             Self::BackgroundItems => f.write_str("login items"),
             Self::LaunchFolder { path } => write!(f, "launch folder {path}"),
-            Self::LaunchItem { path } => write!(f, "launch item {path}"),
+            Self::LaunchItem { path } => write!(f, "startup item {path}"),
             Self::Alerts { name } => write!(f, "{name} alerts"),
             Self::Workflows => f.write_str("the list of workflows"),
             Self::Workflow { name } => write!(f, "workflow {name}"),
@@ -721,13 +721,12 @@ pub enum InventoryError {
     },
     /// macOS refused to list a folder only a process with Full Disk Access may list.
     #[error(
-        "{what} are not read: {} needs Full Disk Access; allow Vigil, or the terminal that runs \
-         it, in System Settings > Privacy & Security > Full Disk Access",
+        "login items and the agents apps registered are not read: {} needs Full Disk Access; \
+         allow Vigil, or the terminal that runs it, in System Settings > Privacy & Security > \
+         Full Disk Access",
         path.display()
     )]
     FullDiskAccess {
-        /// What is in the folder.
-        what: &'static str,
         /// The folder.
         path: PathBuf,
     },
@@ -1314,7 +1313,7 @@ mod tests {
             (
                 agent,
                 serde_json::json!({"kind": "launch_item", "path": "/Library/LaunchAgents/a.plist"}),
-                "launch item /Library/LaunchAgents/a.plist",
+                "startup item /Library/LaunchAgents/a.plist",
             ),
             (
                 alerts,

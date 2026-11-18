@@ -424,7 +424,12 @@ Background Task Management (added 2026-11-18):
   archives of the private `ItemRecord` class (`inventory/host/background.rs`). macOS 27.2
   writes one file per user, `BackgroundItems-v18-<user>.btm`, beside an index without records;
   earlier releases wrote one `BackgroundItems-v<N>.btm` for every user (the v13 and v16 files
-  an upgrade left behind have this layout). Only the files of the highest version are read.
+  an upgrade left behind have this layout). Only the files of the highest version are read,
+  and beside per-user files the index is not read, so a change to it cannot mark the records
+  unchecked.
+- The same item recorded for several users is one line. It runs if it runs for any of them,
+  so a record with both switches on wins; otherwise the first is kept. A record that cannot
+  be placed on disk is named by its identifier and its own text, so two never merge.
 - Only a process with Full Disk Access may list the folder. macOS cannot grant it ahead of
   time, so the app checks on every popover refresh (`needs_full_disk_access`) and shows a
   banner that opens System Settings > Privacy & Security > Full Disk Access. The grant goes to

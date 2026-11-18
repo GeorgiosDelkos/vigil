@@ -306,7 +306,7 @@ mod tests {
         };
         assert_eq!(
             each_sort.describe().unwrap(),
-            "2 kinds of alerts, 2 launch folders, 2 launch items, 2 settings"
+            "2 kinds of alerts, 2 launch folders, 2 settings, 2 startup items"
         );
         let forged = Unchecked {
             inventory: [lockfile("/a/\u{1b}]52;c;x\u{7}\n/Cargo.lock")].into(),

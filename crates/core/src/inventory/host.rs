@@ -31,7 +31,6 @@
 //! `/System/Library/Launch*` is left out because it is on the sealed system volume.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
@@ -48,6 +47,7 @@ use crate::inventory::InventoryError;
 use crate::inventory::InventorySource;
 use crate::inventory::command;
 use crate::inventory::command::Output;
+use crate::inventory::host::background::Place;
 use crate::paths;
 
 mod background;
@@ -452,19 +452,31 @@ fn launch_items(
 }
 
 /// Reads what Background Task Management records in `folder` that no launch folder shows, an
-/// item per path (the same app can be recorded for several users). Its failures are of
-/// [`InventorySource::BackgroundItems`]; a check of one item that could not run is of that
-/// item's [`InventorySource::LaunchItem`], as in [`launch_items`].
+/// item per path. The same item can be recorded for several users, each with their own
+/// switches: it runs if it runs for any of them, so a record with both switches on replaces
+/// one without. Otherwise the first is kept: an item enabled for one user and allowed for
+/// another runs for neither.
+/// Its failures are of [`InventorySource::BackgroundItems`]; a check of one item that could not
+/// run is of that item's [`InventorySource::LaunchItem`], as in [`launch_items`].
 fn background_items(inventory: &mut Inventory, folder: &Path, cancel: &Cancel) -> Vec<Item> {
     let mut failures = Vec::new();
     let entries = background::read(folder, &mut failures);
     for e in failures {
         inventory.fail(InventorySource::BackgroundItems, e);
     }
-    let mut seen = BTreeSet::new();
-    let mut items = Vec::new();
+    let mut at: BTreeMap<PathBuf, usize> = BTreeMap::new();
+    let mut items: Vec<Item> = Vec::new();
     for entry in entries {
-        if !seen.insert(entry.path.clone()) {
+        if let Place::Found(path) = &entry.place
+            && let Some(&index) = at.get(path)
+        {
+            let seen = items[index]
+                .login_items
+                .as_mut()
+                .expect("every item from the records has its switches");
+            if entry.switches.run() {
+                *seen = entry.switches;
+            }
             continue;
         }
         if cancel.is_cancelled() {
@@ -476,14 +488,18 @@ fn background_items(inventory: &mut Inventory, folder: &Path, cancel: &Cancel) -
             return items;
         }
         let mut failures = Vec::new();
-        let shown = entry.path.to_string_lossy().into_owned();
-        let mut item = match (&entry.problem, entry.kind) {
-            (Some(problem), kind) => Item::unread(kind, shown.clone(), problem.clone(), None),
-            (None, kind @ (ItemKind::LoginItem | ItemKind::OpenAtLogin)) => {
-                bundle_item(kind, &entry.path, cancel, &mut failures)
+        let mut item = match (entry.place, entry.kind) {
+            (Place::Unplaced { shown, why }, kind) => Item::unread(kind, shown, why, None),
+            (Place::Found(path), kind @ (ItemKind::LoginItem | ItemKind::OpenAtLogin)) => {
+                at.insert(path.clone(), items.len());
+                bundle_item(kind, &path, cancel, &mut failures)
             }
-            (None, kind) => read_item(kind, &entry.path, cancel, &mut failures),
+            (Place::Found(path), kind) => {
+                at.insert(path.clone(), items.len());
+                read_item(kind, &path, cancel, &mut failures)
+            }
         };
+        let shown = item.path.clone();
         if item.label.is_none() {
             item.label = entry.name;
         }
@@ -537,7 +553,7 @@ fn bundle_item(
 /// `missing`.
 fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
     /// The one key read from `Info.plist`.
-    #[derive(Deserialize)]
+    #[derive(Debug, Deserialize)]
     struct Info {
         #[serde(rename = "CFBundleExecutable")]
         executable: Option<String>,
@@ -560,7 +576,18 @@ fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
     let executable = info
         .executable
         .ok_or("its Info.plist names no CFBundleExecutable")?;
-    Ok(bundle.join("Contents/MacOS").join(executable))
+    inside(bundle, &Path::new("Contents/MacOS").join(&executable)).ok_or_else(|| {
+        format!("its Info.plist names the executable {executable:?}, which is not in the app")
+    })
+}
+
+/// `relative` under `bundle`, unless it is absolute or steps out with `..`, which `join` would
+/// follow out of the app.
+fn inside(bundle: &Path, relative: &Path) -> Option<PathBuf> {
+    relative
+        .components()
+        .all(|part| matches!(part, std::path::Component::Normal(_)))
+        .then(|| bundle.join(relative))
 }
 
 /// The entries of `folder`, sorted. Hidden ones are kept, since launchd loads them too; only
@@ -600,9 +627,19 @@ fn read_item(
         .bundle_program
         .as_deref()
         .filter(|_| kind.in_app_bundle())
-        .and_then(|name| Some(app_of(path)?.join(name)));
+        .and_then(|name| Some((app_of(path)?, name)));
     let program = match in_bundle {
-        Some(program) => Some(checked(program, cancel, failures)),
+        Some((app, name)) => Some(match inside(app, Path::new(name)) {
+            Some(program) => checked(program, cancel, failures),
+            None => Program {
+                path: PathBuf::from(name),
+                signature: Signature::Unreadable {
+                    detail: "its BundleProgram is not a path inside the app, so it was not checked"
+                        .to_owned(),
+                    stamp: None,
+                },
+            },
+        }),
         None => job
             .program
             .as_deref()
@@ -1287,12 +1324,16 @@ TeamIdentifier=not set
 
     fn plist(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        let text = format!(
+        fs::write(&path, plist_text(body)).unwrap();
+        path
+    }
+
+    /// A property list whose dictionary holds `body`.
+    fn plist_text(body: &str) -> String {
+        format!(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>{body}\
              </dict></plist>\n"
-        );
-        fs::write(&path, text).unwrap();
-        path
+        )
     }
 
     /// A job running `arguments`, as `<string>` elements.
@@ -1661,6 +1702,139 @@ TeamIdentifier=not set
         let error = unread.error.as_deref().unwrap();
         assert!(error.starts_with("cannot read its Info.plist"), "{error}");
         assert!(unread.login_items.is_some());
+    }
+
+    #[test]
+    fn users_records_of_one_item_merge_and_unplaced_ones_stay_apart() {
+        use background::tests::Archiver;
+        use background::tests::Record;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("A.app");
+        let url = format!("file://{}/", app.display());
+        let record = |disposition, identifier, url| Record {
+            bits: 0x2,
+            disposition,
+            identifier,
+            name: None,
+            url,
+            container: None,
+        };
+        let folder = tmp.path().join("btm");
+        fs::create_dir(&folder).unwrap();
+        // It runs for the second user only, which is what counts. A third app is enabled for
+        // one user and allowed for the other, so it runs for neither, and the first is kept.
+        let other = tmp.path().join("B.app");
+        let other_url = format!("file://{}/", other.display());
+        let first = [
+            record(0b01, "2.a", Some(url.as_str())),
+            record(0b01, "2.b", Some(other_url.as_str())),
+        ];
+        let second = [
+            record(0b11, "2.a", Some(url.as_str())),
+            record(0b10, "2.b", Some(other_url.as_str())),
+            Record {
+                bits: 0x4,
+                ..record(0b11, "4.x", None)
+            },
+            Record {
+                bits: 0x4,
+                ..record(0b11, "4.y", None)
+            },
+        ];
+        let write = |name: &str, records: &[Record<'_>]| {
+            let path = folder.join(name);
+            background::tests::write(&path, &Archiver::user_file(records));
+        };
+        write("BackgroundItems-v18-a.btm", &first);
+        write("BackgroundItems-v18-b.btm", &second);
+
+        let mut inventory = Inventory::default();
+        let items = background_items(&mut inventory, &folder, &Cancel::new());
+        let shown: Vec<(&str, bool, bool)> = items
+            .iter()
+            .map(|item| {
+                let switches = item.login_items.unwrap();
+                (item.path.as_str(), switches.enabled, switches.allowed)
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (app.to_str().unwrap(), true, true),
+                (other.to_str().unwrap(), true, false),
+                ("4.x: (no location)", true, true),
+                ("4.y: (no location)", true, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_app_whose_executable_cannot_be_found_is_kept_with_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let info = |name: &str, body: &str| {
+            let contents = tmp.path().join(name).join("Contents");
+            fs::create_dir_all(&contents).unwrap();
+            fs::write(contents.join("Info.plist"), body).unwrap();
+            tmp.path().join(name)
+        };
+        let error = |bundle: &Path| {
+            let mut failures = Vec::new();
+            let item = bundle_item(ItemKind::LoginItem, bundle, &Cancel::new(), &mut failures);
+            assert!(failures.is_empty(), "{failures:?}");
+            item.error.unwrap_or_default()
+        };
+
+        let up = info(
+            "Up.app",
+            &plist_text("<key>CFBundleExecutable</key><string>../../x</string>"),
+        );
+        assert!(error(&up).ends_with("\"../../x\", which is not in the app"));
+        let absolute = info(
+            "Abs.app",
+            &plist_text("<key>CFBundleExecutable</key><string>/bin/ls</string>"),
+        );
+        assert!(error(&absolute).contains("\"/bin/ls\", which is not in the app"));
+        let unnamed = info("None.app", &plist_text(""));
+        assert_eq!(
+            error(&unnamed),
+            "its Info.plist names no CFBundleExecutable"
+        );
+
+        // Exactly the limit is read; one byte more is not.
+        let text = plist_text("<key>CFBundleExecutable</key><string>A</string>");
+        let limit = usize::try_from(PLIST_LIMIT).unwrap();
+        let padded = format!("{text}<!-- {} -->", " ".repeat(limit - text.len() - 9));
+        let at_limit = info("Limit.app", &padded);
+        assert_eq!(error(&at_limit), "");
+        let over = info("Over.app", &format!("{padded}\n"));
+        let limit_error = format!("its Info.plist is more than the {PLIST_LIMIT} bytes read");
+        assert_eq!(error(&over), limit_error);
+
+        // A bundle path through a file is not "not there".
+        let file = tmp.path().join("file");
+        fs::write(&file, "").unwrap();
+        assert!(error(&file.join("B.app")).starts_with("cannot read the app"));
+    }
+
+    #[test]
+    fn a_bundle_program_that_leaves_the_app_is_not_checked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("A.app/Contents/Library/LaunchAgents");
+        fs::create_dir_all(&agents).unwrap();
+        let path = plist(
+            &agents,
+            "a.plist",
+            "<key>BundleProgram</key><string>/bin/ls</string>",
+        );
+        let program = read(ItemKind::AppLaunchAgent, &path).program.unwrap();
+        assert_eq!(program.path, Path::new("/bin/ls"));
+        assert!(
+            matches!(program.signature, Signature::Unreadable { ref detail, .. }
+                if detail.contains("not a path inside the app")),
+            "{:?}",
+            program.signature
+        );
     }
 
     #[test]

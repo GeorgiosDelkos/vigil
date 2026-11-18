@@ -129,7 +129,7 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     Protection, Gatekeeper or FileVault off is high; the firewall off is low on a laptop that
     joins untrusted networks, and worth mentioning at most otherwise. The fix is steps in
     System Settings or Recovery, with `commands` empty, since each needs an administrator.
-  - A launch item that looks unsafe: `{"item": "<path from mac/persistence.jsonl>"}`, one
+  - A startup item that looks unsafe: `{"item": "<path from mac/persistence.jsonl>"}`, one
     issue per item. Report an item when any of these holds:
     - its program or one of its scripts is `missing`, `invalid`, `unsigned`, `ad_hoc`,
       `other_issuer`, `unreadable`, or `apple_issued` with an `other` certificate, and the
@@ -157,11 +157,12 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     variable; medium for an unverified agent or inline command that runs at load; low for a
     stale item whose program is missing under a folder only this user can write. Say in
     `evidence` which fields you read. An item whose `login_items` are not both true does not run
-    now: lower its severity one step, and say which switch is off. The fix is manual: `commands`
-    stays empty, and `steps` say how to check the item and remove it (`launchctl bootout` with
-    the domain and label, then move the property list to the Trash; for a `login_item`,
-    `open_at_login` or app-registered item, turn it off in System Settings > General > Login
-    Items, and remove the app if it is not wanted), so the user decides.
+    now: lower its severity one step (it stays `low` when it is already `low`), and say which
+    switch is off. The fix is manual: `commands` stays empty, and `steps` say how to check the
+    item and remove it (`launchctl bootout` with the domain and label, then move the property
+    list to the Trash; for a `login_item`, `open_at_login` or app-registered item, turn it off
+    in System Settings > General > Login Items, and remove the app if it is not wanted), so the
+    user decides.
   - Never an issue for a file of the bundle on this Mac: use `setting` or `item`. Every
     issue on this Mac has `commands` empty.
 

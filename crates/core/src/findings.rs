@@ -92,7 +92,7 @@ impl fmt::Display for Subject {
         match self {
             Self::Setting(key) => write!(f, "setting {key}"),
             Self::File(path) => write!(f, "file {path}"),
-            Self::Item(path) => write!(f, "launch item {path}"),
+            Self::Item(path) => write!(f, "startup item {path}"),
         }
     }
 }
@@ -359,7 +359,7 @@ fn plain_subject(subject: &Subject) -> String {
     match subject {
         Subject::Setting(key) => format!("setting {key:?}"),
         Subject::File(path) => format!("file {path:?}"),
-        Subject::Item(path) => format!("launch item {path:?}"),
+        Subject::Item(path) => format!("startup item {path:?}"),
     }
 }
 
@@ -771,7 +771,7 @@ mod tests {
             [
                 "issues[0].fix.commands: an issue on this Mac is fixed by hand; leave commands \
                  empty and say how in steps",
-                "issues[1].subject: launch item \"/Library/LaunchDaemons/y.plist\" is not in this \
+                "issues[1].subject: startup item \"/Library/LaunchDaemons/y.plist\" is not in this \
                  bundle (settings are the keys of github/settings.json or mac/settings.json, \
                  files are bundle paths such as github/workflows/ci.yml, items are the paths in \
                  mac/persistence.jsonl)",
