@@ -61,9 +61,9 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 
   The file ends with the files that run commands without a launch item, each with its `path`,
   its `kind` and its `lines`, copied as they are except that Vigil replaced with `(hidden)` each
-  word shaped like a secret (a token format, a JWT, a random-looking string) and the value of
-  each assignment or option whose name says it is secret (`TOKEN`, `KEY`, `SECRET`, `PASS`,
-  `AUTH`). `truncated` says only the start was read; an `error` says it could not be read. The kinds:
+  word shaped like a secret (a token format, a JWT, a random-looking string), the password in
+  a URL, and the value of each assignment, option or header whose name says it is secret
+  (`TOKEN`, `KEY`, `SECRET`, `PASS`, `AUTH`), unless that value runs a command or is a path. `truncated` says only the start was read; an `error` says it could not be read. The kinds:
   - `shell_startup`: a startup file of zsh or bash. One in the home folder runs as this user
     in every shell; one in `/etc` runs for every user who starts that shell, root's shells
     included.

