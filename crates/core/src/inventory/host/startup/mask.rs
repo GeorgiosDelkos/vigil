@@ -381,8 +381,9 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
 
 /// The part of a secret value to mask, as where it starts in `value` and its length: a header's
 /// credential after its scheme (`Bearer x`), the default in `${NAME:-x}` (or `:=`, `-`, `=`),
-/// the text inside `'x'`, `"x"`, `$'x'` or `$"x"`, and otherwise the whole value. These leave out text that
-/// holds a `$` or a space by its form alone, and the part left is checked as any value is.
+/// the text inside `'x'`, `"x"`, `$'x'` or `$"x"`, and otherwise the whole value. These leave
+/// out text that holds a `$`, a space or a quote by its form alone, and the part left is
+/// checked as any value is.
 fn narrow(form: Form, value: &str) -> Option<(usize, usize)> {
     if let Form::Header(_) = form
         && let Some((_, credential)) = value.split_once(' ')
