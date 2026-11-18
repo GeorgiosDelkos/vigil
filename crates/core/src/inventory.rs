@@ -415,6 +415,9 @@ pub enum InventorySource {
     /// app registered from its own bundle, apps that open at login), of which one file or more
     /// could not be read.
     BackgroundItems,
+    /// Which account the sweep runs as, from `id`: without it, no program that runs as root is
+    /// marked replaceable, and this user's crontab is not read.
+    Account,
     /// A GitHub repository's open alerts of one kind, by the name its file has
     /// (`code-scanning`), which `gh` could not fetch.
     Alerts {
@@ -466,6 +469,7 @@ impl InventorySource {
             | Self::LaunchFolder { .. }
             | Self::LaunchItem { .. }
             | Self::BackgroundItems
+            | Self::Account
             | Self::Alerts { .. }
             | Self::Workflows
             | Self::Workflow { .. }
@@ -511,6 +515,8 @@ impl InventorySource {
                 subject,
                 Subject::File(path) if path.strip_prefix(github::WORKFLOWS) == Some(name.as_str())
             ),
+            // What only the account lets the sweep read: this user's crontab.
+            Self::Account => matches!(subject, Subject::Item(item) if host::needs_account(item)),
             // These give components, not issues.
             Self::MacOs
             | Self::Homebrew
@@ -556,6 +562,7 @@ impl InventorySource {
             | Self::DependencyGraph
             | Self::Workflows
             | Self::BackgroundItems
+            | Self::Account
             | Self::Unknown => None,
         }
     }
@@ -581,6 +588,7 @@ impl std::fmt::Display for InventorySource {
             Self::DependencyGraph => f.write_str("the dependency graph"),
             Self::Setting { key } => write!(f, "the setting {key}"),
             Self::BackgroundItems => f.write_str("login items"),
+            Self::Account => f.write_str("this user's account"),
             Self::LaunchFolder { path } => write!(f, "launch folder {path}"),
             Self::LaunchItem { path } => write!(f, "startup item {path}"),
             Self::Alerts { name } => write!(f, "{name} alerts"),
@@ -1226,6 +1234,7 @@ mod tests {
                 "login items",
                 "background_items",
             ),
+            (InventorySource::Account, "this user's account", "account"),
         ];
         for (source, text, kind) in names {
             assert_eq!(source.to_string(), text);
@@ -1233,6 +1242,16 @@ mod tests {
             assert_eq!(value, serde_json::json!({ "kind": kind }));
             assert_eq!(InventorySource::deserialize(&value).unwrap(), source);
         }
+    }
+
+    #[test]
+    fn a_failed_account_covers_what_it_decides() {
+        let account = InventorySource::Account;
+        let item = |path: &str| Subject::Item(path.to_owned());
+        assert!(account.covers_issue(&item("/usr/lib/cron/tabs/me")));
+        assert!(!account.covers_issue(&item("/Library/LaunchDaemons/a.plist")));
+        assert!(!account.covers_issue(&item("/Library/LaunchAgents/a.plist")));
+        assert!(!account.covers_issue(&Subject::Setting("etc".to_owned())));
     }
 
     #[test]

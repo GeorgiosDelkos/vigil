@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e89863428b450e41dac3994e8725c02babd669ec3bb6dc136be866d2d6c2b9c9 # shrinks to prefix = "", token = "SG.", body = "a0AA0AaaaaA0a0AA", suffix = "", space = ":"
+cc f3a6b1f9db0945cd85691279c094af0b3f40b978286714e5d260e1d0bbdccedf # shrinks to prefix = "", token = "ghp_", body = "AAAAAaAAAaaaAAAA", suffix = "", space = " "
+cc a46bd09911ca4fd59d9be12f8168406f712c7c76c4a74b039d9f35e55735e340 # shrinks to prefix = ["$\"", "Auth: "], operator = " >("
+cc 1e4e21fd25155fc0ee3105c1936ccc680737e0e61a1f032529ec50f5235eee4a # shrinks to prefix = "alias a='", name = "GITHUB_TOKEN", value = "0a0aa0a0", quote = ""

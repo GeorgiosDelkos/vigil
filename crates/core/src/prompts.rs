@@ -104,6 +104,15 @@ impl Prompt {
                 0x055b_79c3_91b6_dce6,
                 0xbd69_65f9_d788_d5ab, // On #74's branch only.
                 0xd33a_cac4_0a86_e2d6,
+                0x48c8_8d9a_a050_620f, // On #75's branch only.
+                0x364a_53d0_3234_be9b, // On #75's branch only.
+                0x4723_2a4d_8337_398f, // On #75's branch only.
+                0x233e_524d_fa9e_fc6a, // On #75's branch only.
+                0xc10a_c790_523b_e9c0, // On #75's branch only.
+                0x4ebb_2f99_7624_8f4c, // On #75's branch only.
+                0xb044_b7f0_433d_ef41, // On #75's branch only.
+                0xfdf7_0525_ff6e_30fe, // On #75's branch only.
+                0x2bb5_c673_6e28_8567,
             ],
             Self::GitHub => &[
                 0x61c0_4d78_7cf2_cfd0,

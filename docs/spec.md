@@ -383,7 +383,7 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 | File | What it holds | An issue names it as |
 |---|---|---|
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
-| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`) | `{"item": "<path of the property list or app bundle>"}` |
+| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then shell startup files, crontabs and `periodic` scripts as their lines, assignment values hidden | `{"item": "<path of the property list, app bundle or file>"}` |
 
 - A debug build reads the two system folders under `VIGIL_TEST_LAUNCH_ROOT` when it is set,
   so the CLI's end-to-end tests check no launch item of the machine they run on (each sweep
@@ -417,6 +417,62 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 - A folder that cannot be listed for lack of permission is a note, as elsewhere in the
   inventory; any other failure marks that setting (`setting`), folder (`launch_folder`) or
   item (`launch_item`) unchecked.
+
+Startup files and root's programs (added 2026-11-18):
+
+- A program or script of a launch daemon, or an app's registered daemon, that runs as root
+  (no `UserName`, or `root`) is `replaceable` when this user could put another file there:
+  it or a folder it is reached through, as written or with links followed, is writable to
+  them or theirs, with the bits of their class only, as the kernel applies them (owners may
+  change modes; a folder needs its search bit; a sticky folder guards others' entries except
+  from its owner). Write access through the `admin` group does not count: `/Applications` is
+  `root:admin 775`, so every app's daemon would be marked for every admin user, who can
+  become root with their password anyway; the check is for a way up with none. The
+  account comes from one `/usr/bin/id` run, since `unsafe` is forbidden and `access(2)` with
+  it. Only root-run programs are marked: marking agents would change the key of every
+  dismissed agent whose program is in the home folder. `replaceable` enters an item's
+  identity only when true, so other keys stay as they were.
+- `mac/persistence.jsonl` ends with zsh's and bash's startup files (home and `/etc`, with
+  `/etc/zshrc_Apple_Terminal`), `path_helper`'s `/etc/paths` and `/etc/paths.d`, this user's
+  crontab (`crontab -l`), `/etc/crontab`, and `periodic`'s scripts (none on macOS 27.2), each
+  as its lines, read through a link (dotfile managers link them) but never a FIFO. Each line
+  is copied as it is, with secrets masked (`inventory/host/startup/mask.rs`): words shaped
+  like a secret (published token prefixes, JWTs, 32 hex digits or more, an AWS secret key,
+  and random-looking parts of a word: 20 characters or more with all three kinds, no `.`,
+  3.5 bits of entropy per character), and the value of an assignment or option whose name
+  says it is secret (`TOKEN`, `SECRET`, `PASS`, `AUTH`, `CREDENTIAL`, `KEY`, `COOKIE`, by name
+  segment), the password or token in a URL, and secret headers and JSON keys. No shell is parsed and
+  nothing carries from one line to the next, so no line can hide another (owner's decision,
+  2026-11-18). One bit carries: a line continued by a trailing backslash may be an alias's body, so
+  only its secret-shaped words are masked; the carry can only show more. A value masked by its name
+  never holds a shell operator (`;`, `|`, `&`, `<`, `>`, a parenthesis, a backquote), white space, a
+  backslash or a `$`: a value that would is shown, unless a word of it looks like a secret (owner's
+  choice, 2026-11-18, of narrowing over documenting the gap). So masked text is never a command with
+  arguments, an operator, a redirection or an expansion, even when a quote opened on an earlier line
+  makes the shell read it as code. Left: such a quote could make one masked word a command name with
+  no arguments, so the agent reports a file whose quotes do not balance; and zsh expands a word that
+  starts with `=` (`--token =ls`) to a program's path, which stays masked, since `=` ends base64
+  tokens. An alias body is never masked by its name: a line that holds the word `alias` anywhere,
+  once quotes, backslashes and the `$` of `$'` are removed, has only its secret-shaped words
+  masked, since which names it defines depends on the shell's quoting (three reviews found
+  quotings a narrower rule misread); accepted downside: a short secret on such a line is shown.
+  Not seen: `alias` spelled through an expansion or an escape (`${a}as`, `{al,}ias`,
+  `$'\x61lias'`), whose values are masked by name. A file over the limit keeps only its whole
+  lines, so a token is never cut short. Property tests check that a command after any prefix stays
+  shown. The first design hid every assignment's value
+  with a shell lexer; five reviews each found a line it read differently from zsh or bash,
+  leaking a token or letting a planted line (`# TOKEN="`) hide a later command. Accepted
+  downside: a short password under an innocent name (`DB=hunter2`), and a secret-named value
+  with a space or a `$` (`AUTH="Bearer abc def"`), are shown. Rejected: whole files (tokens kept
+  with each sweep) and a path-and-hash listing the agent opens itself (it sees the tokens). A
+  file's key is its shown lines, so a new token does not show a dismissed issue again, but any
+  other edit does. Root-run files (`/etc`, `/etc/crontab`, `periodic`) say whether this user
+  could replace them.
+- An `id` that fails, or is not there, marks `account` unchecked, which carries the issues of
+  this user's crontab, the one thing it keeps the sweep from reading. Daemons and `/etc` are
+  still read, so their issues are not carried: a daemon whose only issue was being
+  replaceable reads as resolved on that sweep. Only absolute program paths are checked, since
+  launchd does not resolve a relative one the way Vigil could.
 
 Background Task Management (added 2026-11-18):
 
@@ -462,12 +518,14 @@ Accepted gaps, in the order planned:
 - The Login Items switches of a launch folder item are not read, so an item turned off there
   shows as it would run; and the agents in other users' `~/Library/LaunchAgents`, which the
   records list, are not read.
+- Replaceability reads mode bits and owners, not ACLs, and only for what runs as root.
+- Root's and other users' crontabs (`/usr/lib/cron/tabs`, root's alone) are not read, nor are
+  zsh's files under a `ZDOTDIR`.
 - Applications in `/Applications` outside Homebrew, for both CVE matching and the dylib scan.
 - Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
   programs without library validation. Until then a changed file inside a program's bundle,
   such as a framework it loads, is not seen, since signatures skip the bundle's resources.
-- Kernel and system extensions, keyboard event taps, browser extensions, cron, periodic
-  scripts, shell startup files, and whether a root daemon's program is writable by the user.
+- Kernel and system extensions, keyboard event taps and browser extensions.
 
 ### GitHub repositories (decided 2026-11-06)
 
