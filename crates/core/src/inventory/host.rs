@@ -213,7 +213,7 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
     if let Some(account) = &account {
         mark_replaceable(&mut items, account);
     }
-    let files = startup::collect(&root, home.as_deref(), account.as_ref(), cancel);
+    let files = startup::collect(&root, home.as_deref(), account.as_ref());
     Host::new(&settings, &items, &files)
 }
 

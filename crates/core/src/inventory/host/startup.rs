@@ -33,7 +33,6 @@ use std::path::PathBuf;
 use serde::Serialize;
 use serde_json::json;
 
-use crate::cancel::Cancel;
 use crate::inventory::command;
 use crate::inventory::host::account::Account;
 use crate::inventory::host::stamp;
@@ -156,7 +155,6 @@ pub(super) fn collect(
     root: &Path,
     home: Option<&Path>,
     account: Option<&Account>,
-    cancel: &Cancel,
 ) -> Vec<StartupFile> {
     let mut files = Vec::new();
     let home_files = home
@@ -175,7 +173,7 @@ pub(super) fn collect(
         account,
     ));
     if let Some(account) = account {
-        files.extend(user_crontab(root, account, cancel));
+        files.extend(user_crontab(root, account));
     }
     files.extend(read(FileKind::Crontab, &root.join("etc/crontab"), account));
     for folder in PERIODIC_FOLDERS {
@@ -270,25 +268,36 @@ fn read_following(path: &Path) -> io::Result<Vec<u8>> {
 /// This user's crontab, from `crontab -l` under the system root (so a test's root has none).
 /// `None` when the user has none or the tool is not there; a run that fails otherwise is the
 /// file with its error.
-fn user_crontab(root: &Path, account: &Account, cancel: &Cancel) -> Option<StartupFile> {
+fn user_crontab(root: &Path, account: &Account) -> Option<StartupFile> {
     let tool = root.join("usr/bin/crontab");
     let path = format!("/usr/lib/cron/tabs/{}", account.name);
-    let file = |error, lines| StartupFile {
+    let file = |error, lines, truncated| StartupFile {
         path: path.clone(),
         kind: FileKind::Crontab,
         error,
         lines,
-        truncated: false,
+        truncated,
         stamp: None,
         replaceable: false,
     };
-    match command::run_any_status(&tool.to_string_lossy(), &["-l"], cancel) {
+    // Decoded lossily, as files are: one byte that is not UTF-8 must not drop every job.
+    // Not cancellable: `crontab -l` prints a file and exits, bounded by the timeout.
+    let run = command::run_with_input(&tool.to_string_lossy(), &["-l"], b"", command::TIMEOUT);
+    match run {
         Ok(None) => None,
-        Ok(Some(output)) if output.success => Some(file(None, lines(&output.stdout))),
+        Ok(Some(output)) if output.success => {
+            // Capped as a file is, so a planted crontab cannot fill every bundle.
+            let mut end = output.stdout.len().min(FILE_LIMIT);
+            while !output.stdout.is_char_boundary(end) {
+                end -= 1;
+            }
+            let truncated = end < output.stdout.len();
+            Some(file(None, lines(&output.stdout[..end]), truncated))
+        }
         // What crontab(1) says, and exits 1 with, when the user has no crontab.
         Ok(Some(output)) if output.stderr.starts_with("crontab: no crontab for") => None,
-        Ok(Some(output)) => Some(file(Some(output.detail), Vec::new())),
-        Err(e) => Some(file(Some(e.to_string()), Vec::new())),
+        Ok(Some(output)) => Some(file(Some(output.detail), Vec::new(), false)),
+        Err(e) => Some(file(Some(e.to_string()), Vec::new(), false)),
     }
 }
 
@@ -336,7 +345,7 @@ mod tests {
         fs::create_dir(&locked).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let files = collect(&root, Some(&home), None, &Cancel::new());
+        let files = collect(&root, Some(&home), None);
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(
             shown(&files, tmp.path()),
@@ -372,14 +381,16 @@ mod tests {
     fn this_user_s_crontab_comes_from_the_tool() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        let account = Account::current(&Cancel::new()).unwrap().unwrap();
+        let account = Account::current(&crate::cancel::Cancel::new())
+            .unwrap()
+            .unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let tool = tmp.path().join("usr/bin/crontab");
         fs::create_dir_all(tool.parent().unwrap()).unwrap();
         let crontab = |script: &str| {
             fs::write(&tool, format!("#!/bin/sh\n{script}\n")).unwrap();
             fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
-            user_crontab(tmp.path(), &account, &Cancel::new())
+            user_crontab(tmp.path(), &account)
         };
 
         let listed = crontab("echo 'TOKEN=s'; echo '@reboot /tmp/x'").unwrap();
@@ -394,10 +405,7 @@ mod tests {
         assert_eq!(failed.lines, Vec::<String>::new());
         assert!(failed.error.unwrap().contains("Permission denied"));
         fs::remove_file(&tool).unwrap();
-        assert!(
-            user_crontab(tmp.path(), &account, &Cancel::new()).is_none(),
-            "no tool"
-        );
+        assert!(user_crontab(tmp.path(), &account).is_none(), "no tool");
     }
 
     #[test]

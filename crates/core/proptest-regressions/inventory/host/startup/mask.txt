@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc e89863428b450e41dac3994e8725c02babd669ec3bb6dc136be866d2d6c2b9c9 # shrinks to prefix = "", token = "SG.", body = "a0AA0AaaaaA0a0AA", suffix = "", space = ":"
+cc f3a6b1f9db0945cd85691279c094af0b3f40b978286714e5d260e1d0bbdccedf # shrinks to prefix = "", token = "ghp_", body = "AAAAAaAAAaaaAAAA", suffix = "", space = " "

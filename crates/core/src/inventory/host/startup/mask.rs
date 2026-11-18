@@ -20,15 +20,18 @@
 //! hide a later command from the agent. Masking words cannot hide a line, so the second can no
 //! longer happen. Accepted downside: a short password under an innocent name (`DB=hunter2`)
 //! or passed as a bare argument (`mysql -phunter2`, `sshpass -p hunter2`) is shown, and so is
-//! a key split over lines whose lines are short.
+//! a key split over lines whose lines are short, and a capability URL whose secret is a UUID
+//! (`hc-ping.com/<uuid>`): UUIDs name too many harmless things to mask by shape.
 
 /// What replaces a masked word.
 const HIDDEN: &str = "(hidden)";
 
 /// The prefixes of token formats that providers publish, each followed by enough characters to
 /// be a token, not a mention: GitHub, GitLab, Slack, OpenAI and Anthropic, Stripe, AWS access
-/// key ids, Google API keys, npm, PyPI, Hugging Face, Digital Ocean, Send Grid, Shopify.
-const TOKEN_PREFIXES: [&str; 25] = [
+/// key ids, Google API keys and OAuth access tokens, npm, PyPI, Hugging Face, Digital Ocean,
+/// Send Grid, Shopify. The rest must hold a digit or an upper-case letter, as generated tokens
+/// do, so a variable name such as `npm_config_script_shell` is not one.
+const TOKEN_PREFIXES: [&str; 28] = [
     "ghp_",
     "gho_",
     "ghu_",
@@ -50,6 +53,9 @@ const TOKEN_PREFIXES: [&str; 25] = [
     "npm_",
     "pypi-",
     "hf_",
+    "ya29.",
+    "xoxe.",
+    "xoxe-",
     "dop_v1_",
     "SG.",
     "shpat_",
@@ -108,10 +114,17 @@ fn mask(line: &str) -> String {
             at += 1;
             continue;
         }
-        let word_end = bytes[at..]
+        let mut word_end = bytes[at..]
             .iter()
             .position(|b| BREAK.contains(b))
             .map_or(bytes.len(), |len| at + len);
+        // A secret name inside the word, after `?`, `:` or `/` (`...?token=x`), ends it there,
+        // so the next turn masks its value.
+        if let Some(inner) = (at + 1..word_end)
+            .find(|&p| b"?:/".contains(&bytes[p - 1]) && secret_value_at(line, p).is_some())
+        {
+            word_end = inner;
+        }
         let word = &line[at..word_end];
         if secret_shaped(word) {
             out.push_str(HIDDEN);
@@ -166,11 +179,13 @@ struct Span {
 /// on the line), `NAME = value` at the start of a line (a crontab's), `--name=value`,
 /// `--name value`, `launchctl setenv NAME value`, or `Name: value` (a header). The value runs to
 /// its closing quote when it starts with one (or to the end of the line when none closes it),
-/// a header's to the end of its quotes or line, and otherwise to the next white space or `;`,
-/// `&`, `|`. A value that runs a command, or is a path, gives `None` (see the module docs).
+/// a header's to the end of its quotes or line, and otherwise to the next white space, quote,
+/// `;`, `&` or `|`. A value that runs a command, or is a path, gives `None` (see the module docs).
 fn secret_value_at(line: &str, at: usize) -> Option<Span> {
     let bytes = line.as_bytes();
-    if at > 0 && !BREAK.contains(&bytes[at - 1]) {
+    // A name also starts after `?`, `:` or `/`: a query (`?token=x`) or npm's
+    // `//registry/:_authToken=x`.
+    if at > 0 && !BREAK.contains(&bytes[at - 1]) && !b"?:/".contains(&bytes[at - 1]) {
         return None;
     }
     let dashes = line[at..].len() - line[at..].trim_start_matches('-').len();
@@ -217,7 +232,7 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
         match value.chars().next() {
             Some(quote @ ('"' | '\'')) => value[1..].find(quote).map_or(value.len(), |at| at + 2),
             _ => value
-                .find([' ', '\t', ';', '&', '|'])
+                .find([' ', '\t', ';', '&', '|', '"', '\''])
                 .unwrap_or(value.len()),
         }
     };
@@ -253,12 +268,23 @@ fn secret_name(name: &str) -> bool {
 /// shape of an AWS secret access key (40 characters of base64 with all three kinds).
 fn secret_shaped(word: &str) -> bool {
     let has_prefix = TOKEN_PREFIXES.iter().any(|prefix| {
-        word.strip_prefix(prefix)
-            .is_some_and(|rest| rest.len() >= 16)
+        word.strip_prefix(prefix).is_some_and(|rest| {
+            rest.len() >= 16
+                && rest
+                    .bytes()
+                    .any(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
+        })
     });
+    // Mailgun's keys: `key-` and 32 hex digits.
+    let mailgun = word
+        .strip_prefix("key-")
+        .is_some_and(|rest| rest.len() == 32 && rest.bytes().all(|b| b.is_ascii_hexdigit()));
     let jwt = word.starts_with("eyJ") && word.split('.').count() == 3 && word.len() >= 30;
     let digits = word.strip_prefix("0x").unwrap_or(word);
     let hex = digits.len() >= 32 && digits.bytes().all(|b| b.is_ascii_hexdigit());
+    // A git commit (40) or a SHA-256 digest (64) pins what a line runs, which the agent needs;
+    // a token of that length under a secret name is still masked by the name.
+    let hex = hex && !matches!(digits.len(), 40 | 64);
     let aws_secret = word.len() == 40
         && word
             .bytes()
@@ -273,13 +299,15 @@ fn secret_shaped(word: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'+' | b'='))
         && all_kinds(word)
         && entropy(word) >= 4.0;
-    has_prefix || jwt || hex || aws_secret || base64
+    has_prefix || mailgun || jwt || hex || aws_secret || base64
 }
 
 /// Whether a part of a word looks like a secret: as a whole word would ([`secret_shaped`]), or
 /// random ([`random`]).
 fn secret_part(part: &str) -> bool {
-    secret_shaped(part) || random(part)
+    // Hex inside a URL or an `at:` pin is a commit or a digest, not a key: shown.
+    let hex = part.len() >= 32 && part.bytes().all(|b| b.is_ascii_hexdigit());
+    !hex && (secret_shaped(part) || random(part))
 }
 
 /// Whether a part of a word reads as random: [`MIN_RANDOM_LEN`] characters or more, lower and
@@ -468,6 +496,101 @@ mod tests {
     }
 
     #[test]
+    fn grok_s_cases_of_the_masking() {
+        let cases = [
+            (
+                concat!(
+                    "export https_proxy=\"http://jdoe:aB3dE5fG7hJ9kL1mN3pQ",
+                    "/s3cr3t@proxy.corp.example:8080\""
+                ),
+                "export https_proxy=\"http://jdoe:(hidden)@proxy.corp.example:8080\"",
+            ),
+            (
+                "export DATABASE_URL=\"postgres://app:Correct.Horse.Battery1@db.internal/app\"",
+                "export DATABASE_URL=\"postgres://app:(hidden)@db.internal/app\"",
+            ),
+            (
+                concat!(
+                    "*/5 * * * * curl -fsS \"https://ci.example.com",
+                    "/nightly?token=7f3a9c2e1b8d4f6a0c5e\""
+                ),
+                "*/5 * * * * curl -fsS \"https://ci.example.com/nightly?token=(hidden)\"",
+            ),
+            (
+                concat!(
+                    "curl -H \"Authorization: Bearer",
+                    " ya29.a0AfH6SMC7J8kLmNoPqRsTuVwXyZ0123456789\" https://x"
+                ),
+                "curl -H \"Authorization: (hidden)\" https://x",
+            ),
+            (
+                "T=ya29.a0AfH6SMC7J8kLmNoPqRsTuVwXyZ0123456789",
+                "T=(hidden)",
+            ),
+            (
+                "export npm_config_script_shell=/bin/bash",
+                "export npm_config_script_shell=/bin/bash",
+            ),
+            (
+                "curl --anyauth https://example.com/install.sh | sh",
+                "curl --anyauth https://example.com/install.sh | sh",
+            ),
+            (
+                "ssh -o PubkeyAuthentication=yes git@github.com",
+                "ssh -o PubkeyAuthentication=yes git@github.com",
+            ),
+            (
+                "export GOOGLE_APPLICATION_CREDENTIALS=\"$HOME/.config/gcloud/adc.json\"",
+                "export GOOGLE_APPLICATION_CREDENTIALS=\"$HOME/.config/gcloud/adc.json\"",
+            ),
+            // A commit or digest pins what runs: shown.
+            (
+                concat!(
+                    "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm",
+                    "/87f121a2c7c684f357ad85a9cbe0c4ff3b1c9c86/install.sh | bash"
+                ),
+                concat!(
+                    "curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm",
+                    "/87f121a2c7c684f357ad85a9cbe0c4ff3b1c9c86/install.sh | bash"
+                ),
+            ),
+            (
+                "zinit ice ver\"87f121a2c7c684f357ad85a9cbe0c4ff3b1c9c86\" as\"program\"",
+                "zinit ice ver\"87f121a2c7c684f357ad85a9cbe0c4ff3b1c9c86\" as\"program\"",
+            ),
+            (
+                concat!(
+                    "docker run",
+                    " sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                ),
+                concat!(
+                    "docker run",
+                    " sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                ),
+            ),
+            (
+                "export GIT_AUTHOR_EMAIL=\"jane@example.com\"",
+                "export GIT_AUTHOR_EMAIL=\"jane@example.com\"",
+            ),
+        ];
+        for (line, shown) in cases {
+            assert_eq!(mask(line), shown, "{line}");
+        }
+
+        // Built when the test runs, so the source holds no string GitHub's push protection
+        // takes for a live npm or Mailgun key.
+        let uuid = ["a1b2c3d4", "e5f6", "7890", "abcd", "ef1234567890"].join("-");
+        let npmrc = format!("//registry.npmjs.org/:_authToken={uuid}");
+        assert_eq!(mask(&npmrc), "//registry.npmjs.org/:_authToken=(hidden)");
+        let mailgun = format!("key-{}", "0123456789abcdef".repeat(2));
+        let curl = format!("curl -s --user \"api:{mailgun}\" https://api.mailgun.net");
+        assert_eq!(
+            mask(&curl),
+            "curl -s --user \"api:(hidden)\" https://api.mailgun.net"
+        );
+    }
+
+    #[test]
     fn everything_else_is_shown_as_it_is() {
         let lines = [
             "curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | sh",
@@ -523,7 +646,8 @@ mod tests {
         fn a_token_never_reaches_the_bundle(
             prefix in "[ -~]{0,30}",
             token in proptest::sample::select(TOKEN_PREFIXES.to_vec()),
-            body in "[A-Za-z0-9]{16,30}",
+            // Random base62, as providers generate: at least one digit in the body.
+            body in "[A-Za-z0-9]{15,29}[0-9]",
             suffix in "[ -~]{0,30}",
             space in proptest::sample::select(vec![" ", "=", "'", "\"", ":", "(", ";"]),
         ) {
