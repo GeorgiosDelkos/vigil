@@ -30,7 +30,8 @@
 //!
 //! No shell is parsed, and nothing carries from one line to the next (owner's decision,
 //! 2026-11-18), except that a line continued by a trailing backslash has only its
-//! secret-shaped words masked, since it may be an alias's body; that carry can only show more. The first design hid the value of every assignment, which needs a shell lexer;
+//! secret-shaped words masked, since it may be an alias's body; that carry can only show
+//! more. The first design hid the value of every assignment, which needs a shell lexer;
 //! five reviews in a row found lines where it read the shell differently from zsh or bash, and
 //! each difference either leaked a token into the bundle or let a planted line (`# TOKEN="`)
 //! hide a later command from the agent. Masking cannot hide a line, nor a command with its
@@ -434,7 +435,8 @@ fn narrow(form: Form, value: &str) -> Option<(usize, usize)> {
 /// `FOO=1 alias`. The scan honours backslashes outside single quotes and inside `$'...'`, so
 /// `echo \'; alias pass=x` opens no quote. A name inside quotes is decided by the quoted text
 /// alone: `eval 'alias pass=x'` defines `pass`, while `alias a='TOKEN=x rest'` holds an
-/// ordinary assignment. `alias k=k; TOKEN=x` ends the alias command first. An alias spelled through an expansion (`$A token=x`) is not seen.
+/// ordinary assignment. `alias k=k; TOKEN=x` ends the alias command first. An alias spelled
+/// through an expansion (`$A token=x`) is not seen.
 fn alias_definition(before: &str) -> bool {
     let mut quote = None;
     let mut opened = 0;
