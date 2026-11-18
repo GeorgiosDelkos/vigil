@@ -440,9 +440,12 @@ Startup files and root's programs (added 2026-11-18):
   like a secret (published token prefixes, JWTs, 32 hex digits or more, an AWS secret key,
   and random-looking parts of a word: 20 characters or more with all three kinds, no `.`,
   3.5 bits of entropy per character), and the value of an assignment or option whose name
-  says it is secret (`TOKEN`, `SECRET`, `PASS`, `AUTH`, `CREDENTIAL`, `API_KEY`). No shell is
+  says it is secret (`TOKEN`, `SECRET`, `PASS`, `AUTH`, `CREDENTIAL`, `KEY`, `COOKIE`, by name
+  segment), the password or token in a URL, and secret headers and JSON keys. No shell is
   parsed and nothing carries from one line to the next, so no line can hide another (owner's
-  decision, 2026-11-18). The first design hid every assignment's value with a shell lexer;
+  decision, 2026-11-18). A masked run never holds a shell operator (`;`, `|`, `&`, `<`, `>`, a
+  parenthesis, a backquote): a value that would is shown, so no masked text can hide a command
+  on its own line either; a property test checks it. The first design hid every assignment's value with a shell lexer;
   five reviews each found a line it read differently from zsh or bash, leaking a token or
   letting a planted line (`# TOKEN="`) hide a later command. Accepted downside: a short
   password under an innocent name (`DB=hunter2`) is shown. Rejected: whole files (tokens kept

