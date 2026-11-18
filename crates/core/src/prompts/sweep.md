@@ -55,6 +55,25 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   - `unreadable`: Vigil could not check it, with the `detail`: a file this user cannot read
     (an executable can run without being readable), a relative path, or a check that failed.
 
+  A program or script of a daemon that runs as root has `replaceable: true` when this user
+  could put another file there: it, or a folder it is reached through, is writable to this
+  user or owned by them (mode bits; ACLs are not read, so the absence proves nothing).
+
+  The file ends with the files that run commands without a launch item, each with its `path`,
+  its `kind` and its `lines`, in which Vigil replaced the literal value of each variable
+  assignment with `(hidden)` (values of `PATH`, `FPATH`, `DYLD_` variables, and values that
+  run a command, such as `$(...)`, are shown). `truncated` says only the start was read; an
+  `error` says it could not be read. The kinds:
+  - `shell_startup`: a startup file of zsh or bash. One in the home folder runs as this user
+    in every shell; one in `/etc` runs for every user who starts that shell, root's shells
+    included.
+  - `crontab`: this user's crontab (`/usr/lib/cron/tabs/<user>`, as cron keeps it), which
+    runs as this user, or `/etc/crontab`, which runs as the users it names.
+  - `periodic_script`: a script root runs daily, weekly or monthly.
+
+  A file in `/etc` and a `periodic_script` have `replaceable: true` when this user could
+  replace them.
+
 ## Version matches
 
 You cannot run commands, scripts or programs (no shell, no Python, no `jq`), and you need
@@ -141,13 +160,15 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     - it starts an interpreter by bare name through `env` (`env python3 ...`): Vigil did not
       check which file that is, so judge it from `environment.PATH` (launchd's default
       `/usr/bin:/bin:/usr/sbin:/sbin` when it sets none);
-    - a `launch_daemon` (root) runs a file this user or any user could replace, such as one
+    - a `launch_daemon` (root) runs a file another user could replace, such as one
       under `/Users`, `/tmp` or `/Users/Shared`;
     - it sets a `DYLD_` variable, or a `PATH` that puts a writable folder first;
     - it runs from a hidden folder or a temporary one;
     - its label, path and program do not belong together (a label that imitates Apple's
       `com.apple.` for a program that is not Apple's);
-    - its property list could not be read (`error`): launchd may still load it.
+    - its property list could not be read (`error`): launchd may still load it;
+    - a program or script it runs as root is `replaceable`: any process of this user can
+      become root through it, so this is high.
 
     A `missing` program is a stale item at best and a slot for anyone who can create that file
     at worst. Leave out an item only when none of the above holds and its program is `apple`,
@@ -163,6 +184,26 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     list to the Trash; for a `login_item`, `open_at_login` or app-registered item, turn it off
     in System Settings > General > Login Items, and remove the app if it is not wanted), so the
     user decides.
+
+    For a `shell_startup`, `crontab` or `periodic_script` file, report it when a line:
+    - downloads and runs code (`curl ... | sh`, `eval "$(curl ...)"`, `bash <(curl ...)`), or
+      decodes and runs it (`base64 -d | sh`);
+    - sources or runs a file from a temporary, hidden or shared folder (`/tmp`,
+      `/Users/Shared`), or one the evidence shows is not the user's own;
+    - puts a writable or temporary folder first on `PATH`, or sets a `DYLD_` variable;
+    - replaces a command that asks for a password or trusts a host (`alias sudo=`, a `sudo`,
+      `ssh` or `su` function), or starts something in the background on every shell (`nohup`,
+      `&`) that is not a known tool's;
+    - runs as root (`/etc`, `periodic_script`, a root line in `/etc/crontab`) and is
+      `replaceable`, which is high.
+
+    A line that only sets a value Vigil hid is not a finding: the value is not shown, and
+    holding a token in a startup file is the user's choice. Leave out lines a tool's installer
+    writes (Homebrew's `brew shellenv`, `rustup`'s `. "$HOME/.cargo/env"`, `nvm`, `pyenv`,
+    `conda`, `direnv` hooks) unless they point somewhere else than that tool's own folder.
+    Severity: high for one that runs as root, a `replaceable` one, or a download run in every
+    shell; medium otherwise. Name the lines in `evidence` by their number (the first is 1).
+    Fix steps say which lines to remove or change in which file; `commands` stays empty.
   - Never an issue for a file of the bundle on this Mac: use `setting` or `item`. Every
     issue on this Mac has `commands` empty.
 

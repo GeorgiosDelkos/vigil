@@ -49,10 +49,14 @@ use crate::inventory::InventoryError;
 use crate::inventory::InventorySource;
 use crate::inventory::command;
 use crate::inventory::command::Output;
+use crate::inventory::host::account::Account;
 use crate::inventory::host::background::Place;
+use crate::inventory::host::startup::StartupFile;
 use crate::paths;
 
+mod account;
 mod background;
+mod startup;
 
 /// What the host checks found, ready for the Mac's bundle.
 #[derive(Debug, Default)]
@@ -186,7 +190,55 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
         &root.join(background::FOLDER),
         cancel,
     ));
-    Host::new(&settings, &items)
+    let account = match Account::current(cancel) {
+        Ok(Some(account)) => Some(account),
+        Ok(None) => {
+            inventory.missing("/usr/bin/id");
+            None
+        }
+        Err(e) => {
+            inventory.fail(InventorySource::Account, e);
+            None
+        }
+    };
+    if let Some(account) = &account {
+        mark_replaceable(&mut items, account);
+    }
+    let home = std::env::home_dir();
+    let files = startup::collect(&root, home.as_deref(), account.as_ref(), cancel);
+    Host::new(&settings, &items, &files)
+}
+
+/// Whether an issue about the item at `path` may follow from who the sweep runs as
+/// ([`InventorySource::Account`]): a daemon's property list, which `mark_replaceable` reads,
+/// this user's crontab, and the root-run files [`startup::collect`] marks.
+pub(crate) fn needs_account(path: &str) -> bool {
+    let path = Path::new(path);
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|folder| folder == "LaunchDaemons")
+        || ["/usr/lib/cron/tabs/", "/etc/", "/usr/local/etc/periodic/"]
+            .iter()
+            .any(|folder| path.starts_with(folder))
+}
+
+/// Marks each program and script that runs as root and that `account` could replace: a launch
+/// daemon's, or an app's registered daemon's, that names no other `UserName`. Only those: an
+/// agent runs as a user who could replace it anyway, and marking it would change the key of
+/// every dismissed agent whose program is in the home folder.
+fn mark_replaceable(items: &mut [Item], account: &Account) {
+    for item in items {
+        let daemon = matches!(
+            item.kind,
+            ItemKind::LaunchDaemon | ItemKind::AppLaunchDaemon
+        );
+        if !daemon || item.user_name.as_deref().is_some_and(|user| user != "root") {
+            continue;
+        }
+        for program in item.program.iter_mut().chain(item.scripts.iter_mut()) {
+            program.replaceable = account.can_replace(&program.path);
+        }
+    }
 }
 
 /// Whether macOS keeps this process from reading Background Task Management's records, so
@@ -206,13 +258,15 @@ pub(crate) fn may_come_from_records(path: &Path) -> bool {
 }
 
 impl Host {
-    fn new(settings: &BTreeMap<&str, String>, items: &[Item]) -> Self {
+    fn new(settings: &BTreeMap<&str, String>, items: &[Item], files: &[StartupFile]) -> Self {
         let settings_json =
             serde_json::to_string_pretty(settings).expect("a map of strings serializes");
         let mut lines = String::new();
-        for item in items {
-            let line = serde_json::to_string(item)
-                .expect("an item holds only strings, booleans, and lists and maps of them");
+        let items_shown = items.iter().map(serde_json::to_string);
+        let files_shown = files.iter().map(serde_json::to_string);
+        for line in items_shown.chain(files_shown) {
+            let line =
+                line.expect("an item holds only strings, booleans, and lists and maps of them");
             lines.push_str(&line);
             lines.push('\n');
         }
@@ -225,6 +279,11 @@ impl Host {
             items: items
                 .iter()
                 .map(|item| (item.path.clone(), item.identity()))
+                .chain(
+                    files
+                        .iter()
+                        .map(|file| (file.path.clone(), file.identity())),
+                )
                 .collect(),
         }
     }
@@ -345,6 +404,10 @@ struct Item {
 struct Program {
     path: PathBuf,
     signature: Signature,
+    /// For a program that runs as root, whether this user could replace it
+    /// ([`Account::can_replace`]); set by [`mark_replaceable`].
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    replaceable: bool,
 }
 
 impl Item {
@@ -371,7 +434,15 @@ impl Item {
     /// What the item runs, as one key part (see the module docs). JSON, so no two different
     /// items can join into the same text.
     fn identity(&self) -> String {
-        let file = |p: &Program| json!([p.path, p.signature.identity()]);
+        // Replaceable only when it is, so an item's identity, and the dismissal it keys, stays
+        // as it was before replaceability was read.
+        let file = |p: &Program| {
+            if p.replaceable {
+                json!([p.path, p.signature.identity(), "replaceable"])
+            } else {
+                json!([p.path, p.signature.identity()])
+            }
+        };
         let mut identity = json!({
             "program": self.program.as_ref().map(file),
             "scripts": self.scripts.iter().map(file).collect::<Vec<_>>(),
@@ -647,6 +718,7 @@ fn read_item(
                         .to_owned(),
                     stamp: None,
                 },
+                replaceable: false,
             },
         }),
         None => job
@@ -791,7 +863,11 @@ fn checked(path: PathBuf, cancel: &Cancel, failures: &mut Vec<InventoryError>) -
             stamp: None,
         }
     });
-    Program { path, signature }
+    Program {
+        path,
+        signature,
+        replaceable: false,
+    }
 }
 
 /// A file's code signature, as `codesign` verifies it.
@@ -1858,6 +1934,76 @@ TeamIdentifier=not set
     }
 
     #[test]
+    fn only_what_runs_as_root_is_marked_replaceable() {
+        let me = Account::current(&Cancel::new()).unwrap().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let mine = tmp.path().join("run");
+        fs::write(&mine, "").unwrap();
+        let job = |kind, user: &str| {
+            let user = match user {
+                "" => String::new(),
+                name => format!("<key>UserName</key><string>{name}</string>"),
+            };
+            let body = format!(
+                "<key>ProgramArguments</key><array><string>/bin/sh</string>\
+                 <string>{}</string></array>{user}",
+                mine.display()
+            );
+            let name = format!("{}.plist", tmp.path().read_dir().unwrap().count());
+            read(kind, &plist(tmp.path(), &name, &body))
+        };
+        let mut items = [
+            job(ItemKind::LaunchDaemon, ""),
+            job(ItemKind::AppLaunchDaemon, "root"),
+            job(ItemKind::LaunchDaemon, "nobody"),
+            job(ItemKind::LaunchAgent, ""),
+        ];
+        let before: Vec<String> = items.iter().map(Item::identity).collect();
+        mark_replaceable(&mut items, &me);
+
+        let marked: Vec<(bool, bool)> = items
+            .iter()
+            .map(|item| {
+                (
+                    item.program.as_ref().unwrap().replaceable,
+                    item.scripts[0].replaceable,
+                )
+            })
+            .collect();
+        // `/bin/sh` is the system's; the script is this user's.
+        assert_eq!(
+            marked,
+            [(false, true), (false, true), (false, false), (false, false)]
+        );
+        let line = serde_json::to_string(&items[0]).unwrap();
+        assert!(line.contains(r#""replaceable":true"#), "{line}");
+        assert_ne!(
+            items[0].identity(),
+            before[0],
+            "a new way to root is a new issue"
+        );
+        assert_eq!(
+            items[3].identity(),
+            before[3],
+            "unmarked items keep their keys"
+        );
+    }
+
+    #[test]
+    fn what_the_account_decides_is_known_by_its_path() {
+        assert!(needs_account("/Library/LaunchDaemons/a.plist"));
+        assert!(needs_account(
+            "/Applications/A.app/Contents/Library/LaunchDaemons/d.plist"
+        ));
+        assert!(needs_account("/usr/lib/cron/tabs/me"));
+        assert!(needs_account("/etc/zshrc"));
+        assert!(needs_account("/usr/local/etc/periodic/daily/x"));
+        assert!(!needs_account("/Library/LaunchAgents/a.plist"));
+        assert!(!needs_account("/Users/me/.zshrc"));
+        assert!(!needs_account("/etcetera/x"));
+    }
+
+    #[test]
     fn a_launch_folder_item_keeps_its_identity_and_a_registered_one_its_switches() {
         let tmp = tempfile::tempdir().unwrap();
         let path = plist(
@@ -1957,7 +2103,7 @@ TeamIdentifier=not set
         let item = read(ItemKind::LaunchAgent, &path);
         let identity = item.identity();
         let settings = BTreeMap::from([("filevault", "FileVault is On.".to_owned())]);
-        let host = Host::new(&settings, &[item]);
+        let host = Host::new(&settings, &[item], &[]);
 
         assert_eq!(host.settings, ["filevault"]);
         assert_eq!(host.items[path.to_str().unwrap()], identity);

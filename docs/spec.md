@@ -383,7 +383,7 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 | File | What it holds | An issue names it as |
 |---|---|---|
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
-| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`) | `{"item": "<path of the property list or app bundle>"}` |
+| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then shell startup files, crontabs and `periodic` scripts as their lines, assignment values hidden | `{"item": "<path of the property list or app bundle>"}` |
 
 - A debug build reads the two system folders under `VIGIL_TEST_LAUNCH_ROOT` when it is set,
   so the CLI's end-to-end tests check no launch item of the machine they run on (each sweep
@@ -417,6 +417,27 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 - A folder that cannot be listed for lack of permission is a note, as elsewhere in the
   inventory; any other failure marks that setting (`setting`), folder (`launch_folder`) or
   item (`launch_item`) unchecked.
+
+Startup files and root's programs (added 2026-11-18):
+
+- A program or script of a launch daemon, or an app's registered daemon, that runs as root
+  (no `UserName`, or `root`) is `replaceable` when this user could put another file there:
+  it or a folder it is reached through, as written or with links followed, is writable to
+  them or theirs (owners may change modes; a sticky folder guards others' entries). The
+  account comes from one `/usr/bin/id` run, since `unsafe` is forbidden and `access(2)` with
+  it. Only root-run programs are marked: marking agents would change the key of every
+  dismissed agent whose program is in the home folder. `replaceable` enters an item's
+  identity only when true, so other keys stay as they were.
+- `mac/persistence.jsonl` ends with zsh's and bash's startup files (home and `/etc`), this
+  user's crontab (`crontab -l`), `/etc/crontab`, and `periodic`'s scripts (none on macOS
+  27.2), each as its lines. The literal value of every variable assignment is replaced with
+  `(hidden)`, except `PATH`, `FPATH`, `DYLD_` and values that run a command (owner's
+  decision, 2026-11-18, over a path-and-hash listing the agent opens itself, and over whole
+  files): the files hold tokens, and the bundle is kept with each sweep. A file's key is its
+  shown lines, so a new token does not show a dismissed issue again. `/etc` files,
+  `/etc/crontab` and `periodic` scripts say whether this user could replace them.
+- An `id` that fails marks `account` unchecked, which carries the issues of daemons, this
+  user's crontab and the files in `/etc` and `periodic`'s folders.
 
 Background Task Management (added 2026-11-18):
 
@@ -462,12 +483,14 @@ Accepted gaps, in the order planned:
 - The Login Items switches of a launch folder item are not read, so an item turned off there
   shows as it would run; and the agents in other users' `~/Library/LaunchAgents`, which the
   records list, are not read.
+- Replaceability reads mode bits and owners, not ACLs, and only for what runs as root.
+- Root's and other users' crontabs (`/usr/lib/cron/tabs`, root's alone) are not read, nor are
+  zsh's files under a `ZDOTDIR`.
 - Applications in `/Applications` outside Homebrew, for both CVE matching and the dylib scan.
 - Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
   programs without library validation. Until then a changed file inside a program's bundle,
   such as a framework it loads, is not seen, since signatures skip the bundle's resources.
-- Kernel and system extensions, keyboard event taps, browser extensions, cron, periodic
-  scripts, shell startup files, and whether a root daemon's program is writable by the user.
+- Kernel and system extensions, keyboard event taps and browser extensions.
 
 ### GitHub repositories (decided 2026-11-06)
 
