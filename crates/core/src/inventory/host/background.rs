@@ -695,7 +695,8 @@ pub(super) mod tests {
         let mut archiver = Archiver::new();
         let app = Some("file:///A.app/");
         let full = archiver.record(&record(APP, "2.a", app));
-        let typed_only = archiver.object("ItemRecord", vec![("type", Value::from(APP))]);
+        // A login item is kept whatever its switches, so only the missing field leaves it out.
+        let typed_only = archiver.object("ItemRecord", vec![("type", Value::from(LOGIN_ITEM))]);
         let records = archiver.array(vec![full, typed_only]);
         let store = archiver.object("Storage", vec![("records", records)]);
         let archive = archiver.finish(vec![("userStore", store)]);

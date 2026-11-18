@@ -1722,17 +1722,19 @@ TeamIdentifier=not set
         };
         let folder = tmp.path().join("btm");
         fs::create_dir(&folder).unwrap();
-        // It runs for the second user only, which is what counts. A third app is enabled for
-        // one user and allowed for the other, so it runs for neither, and the first is kept.
+        // It runs for the second user only, which is what counts. A login item (kept whatever
+        // its switches, unlike an app) is enabled for one user and allowed for the other, so it
+        // runs for neither, and the first is kept.
         let other = tmp.path().join("B.app");
         let other_url = format!("file://{}/", other.display());
-        let first = [
-            record(0b01, "2.a", Some(url.as_str())),
-            record(0b01, "2.b", Some(other_url.as_str())),
-        ];
+        let helper = |disposition| Record {
+            bits: 0x4,
+            ..record(disposition, "4.b", Some(other_url.as_str()))
+        };
+        let first = [record(0b01, "2.a", Some(url.as_str())), helper(0b01)];
         let second = [
             record(0b11, "2.a", Some(url.as_str())),
-            record(0b10, "2.b", Some(other_url.as_str())),
+            helper(0b10),
             Record {
                 bits: 0x4,
                 ..record(0b11, "4.x", None)
