@@ -200,7 +200,11 @@ Write `findings.json` in this folder, following `findings.schema.json`:
       `ssh` or `su` function), or starts something in the background on every shell (`nohup`,
       `&`) that is not a known tool's;
     - runs as root (`/etc`, `periodic_script`, `path_list`, a root line in `/etc/crontab`) and
-      is `replaceable`, which is high.
+      is `replaceable`, which is high;
+    - holds what Vigil could not show: a `(not shown: ...)` line, or a value that runs over
+      more than a few lines (lines that read `(hidden)` alone continue the value above), unless
+      its name says it is a key or certificate. You cannot see what such lines run, and a
+      planted file can use them to hide a command.
 
     A line that only sets a value Vigil hid is not a finding: the value is not shown, and
     holding a token in a startup file is the user's choice. Leave out lines a tool's installer

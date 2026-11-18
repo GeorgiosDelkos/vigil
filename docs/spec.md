@@ -449,9 +449,13 @@ Startup files and root's programs (added 2026-11-18):
   into the shell's logical lines first (an open quote, `$(`, `(` or `${`, or a trailing
   backslash; a comment carries nothing over), and each is scanned knowing whether a byte is at
   the top level, in a comment or in quotes. A value nested in a comment or quotes ends where
-  they do. A line a multi-line value swallowed reads `(hidden, part of line N)`. Property tests
-  check both sides: a generated literal never comes through, and a command after a closed line
-  always does. A file's key is its shown lines,
+  they do, and at the end of its physical line at the latest. A here-document's body is text,
+  each line on its own, quotes meaning nothing. A hidden value keeps its newlines (a line it
+  spans reads `(hidden)`), so line numbers match the file. A logical line over 16 KiB, or
+  commands nested more than 32 deep, are replaced by a `(not shown: ...)` note, which bounds
+  the scan's quadratic cases and its recursion; the agent reports such a file, and one with a
+  value over more than a few lines. Property tests check both sides: a generated literal never
+  comes through, and a command after a closed line always does, here-documents included. A file's key is its shown lines,
   so a new token does not show a dismissed issue again, but any other edit does. Root-run
   files (`/etc`, `/etc/crontab`, `periodic`) say whether this user could replace them.
 - An `id` that fails, or is not there, marks `account` unchecked, which carries the issues of
