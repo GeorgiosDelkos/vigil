@@ -67,7 +67,8 @@ impl Account {
             Ok(real) => real != path && self.can_replace_along(&real),
             // A link to a file that is not there yet: whoever can create the target decides
             // what runs. One hop is read; a chain of dangling links is not followed further.
-            // `join` keeps an absolute target as it is and puts a relative one in the link's folder.
+            // `join` keeps an absolute target as it is, and puts a relative one in the link's
+            // folder.
             Err(_) => fs::read_link(path).is_ok_and(|target| {
                 let folder = path.parent().unwrap_or(Path::new("/"));
                 self.can_replace_along(&folder.join(target))

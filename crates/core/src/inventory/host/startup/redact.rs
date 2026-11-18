@@ -901,8 +901,8 @@ mod tests {
         fn a_literal_value_never_reaches_the_bundle(
             prefix in proptest::sample::select(vec![
                 "", "  ", "export ", "typeset -x ", "x; ", "a && ", "b || ", "then ", "# ",
-                "alias a='", "f() { ", "env ", "0 * * * * ", "echo \"", "//h/:", "launchctl setenv ",
-                ": ${", "x=$(", "x=`", "(true)#",
+                "alias a='", "f() { ", "env ", "0 * * * * ", "echo \"", "//h/:",
+                "launchctl setenv ", ": ${", "x=$(", "x=`", "(true)#",
             ]),
             name in "[A-Z_][A-Z0-9_]{0,8}",
             secret in "[a-z0-9]{12,20}",
