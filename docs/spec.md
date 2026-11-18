@@ -443,12 +443,18 @@ Startup files and root's programs (added 2026-11-18):
   says it is secret (`TOKEN`, `SECRET`, `PASS`, `AUTH`, `CREDENTIAL`, `KEY`, `COOKIE`, by name
   segment), the password or token in a URL, and secret headers and JSON keys. No shell is
   parsed and nothing carries from one line to the next, so no line can hide another (owner's
-  decision, 2026-11-18). A masked run never holds a shell operator (`;`, `|`, `&`, `<`, `>`, a
-  parenthesis, a backquote): a value that would is shown, so no masked text can hide a command
-  on its own line either; a property test checks it. The first design hid every assignment's value with a shell lexer;
-  five reviews each found a line it read differently from zsh or bash, leaking a token or
-  letting a planted line (`# TOKEN="`) hide a later command. Accepted downside: a short
-  password under an innocent name (`DB=hunter2`) is shown. Rejected: whole files (tokens kept
+  decision, 2026-11-18). A value masked by its name never holds a shell operator (`;`, `|`,
+  `&`, `<`, `>`, a parenthesis, a backquote), white space, a backslash or a `$`: a value that
+  would is shown, unless a word of it looks like a secret (owner's choice, 2026-11-18, of
+  narrowing over documenting the gap). So masked text is never a command with arguments, an
+  operator, a redirection or an expansion, even when a quote opened on an earlier line makes
+  the shell read it as code. Left: such a quote could make one masked word a command name with
+  no arguments, so the agent reports a file whose quotes do not balance. Property tests check
+  that a command after any prefix stays shown. The first design hid every assignment's value
+  with a shell lexer; five reviews each found a line it read differently from zsh or bash,
+  leaking a token or letting a planted line (`# TOKEN="`) hide a later command. Accepted
+  downside: a short password under an innocent name (`DB=hunter2`), and a secret-named value
+  with a space or a `$` (`AUTH="Bearer abc def"`), are shown. Rejected: whole files (tokens kept
   with each sweep) and a path-and-hash listing the agent opens itself (it sees the tokens). A
   file's key is its shown lines, so a new token does not show a dismissed issue again, but any
   other edit does. Root-run files (`/etc`, `/etc/crontab`, `periodic`) say whether this user

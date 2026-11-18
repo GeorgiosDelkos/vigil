@@ -204,7 +204,10 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     - runs as root (`/etc`, `periodic_script`, `path_list`, a root line in `/etc/crontab`) and
       is `replaceable`, which is high;
     - runs a value it set, by `eval`, `sh -c`, `source` or as a command (`$X`), when that value
-      is `(hidden)`: you cannot see what it runs.
+      is `(hidden)`: you cannot see what it runs;
+    - has quotes that do not balance across its lines (a quote opened on one line and closed on
+      a later one, outside a value that is plainly a key or text): the shell then reads later
+      lines differently from how they look, and a `(hidden)` word there may be code.
 
     A line that only sets a value Vigil hid is not a finding: holding a token in a startup file
     is the user's choice. Leave out lines a tool's installer
