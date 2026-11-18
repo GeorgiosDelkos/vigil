@@ -254,7 +254,8 @@ fn read(kind: FileKind, path: &Path, root_run: Option<&Account>) -> Option<Start
 fn read_following(path: &Path) -> io::Result<Vec<u8>> {
     let file = fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        // A planted link to a terminal must not become the sweep's controlling terminal.
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)?;
     if !file.metadata()?.is_file() {
         return Err(io::Error::new(
@@ -295,9 +296,20 @@ fn user_crontab(root: &Path, account: &Account, cancel: &Cancel) -> Option<Start
 /// What replaces a hidden value.
 const HIDDEN: &str = "(hidden)";
 
-/// The lines of `text`, values hidden ([`redact`]). A value whose quote or parenthesis is not
-/// closed on its line hides the following lines too, up to the one that closes it: a key
-/// pasted between quotes spans many.
+/// What a hidden value left open at the end of a line, which the next line continues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Open {
+    /// Inside a quote, `'` or `"`.
+    Quote(u8),
+    /// Inside a parenthesised array, this many levels deep.
+    Group(usize),
+    /// The line ended in a backslash, which joins the next line to the value.
+    Continued,
+}
+
+/// The lines of `text`, values hidden ([`redact`]). A value left open at the end of a line (a
+/// quote, an array, a trailing backslash) hides the following lines too, up to where it
+/// closes: a key pasted between quotes spans many.
 fn lines(text: &str) -> Vec<String> {
     let mut open = None;
     text.lines().map(|line| redact(line, &mut open)).collect()
@@ -305,74 +317,112 @@ fn lines(text: &str) -> Vec<String> {
 
 /// `line` with the literal part of every assigned value replaced by `(hidden)`, wherever the
 /// assignment is: after `;`, `&&` or `then`, inside quotes (`alias gh='GH_TOKEN=x gh'`), in a
-/// comment, or in a here-document (`//registry.npmjs.org/:_authToken=x`). An assignment is a
-/// name at a word boundary followed by `=` or `+=` ([`assignment_at`]), and `launchctl setenv
-/// NAME value`. A value of `PATH`, `FPATH` or a `DYLD_` variable is shown whole; in any other,
-/// each command it runs (`$(...)`, backticks, `<(...)`) is shown and the text around them is
-/// hidden. Over-hiding costs the agent a little context; a value shown cannot be taken back.
+/// comment, in a here-document (`//registry.npmjs.org/:_authToken=x`), or inside a command a
+/// value runs (`$(GH_TOKEN=x gh api user)`). An assignment is a name at a word boundary
+/// followed by `=` or `+=`, a default in a parameter expansion (`${NAME:=x}`, `${NAME:-x}`),
+/// or `launchctl setenv NAME value` ([`assignment_at`]). A value of `PATH`, `FPATH` or a
+/// `DYLD_` variable is shown; in any other, each command it runs (`$(...)`, backticks,
+/// `<(...)`) is shown, itself redacted, and the text around them is hidden. Over-hiding costs
+/// the agent a little context; a value shown cannot be taken back.
 ///
-/// `open` carries a quote or parenthesis left open by a hidden value on an earlier line.
+/// `open` carries what a hidden value left open on an earlier line ([`Open`]).
 ///
 /// Not hidden: a value passed as an argument (`--token=x` after a dash, `gh auth login
 /// --with-token x`), and one written to a file (`echo x > ~/.token`).
-fn redact(line: &str, open: &mut Option<u8>) -> String {
+fn redact(line: &str, open: &mut Option<Open>) -> String {
     let mut out = String::with_capacity(line.len());
     let mut rest = line;
-    if let Some(close) = *open {
-        let Some(at) = rest.find(char::from(close)) else {
-            return HIDDEN.to_owned();
-        };
+    if let Some(left) = open.take() {
+        let (end, still) = continue_value(rest, left);
         out.push_str(HIDDEN);
-        rest = &rest[at..];
-        *open = None;
+        rest = &rest[end..];
+        if still.is_some() {
+            *open = still;
+            return out;
+        }
     }
     let mut at = 0;
     let mut copied = 0;
     while at < rest.len() {
-        let Some((name, value_start)) = assignment_at(rest, at) else {
+        let Some(found) = assignment_at(rest, at) else {
             at += rest[at..].chars().next().map_or(1, char::len_utf8);
             continue;
         };
-        let (end, unclosed) = value_end(&rest[value_start..]);
-        let value = &rest[value_start..value_start + end];
-        out.push_str(&rest[copied..value_start]);
-        let shown = shown_value(name, value);
+        let (end, unclosed) = match found.form {
+            Form::Word => value_end(&rest[found.value..]),
+            Form::Braced => brace_end(&rest[found.value..]),
+        };
+        let value = &rest[found.value..found.value + end];
+        out.push_str(&rest[copied..found.value]);
+        let shown = shown_value(found.name, value);
         if shown != value {
             *open = unclosed;
         }
         out.push_str(&shown);
-        at = value_start + end;
+        at = found.value + end;
         copied = at;
     }
     out.push_str(&rest[copied..]);
     out
 }
 
-/// The name and where its value starts, when an assignment starts at byte `at` of `text`: a
-/// name (`[A-Za-z_][A-Za-z0-9_]*`) at a word boundary, then `=` (not `==`) or `+=`. At the
-/// start of a line, spaces may surround the `=`, as crontab(5) allows. Also `launchctl setenv
-/// NAME value`. A boundary is the start of the line or any character that cannot continue a
-/// name or an option: not a letter, digit, `_`, `-`, `$` or `.`.
-fn assignment_at(text: &str, at: usize) -> Option<(&str, usize)> {
+/// Where the value `left` open on an earlier line ends on `line`, and whether it is still open
+/// at the end of this one. A closing quote may be followed by more of the same word.
+fn continue_value(line: &str, left: Open) -> (usize, Option<Open>) {
+    let closed = match left {
+        // Strictly an indented word after `\` is a word of its own, but a value put there is
+        // what this hides; over-hiding is the safe side.
+        Open::Continued => line.len() - line.trim_start().len(),
+        Open::Quote(quote) => match quote_close(line, quote) {
+            Some(close) => close + 1,
+            None => return (line.len(), Some(left)),
+        },
+        Open::Group(depth) => match group_close(line, depth) {
+            (end, 0) => end,
+            (end, depth) => return (end, Some(Open::Group(depth))),
+        },
+    };
+    let (end, unclosed) = value_end(&line[closed..]);
+    (closed + end, unclosed)
+}
+
+/// An assignment [`assignment_at`] found.
+#[derive(Debug)]
+struct Found<'a> {
+    name: &'a str,
+    /// Where its value starts.
+    value: usize,
+    form: Form,
+}
+
+/// How an assignment's value ends.
+#[derive(Debug, Clone, Copy)]
+enum Form {
+    /// At the end of a shell word ([`value_end`]).
+    Word,
+    /// At the `}` of a parameter expansion ([`brace_end`]).
+    Braced,
+}
+
+/// The assignment that starts at byte `at` of `text`, if one does: a name
+/// (`[A-Za-z_][A-Za-z0-9_]*`, with any `[subscript]`) at a word boundary followed by `=` (not
+/// `==`) or `+=`; right after `${`, followed by `:=`, `=`, `:-` or `-`; or `launchctl setenv
+/// NAME value`. At the start of a line, spaces may surround the `=`, as crontab(5) allows. A
+/// boundary is the start of the line or any character that cannot continue a name or an
+/// option: not a letter, digit, `_`, `-`, `$` or `.`. A name after the word `alias` is the
+/// alias's, whose definition is a command, and is skipped; an assignment inside its quotes is
+/// still found as the scan goes on.
+fn assignment_at(text: &str, at: usize) -> Option<Found<'_>> {
     let bytes = text.as_bytes();
     let before = at.checked_sub(1).map(|b| bytes[b]);
     if before.is_some_and(|b| b.is_ascii_alphanumeric() || b"_-$.".contains(&b)) {
         return None;
     }
-    // An alias's definition is a command, which the agent judges; an assignment inside its
-    // quotes is still found as the scan goes on.
     if text[..at].trim_end().ends_with("alias") {
         return None;
     }
-    if let Some(after) = text[at..].strip_prefix("launchctl") {
-        let mut words = after.split_whitespace();
-        if words.next() == Some("setenv") {
-            let name = words.next()?;
-            let name_at = at + "launchctl".len() + after.find(name)?;
-            let value_at = name_at + name.len();
-            let space = text[value_at..].len() - text[value_at..].trim_start().len();
-            return Some((&text[name_at..value_at], value_at + space));
-        }
+    if let Some(found) = launchctl_setenv(text, at) {
+        return Some(found);
     }
     let name_len = text[at..]
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
@@ -382,6 +432,17 @@ fn assignment_at(text: &str, at: usize) -> Option<(&str, usize)> {
         return None;
     }
     let mut after = &text[at + name_len..];
+    if text[..at].ends_with("${") {
+        let operator = [":=", ":-", "=", "-"]
+            .into_iter()
+            .find(|op| after.starts_with(op))?;
+        let value = text.len() - after.len() + operator.len();
+        return Some(Found {
+            name,
+            value,
+            form: Form::Braced,
+        });
+    }
     // A subscript (`secrets[github]=x`, zsh and bash arrays) belongs to the name.
     if let Some(subscript) = after.strip_prefix('[') {
         after = &subscript[subscript.find(']')? + 1..];
@@ -398,30 +459,55 @@ fn assignment_at(text: &str, at: usize) -> Option<(&str, usize)> {
     if line_start {
         value = value.trim_start();
     }
-    Some((name, text.len() - value.len()))
+    Some(Found {
+        name,
+        value: text.len() - value.len(),
+        form: Form::Word,
+    })
 }
 
-/// The value as the bundle shows it (see [`redact`]).
+/// `launchctl setenv NAME value` starting at byte `at` of `text`.
+fn launchctl_setenv(text: &str, at: usize) -> Option<Found<'_>> {
+    let tail = text[at..]
+        .strip_prefix("launchctl")?
+        .trim_start()
+        .strip_prefix("setenv")?;
+    let name_at = text.len() - tail.trim_start().len();
+    let name_len = text[name_at..]
+        .find(char::is_whitespace)
+        .unwrap_or(text.len() - name_at);
+    let value_at = name_at + name_len;
+    let space = text[value_at..].len() - text[value_at..].trim_start().len();
+    Some(Found {
+        name: &text[name_at..value_at],
+        value: value_at + space,
+        form: Form::Word,
+    })
+}
+
+/// The value as the bundle shows it (see [`redact`]): each command in it redacted, and, unless
+/// the name's value is shown, each run of other text replaced by `(hidden)`.
 fn shown_value(name: &str, value: &str) -> String {
-    if value.is_empty() || shows_value(name) || name == "FPATH" {
-        return value.to_owned();
-    }
+    let literal_shown = shows_value(name) || name == "FPATH";
     let mut shown = String::new();
-    let mut literal = false;
+    let mut hiding = false;
     let mut at = 0;
     while at < value.len() {
         let command = command_end(&value[at..]);
         if command > 0 {
-            shown.push_str(&value[at..at + command]);
-            literal = false;
+            shown.push_str(&redact(&value[at..at + command], &mut None));
+            hiding = false;
             at += command;
             continue;
         }
-        if !literal {
+        let next = at + value[at..].chars().next().map_or(1, char::len_utf8);
+        if literal_shown {
+            shown.push_str(&value[at..next]);
+        } else if !hiding {
             shown.push_str(HIDDEN);
-            literal = true;
+            hiding = true;
         }
-        at += value[at..].chars().next().map_or(1, char::len_utf8);
+        at = next;
     }
     shown
 }
@@ -429,7 +515,8 @@ fn shown_value(name: &str, value: &str) -> String {
 /// The length of the command `text` starts with (`$(...)`, `<(...)` or a backquoted one), or 0.
 fn command_end(text: &str) -> usize {
     if text.starts_with("$(") || text.starts_with("<(") {
-        return 1 + group_end(&text[1..]).0;
+        let (end, _) = group_close(&text[2..], 1);
+        return 2 + end;
     }
     if let Some(inner) = text.strip_prefix('`') {
         return inner.find('`').map_or(text.len(), |at| at + 2);
@@ -437,33 +524,80 @@ fn command_end(text: &str) -> usize {
     0
 }
 
-/// Where the parenthesised group `text` starts with ends, past its `)`, nested ones included,
-/// and whether it was left open (so it ran to the end).
-fn group_end(text: &str) -> (usize, bool) {
-    let mut depth = 0_usize;
+/// What the command `command` ([`command_end`]) leaves open when its line ends before it
+/// closes, so the lines it runs on are hidden as part of the value.
+fn command_left_open(command: &str) -> Option<Open> {
+    if let Some(inner) = command.strip_prefix('`') {
+        return (!inner.contains('`')).then_some(Open::Quote(b'`'));
+    }
+    match group_close(&command[2..], 1) {
+        (_, 0) => None,
+        (_, depth) => Some(Open::Group(depth)),
+    }
+}
+
+/// Where a group that is `depth` levels deep at the start of `text` closes, past its `)`, and
+/// the depth left at the end (0 when it closed).
+fn group_close(text: &str, mut depth: usize) -> (usize, usize) {
     for (at, byte) in text.bytes().enumerate() {
         match byte {
             b'(' => depth += 1,
             b')' => {
                 depth -= 1;
                 if depth == 0 {
-                    return (at + 1, false);
+                    return (at + 1, 0);
                 }
             }
             _ => {}
         }
     }
-    (text.len(), true)
+    (text.len(), depth)
+}
+
+/// Where a parameter expansion's value ends: at its `}`, nested braces counted. One not closed
+/// on its line runs to the end and goes on to the next line, as a trailing backslash would.
+fn brace_end(text: &str) -> (usize, Option<Open>) {
+    let mut depth = 1_usize;
+    for (at, byte) in text.bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (at, None);
+                }
+            }
+            _ => {}
+        }
+    }
+    (text.len(), Some(Open::Continued))
+}
+
+/// Where the quote `quote` that `text` is inside closes: the first one in it, or for `"` the
+/// first one not escaped with a backslash. Single quotes have no escapes in the shell.
+fn quote_close(text: &str, quote: u8) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' if quote == b'"' => at += 2,
+            byte if byte == quote => return Some(at),
+            _ => at += 1,
+        }
+    }
+    None
 }
 
 /// Where the shell word `text` starts with ends: at unquoted white space or a control
-/// character (`;`, `&`, `|`, `<`, `>`, `)`). A word that starts with `(` is the group it opens
-/// (an array), and a `$(...)` or backquoted command inside the word is part of it. Also which
-/// quote or parenthesis was left open at the end of the line, if one was.
-fn value_end(text: &str) -> (usize, Option<u8>) {
-    if text.starts_with('(') {
-        let (end, unclosed) = group_end(text);
-        return (end, unclosed.then_some(b')'));
+/// character (`;`, `&`, `|`, `<`, `>`, `(`, `)`). A word that starts with `(` is the group it
+/// opens (an array), and a `$(...)` or backquoted command inside the word is part of it. Also
+/// what is left open at the end of the line: a quote, an array, or a trailing backslash.
+fn value_end(text: &str) -> (usize, Option<Open>) {
+    if let Some(inner) = text.strip_prefix('(') {
+        return match group_close(inner, 1) {
+            (end, 0) => (1 + end, None),
+            (_, depth) => (text.len(), Some(Open::Group(depth))),
+        };
     }
     let bytes = text.as_bytes();
     // Past the character at `from`, which keeps every index on a character boundary.
@@ -473,16 +607,20 @@ fn value_end(text: &str) -> (usize, Option<u8>) {
         if matches!(bytes[at], b'$' | b'`') {
             let command = command_end(&text[at..]);
             if command > 0 {
+                if let Some(left) = command_left_open(&text[at..at + command]) {
+                    return (text.len(), Some(left));
+                }
                 at += command;
                 continue;
             }
         }
         at = match bytes[at] {
-            // The escaped character, which `next` steps past, at the end of the line too.
+            b'\\' if at + 1 == bytes.len() => return (text.len(), Some(Open::Continued)),
+            // The escaped character, which `next` steps past.
             b'\\' => next(at + 1),
-            quote @ (b'\'' | b'"') => match text[at + 1..].find(char::from(quote)) {
+            quote @ (b'\'' | b'"') => match quote_close(&text[at + 1..], quote) {
                 Some(close) => at + close + 2,
-                None => return (text.len(), Some(quote)),
+                None => return (text.len(), Some(Open::Quote(quote))),
             },
             b' ' | b'\t' | b';' | b'&' | b'|' | b'<' | b'>' | b'(' | b')' => break,
             _ => next(at),
@@ -558,7 +696,8 @@ mod tests {
                 "[[ $X == y ]] && [ \"$a\" = b ]",
                 "[[ $X == y ]] && [ \"$a\" = b ]",
             ),
-            ("echo ${X:=d}", "echo ${X:=d}"),
+            ("echo ${X:=d}", "echo ${X:=(hidden)}"),
+            ("echo ${X}", "echo ${X}"),
             ("*/5 * * * * /tmp/x.sh", "*/5 * * * * /tmp/x.sh"),
             ("MAILTO=me@example.com", "MAILTO=(hidden)"),
         ];
@@ -618,6 +757,23 @@ mod tests {
                 "https://x.example/?token=(hidden)&b=(hidden)",
             ),
             ("secrets[github]=s", "secrets[github]=(hidden)"),
+            // Found by the second review of PR #75.
+            (": ${GITHUB_TOKEN:=s}", ": ${GITHUB_TOKEN:=(hidden)}"),
+            (
+                "gh --token ${GH_TOKEN:-s} x",
+                "gh --token ${GH_TOKEN:-(hidden)} x",
+            ),
+            (
+                "export U=$(GH_TOKEN=s gh api user)",
+                "export U=$(GH_TOKEN=(hidden) gh api user)",
+            ),
+            ("export X=`TOKEN=s cmd`", "export X=`TOKEN=(hidden) cmd`"),
+            (
+                "export PATH=\"$(T=s h):$PATH\"",
+                "export PATH=\"$(T=(hidden) h):$PATH\"",
+            ),
+            ("export AUTH=\"x \\\" s\"", "export AUTH=(hidden)"),
+            ("launchctl setenv e s", "launchctl setenv e (hidden)"),
             ("X=`date`; A=s", "X=`date`; A=(hidden)"),
             ("X=a\\", "X=(hidden)"),
             (
@@ -639,7 +795,7 @@ mod tests {
             [
                 "export KEY=(hidden)",
                 "(hidden)",
-                "(hidden)\" && echo ok",
+                "(hidden) && echo ok",
                 "next=(hidden)"
             ]
         );
@@ -650,9 +806,24 @@ mod tests {
                 "KEYS=(hidden)",
                 "(hidden)",
                 "(hidden)",
-                "(hidden))",
+                "(hidden)",
                 "echo done"
             ]
+        );
+        // A trailing backslash joins the next line to the value.
+        assert_eq!(
+            lines("export T=\\\n  s\necho\n"),
+            ["export T=(hidden)", "(hidden)", "echo"]
+        );
+        // A closing quote's word goes on, and an escaped quote does not close it.
+        assert_eq!(
+            lines("X=\"a\nb \\\" c\"d e\n"),
+            ["X=(hidden)", "(hidden) e"]
+        );
+        // An array's depth is carried, so a command's `)` inside it does not close it.
+        assert_eq!(
+            lines("K=(\n\"$(c)\" s\n)\n"),
+            ["K=(hidden)", "(hidden)", "(hidden)"]
         );
         // A shown value left open hides nothing after it.
         assert_eq!(lines("PATH=\"/a\nb=1\n"), ["PATH=\"/a", "b=(hidden)"]);
@@ -669,20 +840,29 @@ mod tests {
             prefix in proptest::sample::select(vec![
                 "", "  ", "export ", "typeset -x ", "x; ", "a && ", "b || ", "then ", "# ",
                 "alias a='", "f() { ", "env ", "0 * * * * ", "echo \"", "//h/:", "launchctl setenv ",
+                ": ${", "x=$(", "x=`",
             ]),
             name in "[A-Z_][A-Z0-9_]{0,8}",
             secret in "[a-z0-9]{12,20}",
             quote in proptest::sample::select(vec!["", "'", "\""]),
-            suffix in proptest::sample::select(vec!["", " cmd", "; echo", " && x", "'", "\""]),
+            suffix in proptest::sample::select(vec![
+                "", " cmd", "; echo", " && x", "'", "\"", "\\", "}", ")", "`", " \\\" x\"",
+            ]),
         ) {
             proptest::prop_assume!(name != "PATH" && name != "FPATH" && !name.starts_with("DYLD_"));
-            let line = if prefix == "launchctl setenv " {
-                format!("{prefix}{name} {quote}{secret}{quote}{suffix}")
-            } else {
-                format!("{prefix}{name}={quote}{secret}{quote}{suffix}")
+            let line = match prefix {
+                "launchctl setenv " => format!("{prefix}{name} {quote}{secret}{quote}{suffix}"),
+                ": ${" => format!("{prefix}{name}:={quote}{secret}{quote}{suffix}"),
+                _ => format!("{prefix}{name}={quote}{secret}{quote}{suffix}"),
             };
-            let shown = lines(&format!("{line}\nnext\n")).join("\n");
-            proptest::prop_assert!(!shown.contains(&secret), "{line} -> {shown}");
+            // A value continued by a backslash goes on to the next line, a second secret.
+            let shown = lines(&format!("{line}\n{secret}2\nnext\n")).join("\n");
+            let continued = line.ends_with('\\');
+            let first = shown.lines().next().unwrap_or("");
+            proptest::prop_assert!(!first.contains(&secret), "{line} -> {shown}");
+            if continued {
+                proptest::prop_assert!(!shown.contains(&secret), "{line} -> {shown}");
+            }
         }
     }
 

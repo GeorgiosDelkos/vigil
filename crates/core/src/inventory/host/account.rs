@@ -115,9 +115,11 @@ impl Account {
         };
         if meta.uid() == self.uid {
             true
-        } else if self.groups.contains(&meta.gid()) {
-            meta.gid() != ADMIN_GID && (mode >> 3) & needed == needed
+        } else if self.groups.contains(&meta.gid()) && meta.gid() != ADMIN_GID {
+            (mode >> 3) & needed == needed
         } else {
+            // Everyone's bits, which also hold for a member of `admin`: only what that group
+            // alone grants is left out.
             mode & needed == needed
         }
     }
@@ -276,10 +278,6 @@ mod tests {
             uid: u32::MAX - 1,
             groups: vec![ADMIN_GID],
         };
-        // Built by hand: a test cannot make a folder owned by another user and `admin`.
-        let tmp = tempfile::tempdir().unwrap();
-        let meta = fs::metadata(tmp.path()).unwrap();
-        assert!(meta.gid() != ADMIN_GID || !admin.writes(&meta, Entry::Folder));
         if Path::new("/Applications").exists() {
             let apps = fs::metadata("/Applications").unwrap();
             if apps.gid() == ADMIN_GID && apps.mode() & 0o002 == 0 {

@@ -220,8 +220,9 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
 /// Whether the item at `path` is one only the account lets the sweep read
 /// ([`InventorySource::Account`]): this user's crontab. Daemons and the files in `/etc` are
 /// read without it, so a failed `id` does not keep their issues open; it only leaves their
-/// `replaceable` out for one sweep. Accepted downside: a daemon whose only issue was being
-/// replaceable reads as resolved on that sweep, which `id` failing almost never causes.
+/// `replaceable` out for one sweep. Accepted downside: a daemon or a root-run file in `/etc` or
+/// `periodic`'s folders whose only issue was being replaceable reads as resolved on that sweep,
+/// which `id` failing almost never causes.
 pub(crate) fn needs_account(path: &str) -> bool {
     Path::new(path).starts_with("/usr/lib/cron/tabs")
 }
