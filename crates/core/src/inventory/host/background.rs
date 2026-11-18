@@ -70,10 +70,9 @@ pub(super) enum Place {
     /// The app bundle, or the property list inside one.
     Found(PathBuf),
     /// A record that could not be placed: `shown` is its identifier and its own text for the
-    /// place, so records of different items stay apart, and `why` says what is missing. It is
-    /// never an absolute path, which tells it from a launch folder item: macOS starts every
-    /// identifier with the record's type number (`4.`), undocumented but seen in every version
-    /// read so far, and a missing one shows as `(no identifier)`.
+    /// place after `(unplaced) `, so records of different items stay apart and the text is
+    /// never an absolute path, which tells it from a launch folder item; `why` says what is
+    /// missing.
     Unplaced { shown: String, why: String },
 }
 
@@ -240,7 +239,7 @@ fn user_entries(archive: &Archive<'_>, records: &[&Dictionary]) -> Vec<Entry> {
             Err((text, why)) => {
                 let identifier = archive.string(record, "identifier");
                 let identifier = identifier.as_deref().unwrap_or("(no identifier)");
-                let shown = format!("{identifier}: {text}");
+                let shown = format!("(unplaced) {identifier}: {text}");
                 Place::Unplaced { shown, why }
             }
         };
@@ -681,18 +680,18 @@ pub(super) mod tests {
             shown,
             [
                 (
-                    "4.a: Contents/Library/LoginItems/A.app",
+                    "(unplaced) 4.a: Contents/Library/LoginItems/A.app",
                     &*format!("its app \"2.gone\" {no_file}")
                 ),
                 (
-                    "4.b: Contents/Library/LoginItems/A.app",
+                    "(unplaced) 4.b: Contents/Library/LoginItems/A.app",
                     &*format!("its app \"2.relative\" {no_file}")
                 ),
                 (
-                    "4.c: Contents/Library/LoginItems/A.app",
+                    "(unplaced) 4.c: Contents/Library/LoginItems/A.app",
                     "its location is relative to no app"
                 ),
-                ("4.d: (no location)", "it names no location"),
+                ("(unplaced) 4.d: (no location)", "it names no location"),
             ]
         );
     }

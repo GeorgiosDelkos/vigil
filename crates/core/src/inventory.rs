@@ -492,9 +492,9 @@ impl InventorySource {
             Self::LaunchItem { path } => matches!(subject, Subject::Item(item) if item == path),
             // Every item these records give is an app bundle, a file inside one, or a record
             // that could not be placed; no launch folder item is, unless a folder on its path
-            // or its own name ends in `.app` (see `host::may_come_from_records`). A file that fails on
-            // every sweep keeps these issues open, which is the truth: none of its items was
-            // read.
+            // or its own name ends in `.app` (see `host::may_come_from_records`). A file that
+            // fails on every sweep keeps these issues open, which is the truth: none of its
+            // items was read.
             Self::BackgroundItems => matches!(
                 subject,
                 Subject::Item(item) if host::may_come_from_records(Path::new(item))
@@ -1242,7 +1242,7 @@ mod tests {
             Subject::Item("/Applications/A.app/Contents/Library/LoginItems/H.app".into());
         assert!(records.covers_issue(&login_item));
         assert!(records.covers_issue(&Subject::Item("/Applications/Gone.app".into())));
-        let unplaced = Subject::Item("4.d: (no location)".into());
+        let unplaced = Subject::Item("(unplaced) 4.d: (no location)".into());
         assert!(
             records.covers_issue(&unplaced),
             "an unplaced record's text is not absolute"
@@ -1252,6 +1252,11 @@ mod tests {
         assert!(
             !records.covers_issue(&item),
             "a launch folder's item is read from the folder"
+        );
+        let named_app = Subject::Item("/Library/LaunchAgents/app".to_owned());
+        assert!(
+            !records.covers_issue(&named_app),
+            "only an extension counts"
         );
         let file = Subject::File("A.app/x".to_owned());
         let setting = Subject::Setting("A.app".to_owned());

@@ -429,7 +429,7 @@ Background Task Management (added 2026-11-18):
   unchecked.
 - The same item recorded for several users is one line. It runs if it runs for any of them,
   so a record with both switches on wins; otherwise the first is kept. A record that cannot
-  be placed on disk is named by its identifier and its own text, so only the same record
+  be placed on disk is named `(unplaced) <identifier>: <its text>`, so only the same record
   from several users merges. Its text is never an absolute path, so a failed read carries
   its issue too.
 - Only a process with Full Disk Access may list the folder. macOS cannot grant it ahead of

@@ -1780,8 +1780,8 @@ TeamIdentifier=not set
             [
                 (app.to_str().unwrap(), true, true),
                 (other.to_str().unwrap(), true, false),
-                ("4.x: (no location)", true, true),
-                ("4.y: (no location)", true, true),
+                ("(unplaced) 4.x: (no location)", true, true),
+                ("(unplaced) 4.y: (no location)", true, true),
             ]
         );
     }
@@ -1906,10 +1906,6 @@ TeamIdentifier=not set
             app_of(Path::new("/A.app/Library/LaunchAgents/a.plist")),
             None
         );
-        // Only an extension counts, not a name that ends in "app".
-        assert!(!may_come_from_records(Path::new(
-            "/Library/LaunchAgents/app"
-        )));
     }
 
     #[test]
