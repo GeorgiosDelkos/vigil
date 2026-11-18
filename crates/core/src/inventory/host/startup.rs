@@ -404,13 +404,16 @@ mod tests {
         // Decoded lossily, so a byte that is not UTF-8 keeps the other jobs; capped as a file.
         let lossy = crontab("printf 'a\\377b\\n@reboot /tmp/x\\n'").unwrap();
         assert_eq!(lossy.lines, ["a\u{FFFD}b", "@reboot /tmp/x"]);
-        let long = crontab(&format!(
-            "head -c {} /dev/zero | tr '\\0' z",
-            FILE_LIMIT + 10
-        ))
-        .unwrap();
+        // A three-byte character across the limit is cut before it, never in its middle.
+        let script = format!(
+            "head -c {} /dev/zero | tr '\\\\0' z; printf '\\342\\234\\223tail'",
+            FILE_LIMIT - 1
+        );
+        let long = crontab(&script).unwrap();
         assert!(long.truncated);
-        assert_eq!(long.lines.concat().len(), FILE_LIMIT);
+        let kept = long.lines.concat();
+        assert_eq!(kept.len(), FILE_LIMIT - 1);
+        assert!(!kept.contains('\u{FFFD}'));
         fs::remove_file(&tool).unwrap();
         assert!(user_crontab(tmp.path(), &account).is_none(), "no tool");
     }
