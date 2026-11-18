@@ -287,10 +287,7 @@ fn user_crontab(root: &Path, account: &Account) -> Option<StartupFile> {
         Ok(None) => None,
         Ok(Some(output)) if output.success => {
             // Capped as a file is, so a planted crontab cannot fill every bundle.
-            let mut end = output.stdout.len().min(FILE_LIMIT);
-            while !output.stdout.is_char_boundary(end) {
-                end -= 1;
-            }
+            let end = output.stdout.floor_char_boundary(FILE_LIMIT);
             let truncated = end < output.stdout.len();
             Some(file(None, lines(&output.stdout[..end]), truncated))
         }
@@ -404,6 +401,16 @@ mod tests {
         let failed = crontab("echo 'crontab: tmp/tmp.1: Permission denied' >&2; exit 1").unwrap();
         assert_eq!(failed.lines, Vec::<String>::new());
         assert!(failed.error.unwrap().contains("Permission denied"));
+        // Decoded lossily, so a byte that is not UTF-8 keeps the other jobs; capped as a file.
+        let lossy = crontab("printf 'a\\377b\\n@reboot /tmp/x\\n'").unwrap();
+        assert_eq!(lossy.lines, ["a\u{FFFD}b", "@reboot /tmp/x"]);
+        let long = crontab(&format!(
+            "head -c {} /dev/zero | tr '\\0' z",
+            FILE_LIMIT + 10
+        ))
+        .unwrap();
+        assert!(long.truncated);
+        assert_eq!(long.lines.concat().len(), FILE_LIMIT);
         fs::remove_file(&tool).unwrap();
         assert!(user_crontab(tmp.path(), &account).is_none(), "no tool");
     }
