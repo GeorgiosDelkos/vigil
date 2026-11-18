@@ -428,6 +428,14 @@ mod tests {
         let long = crontab(&script).unwrap();
         assert!(long.truncated);
         assert_eq!(long.lines, ["@reboot /tmp/x"]);
+        // A crontab of exactly the limit is whole.
+        let script = format!(
+            "head -c {} /dev/zero | tr '\\\\0' z; printf '\\n'",
+            FILE_LIMIT - 1
+        );
+        let full = crontab(&script).unwrap();
+        assert!(!full.truncated);
+        assert_eq!(full.lines.concat().len(), FILE_LIMIT - 1);
         fs::remove_file(&tool).unwrap();
         assert!(user_crontab(tmp.path(), &account).is_none(), "no tool");
     }

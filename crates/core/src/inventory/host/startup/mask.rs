@@ -910,6 +910,8 @@ mod tests {
             ),
             ("tool --token\"abc123\"", "tool --token\"abc123\""),
             ("TOKEN='abc'def", "TOKEN='abc'def"),
+            // An unclosed `$'...'` is masked as an unclosed `'...'` is.
+            ("TOKEN=$'abc", "TOKEN=$'(hidden)"),
             ("TOKEN=ab$'cd'", "TOKEN=ab$'cd'"),
             ("echo key-cafe", "echo key-cafe"),
             ("echo Build2Release", "echo Build2Release"),
@@ -1082,6 +1084,11 @@ mod tests {
             "alias k=kubectl | TOKEN=(hidden)"
         );
         assert_eq!(mask("alias k='a;b' token=evil"), "alias k='a;b' token=evil");
+        // A backslash in plain single quotes escapes nothing, so the quote closes before `pass`.
+        assert_eq!(
+            mask("alias x='a\\' pass=evil-helper"),
+            "alias x='a\\' pass=evil-helper"
+        );
         assert_eq!(mask("$alias TOKEN=abc123"), "$alias TOKEN=(hidden)");
         // Quoted text this shell runs defines aliases too, and an ordinary string does not.
         assert_eq!(
