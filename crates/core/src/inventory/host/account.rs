@@ -2,8 +2,13 @@
 //!
 //! A program that runs as root but that this user can replace is a way from this user to root:
 //! malware running as the user swaps it, and the next start runs it as root. The check reads
-//! mode bits and owners only. It does not read ACLs, which can grant more, so a file shown not
-//! replaceable may still be.
+//! mode bits and owners only, as the kernel applies them. It does not read ACLs, which can
+//! grant more, so a file shown not replaceable may still be.
+//!
+//! Write access through the `admin` group does not count: `/Applications` is `root:admin
+//! 775`, so it would mark every daemon an app runs from its own bundle for every admin user,
+//! and an admin can already become root with their password. The question is a way up with
+//! no password. macOS's App Management protection also guards the bundles there.
 //!
 //! `unsafe` is forbidden in this workspace, so `access(2)` and `getgroups(2)` are out of reach;
 //! `/usr/bin/id` names the account and its groups instead, once per sweep.
@@ -18,6 +23,9 @@ use crate::inventory::command;
 
 /// The tool that names the account, by absolute path as every host tool is.
 const ID: &str = "/usr/bin/id";
+
+/// macOS's `admin` group, whose write access does not count (see the module docs).
+const ADMIN_GID: u32 = 80;
 
 /// The account the sweep runs as.
 #[derive(Debug)]
@@ -61,7 +69,9 @@ impl Account {
     /// its link followed, which checks the folder entries land in.
     fn can_replace_along(&self, path: &Path) -> bool {
         let mut child = fs::symlink_metadata(path).ok();
-        if child.as_ref().is_some_and(|file| self.writes(file)) {
+        // A link's own mode and owner let no one change where it points: only its folder does.
+        let leaf = child.as_ref().filter(|file| !file.is_symlink());
+        if leaf.is_some_and(|file| self.writes(file, Entry::File)) {
             return true;
         }
         for folder in path.ancestors().skip(1) {
@@ -70,9 +80,12 @@ impl Account {
                 child = None;
                 continue;
             };
+            // In a sticky folder only an entry's owner, or the folder's, may replace it.
             let sticky = meta.mode() & 0o1000 != 0;
-            let guarded = sticky && child.as_ref().is_some_and(|c| c.uid() != self.uid);
-            if self.writes(&meta) && !guarded {
+            let guarded = sticky
+                && meta.uid() != self.uid
+                && child.as_ref().is_some_and(|c| c.uid() != self.uid);
+            if self.writes(&meta, Entry::Folder) && !guarded {
                 return true;
             }
             child = Some(meta);
@@ -80,13 +93,31 @@ impl Account {
         false
     }
 
-    /// Whether this account may write `meta`'s file or folder, or change its mode to.
-    fn writes(&self, meta: &fs::Metadata) -> bool {
+    /// Whether this account may write `meta`'s file or folder, or change its mode to. As the
+    /// kernel does, only the bits of the account's class count: the owner's (always enough,
+    /// since the owner may change them), else the group's, else everyone's. A folder needs its
+    /// search bit too.
+    fn writes(&self, meta: &fs::Metadata, entry: Entry) -> bool {
         let mode = meta.mode();
-        meta.uid() == self.uid
-            || (self.groups.contains(&meta.gid()) && mode & 0o020 != 0)
-            || mode & 0o002 != 0
+        let needed = match entry {
+            Entry::File => 0o2,
+            Entry::Folder => 0o3,
+        };
+        if meta.uid() == self.uid {
+            true
+        } else if self.groups.contains(&meta.gid()) {
+            meta.gid() != ADMIN_GID && (mode >> 3) & needed == needed
+        } else {
+            mode & needed == needed
+        }
     }
+}
+
+/// What a mode is checked for: writing a file, or writing an entry into a folder.
+#[derive(Debug, Clone, Copy)]
+enum Entry {
+    File,
+    Folder,
 }
 
 /// The account in `id`'s output: `uid=501(me) gid=20(staff) groups=20(staff),12(everyone)`.
@@ -99,8 +130,15 @@ fn parse(text: &str) -> Option<Account> {
     let uid_part = field("uid")?;
     let uid = number(uid_part)?;
     let name = uid_part.split_once('(')?.1.strip_suffix(')')?.to_owned();
-    let mut groups: Vec<u32> = field("groups").map_or_else(Vec::new, |list| {
-        list.split(',').filter_map(number).collect()
+    // The list runs to the end of the line: a group's name can hold spaces (an Active
+    // Directory group such as `domain users`), so the line is not split on white space there.
+    let list = text
+        .find("groups=")
+        .map(|at| text[at + "groups=".len()..].lines().next().unwrap_or(""));
+    let mut groups: Vec<u32> = list.map_or_else(Vec::new, |list| {
+        list.split(',')
+            .filter_map(|g| number(g.trim_start()))
+            .collect()
     });
     groups.extend(field("gid").and_then(number));
     Some(Account { name, uid, groups })
@@ -124,6 +162,14 @@ mod tests {
         assert!(parse("uid=x(me) gid=20(staff)").is_none());
         assert!(parse("gid=20(staff)").is_none());
         assert!(parse("uid=501 gid=20").is_none(), "no name");
+        let spaced =
+            parse("uid=501(me) gid=20(staff) groups=20(staff),701(domain users),80(admin)")
+                .unwrap();
+        assert_eq!(
+            spaced.groups,
+            [20, 701, 80, 20],
+            "a group name with a space"
+        );
     }
 
     #[test]
@@ -185,6 +231,52 @@ mod tests {
             groups: vec![0],
         };
         assert!(!root.can_replace(&file), "root needs no way up");
+    }
+
+    #[test]
+    fn only_the_account_s_class_of_bits_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let folder = tmp.path().join("f");
+        fs::create_dir(&folder).unwrap();
+        let file = folder.join("a");
+        fs::write(&file, "").unwrap();
+        let gid = fs::metadata(&folder).unwrap().gid();
+        let stranger = |groups| Account {
+            name: "x".to_owned(),
+            uid: u32::MAX - 1,
+            groups,
+        };
+        let mode = |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        mode(&folder, 0o755).unwrap();
+        // Everyone may write it, but not its group, and the kernel gives a member the group's.
+        mode(&file, 0o646).unwrap();
+        assert!(stranger(Vec::new()).can_replace(&file));
+        assert!(!stranger(vec![gid]).can_replace(&file));
+        // A folder written without its search bit cannot be entered to write into.
+        mode(&file, 0o644).unwrap();
+        mode(&folder, 0o772).unwrap();
+        assert!(!stranger(Vec::new()).can_replace(&file));
+        mode(&folder, 0o755).unwrap();
+    }
+
+    #[test]
+    fn the_admin_group_is_no_way_up() {
+        let admin = Account {
+            name: "me".to_owned(),
+            uid: u32::MAX - 1,
+            groups: vec![ADMIN_GID],
+        };
+        // Built by hand: a test cannot make a folder owned by another user and `admin`.
+        let tmp = tempfile::tempdir().unwrap();
+        let meta = fs::metadata(tmp.path()).unwrap();
+        assert!(meta.gid() != ADMIN_GID || !admin.writes(&meta, Entry::Folder));
+        if Path::new("/Applications").exists() {
+            let apps = fs::metadata("/Applications").unwrap();
+            if apps.gid() == ADMIN_GID && apps.mode() & 0o002 == 0 {
+                assert!(!admin.writes(&apps, Entry::Folder), "root:admin 775");
+                assert!(!admin.can_replace(Path::new("/Applications/Some.app/Contents/x")));
+            }
+        }
     }
 
     #[test]

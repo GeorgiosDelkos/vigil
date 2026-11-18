@@ -383,7 +383,7 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 | File | What it holds | An issue names it as |
 |---|---|---|
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
-| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then shell startup files, crontabs and `periodic` scripts as their lines, assignment values hidden | `{"item": "<path of the property list or app bundle>"}` |
+| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then shell startup files, crontabs and `periodic` scripts as their lines, assignment values hidden | `{"item": "<path of the property list, app bundle or file>"}` |
 
 - A debug build reads the two system folders under `VIGIL_TEST_LAUNCH_ROOT` when it is set,
   so the CLI's end-to-end tests check no launch item of the machine they run on (each sweep
@@ -423,19 +423,28 @@ Startup files and root's programs (added 2026-11-18):
 - A program or script of a launch daemon, or an app's registered daemon, that runs as root
   (no `UserName`, or `root`) is `replaceable` when this user could put another file there:
   it or a folder it is reached through, as written or with links followed, is writable to
-  them or theirs (owners may change modes; a sticky folder guards others' entries). The
+  them or theirs, with the bits of their class only, as the kernel applies them (owners may
+  change modes; a folder needs its search bit; a sticky folder guards others' entries except
+  from its owner). Write access through the `admin` group does not count: `/Applications` is
+  `root:admin 775`, so every app's daemon would be marked for every admin user, who can
+  become root with their password anyway; the check is for a way up with none. The
   account comes from one `/usr/bin/id` run, since `unsafe` is forbidden and `access(2)` with
   it. Only root-run programs are marked: marking agents would change the key of every
   dismissed agent whose program is in the home folder. `replaceable` enters an item's
   identity only when true, so other keys stay as they were.
-- `mac/persistence.jsonl` ends with zsh's and bash's startup files (home and `/etc`), this
-  user's crontab (`crontab -l`), `/etc/crontab`, and `periodic`'s scripts (none on macOS
-  27.2), each as its lines. The literal value of every variable assignment is replaced with
-  `(hidden)`, except `PATH`, `FPATH`, `DYLD_` and values that run a command (owner's
-  decision, 2026-11-18, over a path-and-hash listing the agent opens itself, and over whole
-  files): the files hold tokens, and the bundle is kept with each sweep. A file's key is its
-  shown lines, so a new token does not show a dismissed issue again. `/etc` files,
-  `/etc/crontab` and `periodic` scripts say whether this user could replace them.
+- `mac/persistence.jsonl` ends with zsh's and bash's startup files (home and `/etc`, with
+  `/etc/zshrc_Apple_Terminal`), `path_helper`'s `/etc/paths` and `/etc/paths.d`, this user's
+  crontab (`crontab -l`), `/etc/crontab`, and `periodic`'s scripts (none on macOS 27.2), each
+  as its lines, read through a link (dotfile managers link them) but never a FIFO. The value
+  of every assignment is hidden, wherever on a line it is (after `;` or `||`, in quotes, in a
+  comment, in a here-document), with `launchctl setenv`'s; a value left open by a quote hides
+  the lines up to its close. `PATH`, `FPATH` and `DYLD_` values are shown, and so is each
+  command a value runs (owner's decision, 2026-11-18, over a path-and-hash listing the agent
+  opens itself, and over whole files): the files hold tokens, and the bundle is kept with each
+  sweep. Over-hiding is preferred: a value shown cannot be taken back. Still shown: a value
+  passed as an argument (`--token=x`) or written to a file. A file's key is its shown lines,
+  so a new token does not show a dismissed issue again, but any other edit does. Root-run
+  files (`/etc`, `/etc/crontab`, `periodic`) say whether this user could replace them.
 - An `id` that fails marks `account` unchecked, which carries the issues of daemons, this
   user's crontab and the files in `/etc` and `periodic`'s folders.
 

@@ -104,7 +104,8 @@ impl Prompt {
                 0x055b_79c3_91b6_dce6,
                 0xbd69_65f9_d788_d5ab, // On #74's branch only.
                 0xd33a_cac4_0a86_e2d6,
-                0x48c8_8d9a_a050_620f,
+                0x48c8_8d9a_a050_620f, // On #75's branch only.
+                0x364a_53d0_3234_be9b,
             ],
             Self::GitHub => &[
                 0x61c0_4d78_7cf2_cfd0,

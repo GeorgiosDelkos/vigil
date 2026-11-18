@@ -9,8 +9,10 @@
 //!   with the program it starts, the script an interpreter runs, and their code signatures,
 //!   then what Background Task Management records that no launch folder shows ([`background`]):
 //!   login items inside apps, the agents and daemons apps registered from their own bundle,
-//!   and the apps that open at login. An issue names one by its path: the property list's, or
-//!   the app bundle's.
+//!   and the apps that open at login, then the shells' startup files, crontabs and other files
+//!   that run commands ([`startup`]). Programs that run as root say whether this user could
+//!   replace them ([`account`]). An issue names one by its path: the property list's, the app
+//!   bundle's, or the file's.
 //!
 //! Vigil reads signatures itself because a sweep's agent runs no commands. Every tool is called
 //! by its absolute path: these checks decide whether a program is trusted, and a `codesign`
@@ -25,7 +27,7 @@
 //! developer keeps the dismissal. The identity is part of every item issue's key, so changing
 //! its shape clears every item dismissal once.
 //!
-//! Not read yet: cron, kernel and system extensions, and the other persistence locations. The
+//! Not read yet: kernel and system extensions, and the other persistence locations. The
 //! records of Background Task Management need Full Disk Access; without it they are a note
 //! ([`InventoryError::FullDiskAccess`]), and the app asks for it ([`needs_full_disk_access`]).
 //! `/System/Library/Launch*` is left out because it is on the sealed system volume.
@@ -168,7 +170,8 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
         .iter()
         .map(|(kind, folder)| (*kind, root.join(folder)))
         .collect();
-    if let Some(home) = std::env::home_dir() {
+    let home = std::env::home_dir();
+    if let Some(home) = &home {
         folders.push((ItemKind::UserLaunchAgent, home.join("Library/LaunchAgents")));
     } else {
         // Covers no item: their paths are not known without the home folder. Accepted, since
@@ -204,7 +207,6 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
     if let Some(account) = &account {
         mark_replaceable(&mut items, account);
     }
-    let home = std::env::home_dir();
     let files = startup::collect(&root, home.as_deref(), account.as_ref(), cancel);
     Host::new(&settings, &items, &files)
 }

@@ -60,16 +60,18 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   user or owned by them (mode bits; ACLs are not read, so the absence proves nothing).
 
   The file ends with the files that run commands without a launch item, each with its `path`,
-  its `kind` and its `lines`, in which Vigil replaced the literal value of each variable
-  assignment with `(hidden)` (values of `PATH`, `FPATH`, `DYLD_` variables, and values that
-  run a command, such as `$(...)`, are shown). `truncated` says only the start was read; an
-  `error` says it could not be read. The kinds:
+  its `kind` and its `lines`. Vigil replaced the value of every variable assignment with
+  `(hidden)`, wherever on a line it is, and the lines a quoted value spans; values of `PATH`,
+  `FPATH` and `DYLD_` variables are shown, and so is each command a value runs (`$(...)`).
+  `truncated` says only the start was read; an `error` says it could not be read. The kinds:
   - `shell_startup`: a startup file of zsh or bash. One in the home folder runs as this user
     in every shell; one in `/etc` runs for every user who starts that shell, root's shells
     included.
   - `crontab`: this user's crontab (`/usr/lib/cron/tabs/<user>`, as cron keeps it), which
     runs as this user, or `/etc/crontab`, which runs as the users it names.
   - `periodic_script`: a script root runs daily, weekly or monthly.
+  - `path_list`: `/etc/paths` or a file in `/etc/paths.d`, folders `path_helper` puts on
+    `PATH` in every login shell, root's included, one per line in order.
 
   A file in `/etc` and a `periodic_script` have `replaceable: true` when this user could
   replace them.
@@ -185,17 +187,19 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     in System Settings > General > Login Items, and remove the app if it is not wanted), so the
     user decides.
 
-    For a `shell_startup`, `crontab` or `periodic_script` file, report it when a line:
+    For a `shell_startup`, `crontab`, `periodic_script` or `path_list` file, report it when a
+    line:
     - downloads and runs code (`curl ... | sh`, `eval "$(curl ...)"`, `bash <(curl ...)`), or
       decodes and runs it (`base64 -d | sh`);
     - sources or runs a file from a temporary, hidden or shared folder (`/tmp`,
       `/Users/Shared`), or one the evidence shows is not the user's own;
-    - puts a writable or temporary folder first on `PATH`, or sets a `DYLD_` variable;
+    - puts a writable or temporary folder first on `PATH`, or sets a `DYLD_` variable (for a
+      `path_list`, a folder this user or anyone can write, listed before the system's);
     - replaces a command that asks for a password or trusts a host (`alias sudo=`, a `sudo`,
       `ssh` or `su` function), or starts something in the background on every shell (`nohup`,
       `&`) that is not a known tool's;
-    - runs as root (`/etc`, `periodic_script`, a root line in `/etc/crontab`) and is
-      `replaceable`, which is high.
+    - runs as root (`/etc`, `periodic_script`, `path_list`, a root line in `/etc/crontab`) and
+      is `replaceable`, which is high.
 
     A line that only sets a value Vigil hid is not a finding: the value is not shown, and
     holding a token in a startup file is the user's choice. Leave out lines a tool's installer
