@@ -67,12 +67,10 @@ impl Account {
             Ok(real) => real != path && self.can_replace_along(&real),
             // A link to a file that is not there yet: whoever can create the target decides
             // what runs. One hop is read; a chain of dangling links is not followed further.
+            // `join` keeps an absolute target as it is and puts a relative one in the link's folder.
             Err(_) => fs::read_link(path).is_ok_and(|target| {
-                let target = match path.parent() {
-                    Some(folder) if target.is_relative() => folder.join(target),
-                    _ => target,
-                };
-                self.can_replace_along(&target)
+                let folder = path.parent().unwrap_or(Path::new("/"));
+                self.can_replace_along(&folder.join(target))
             }),
         }
     }
@@ -313,6 +311,18 @@ mod tests {
         );
         mode(&real, 0o755).unwrap();
         assert!(!other.can_replace(&link.join("a")));
+
+        // A link to a file whose folder the account may write, though the link's own folder is
+        // not: only the path with the link followed shows it.
+        let target = tmp.path().join("real/target");
+        fs::write(&target, "").unwrap();
+        let to_file = tmp.path().join("to-file");
+        std::os::unix::fs::symlink(&target, &to_file).unwrap();
+        mode(&target, 0o644).unwrap();
+        mode(&real, 0o777).unwrap();
+        assert!(other.can_replace(&to_file));
+        mode(&real, 0o755).unwrap();
+        assert!(!other.can_replace(&to_file));
 
         // A link to a file not there yet, in a folder the account may write: it decides what
         // runs once it creates the target. The link's own folder is not writable to it.

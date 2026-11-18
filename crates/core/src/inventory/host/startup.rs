@@ -478,7 +478,8 @@ fn value_end(text: &str) -> (usize, Option<u8>) {
             }
         }
         at = match bytes[at] {
-            b'\\' if at + 1 < bytes.len() => next(at + 1),
+            // The escaped character, which `next` steps past, at the end of the line too.
+            b'\\' => next(at + 1),
             quote @ (b'\'' | b'"') => match text[at + 1..].find(char::from(quote)) {
                 Some(close) => at + close + 2,
                 None => return (text.len(), Some(quote)),
@@ -617,6 +618,8 @@ mod tests {
                 "https://x.example/?token=(hidden)&b=(hidden)",
             ),
             ("secrets[github]=s", "secrets[github]=(hidden)"),
+            ("X=`date`; A=s", "X=`date`; A=(hidden)"),
+            ("X=a\\", "X=(hidden)"),
             (
                 "CONFIG='{\"q\":\"$(whoami)\"}'",
                 "CONFIG=(hidden)$(whoami)(hidden)",
