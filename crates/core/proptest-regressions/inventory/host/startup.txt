@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 2b30b0d64b070aa1b615e7fe030c8c169a4550f5f761a77773ec121200916065 # shrinks to line = "a=¡"
 cc 4fc400a581fafee4aefdff1d1b5b73e59bd2c81fcc9dbb18783c2347b4b6c033 # shrinks to prefix = ": ${", name = "_", secret = "aaa0a0aaaa0a", quote = "", suffix = "\\"
+cc 0cacfe9fa85598e2948b967fc1371711cd60addf16100437388123c5ec20055f # shrinks to prefix = "alias a='", name = "A", secret = "0000a00a00a0", quote = "'", suffix = ""

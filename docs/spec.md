@@ -437,12 +437,21 @@ Startup files and root's programs (added 2026-11-18):
   crontab (`crontab -l`), `/etc/crontab`, and `periodic`'s scripts (none on macOS 27.2), each
   as its lines, read through a link (dotfile managers link them) but never a FIFO. The value
   of every assignment is hidden, wherever on a line it is (after `;` or `||`, in quotes, in a
-  comment, in a here-document), with `launchctl setenv`'s; a value left open by a quote hides
-  the lines up to its close. `PATH`, `FPATH` and `DYLD_` values are shown, and so is each
-  command a value runs (owner's decision, 2026-11-18, over a path-and-hash listing the agent
-  opens itself, and over whole files): the files hold tokens, and the bundle is kept with each
-  sweep. Over-hiding is preferred: a value shown cannot be taken back. Still shown: a value
-  passed as an argument (`--token=x`) or written to a file. A file's key is its shown lines,
+  comment, in a here-document, inside a command), with `launchctl setenv`'s and parameter
+  expansion defaults (`${T:=x}`). `PATH`, `FPATH` and `DYLD_` values are shown, and so is
+  each command a value runs, itself redacted (owner's decision, 2026-11-18, over a
+  path-and-hash listing the agent opens itself, and over whole files): the files hold tokens,
+  and the bundle is kept with each sweep. Still shown: a value passed as an argument
+  (`--token=x`) or written to a file, and one that closes the quotes around its assignment and
+  goes on outside them.
+- Hiding follows the shell's lexing in both directions, since a value read too long hides a
+  command from the agent (`# TOKEN="` followed by `curl ... | sh`). Physical lines are joined
+  into the shell's logical lines first (an open quote, `$(`, `(` or `${`, or a trailing
+  backslash; a comment carries nothing over), and each is scanned knowing whether a byte is at
+  the top level, in a comment or in quotes. A value nested in a comment or quotes ends where
+  they do. A line a multi-line value swallowed reads `(hidden, part of line N)`. Property tests
+  check both sides: a generated literal never comes through, and a command after a closed line
+  always does. A file's key is its shown lines,
   so a new token does not show a dismissed issue again, but any other edit does. Root-run
   files (`/etc`, `/etc/crontab`, `periodic`) say whether this user could replace them.
 - An `id` that fails, or is not there, marks `account` unchecked, which carries the issues of

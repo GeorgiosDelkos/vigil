@@ -288,6 +288,41 @@ mod tests {
     }
 
     #[test]
+    fn only_what_the_admin_group_alone_grants_is_left_out() {
+        let me = Account::current(&Cancel::new()).unwrap().unwrap();
+        if !me.groups.contains(&ADMIN_GID) {
+            return; // A file's group can be set only to one of the account's own.
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a");
+        fs::write(&file, "").unwrap();
+        let chgrp = std::process::Command::new("/usr/bin/chgrp")
+            .arg("admin")
+            .arg(&file)
+            .status()
+            .unwrap();
+        assert!(chgrp.success());
+        // Another member of `admin`, who does not own the file.
+        let member = Account {
+            name: "member".to_owned(),
+            uid: u32::MAX - 1,
+            groups: vec![ADMIN_GID],
+        };
+        let meta = |mode| {
+            fs::set_permissions(&file, fs::Permissions::from_mode(mode)).unwrap();
+            fs::metadata(&file).unwrap()
+        };
+        assert!(
+            !member.writes(&meta(0o664), Entry::File),
+            "the group's bits alone"
+        );
+        assert!(
+            member.writes(&meta(0o666), Entry::File),
+            "everyone's bits still count"
+        );
+    }
+
+    #[test]
     fn a_link_is_followed_too() {
         let tmp = tempfile::tempdir().unwrap();
         let real = tmp.path().join("real");
