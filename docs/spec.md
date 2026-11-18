@@ -441,20 +441,22 @@ Startup files and root's programs (added 2026-11-18):
   and random-looking parts of a word: 20 characters or more with all three kinds, no `.`,
   3.5 bits of entropy per character), and the value of an assignment or option whose name
   says it is secret (`TOKEN`, `SECRET`, `PASS`, `AUTH`, `CREDENTIAL`, `KEY`, `COOKIE`, by name
-  segment), the password or token in a URL, and secret headers and JSON keys. No shell is
-  parsed and nothing carries from one line to the next, so no line can hide another (owner's
-  decision, 2026-11-18). One bit carries: a line continued by a trailing backslash may be an
-  alias's body, so only its secret-shaped words are masked; the carry can only show more. A value masked by its name never holds a shell operator (`;`, `|`,
-  `&`, `<`, `>`, a parenthesis, a backquote), white space, a backslash or a `$`: a value that
-  would is shown, unless a word of it looks like a secret (owner's choice, 2026-11-18, of
-  narrowing over documenting the gap). So masked text is never a command with arguments, an
-  operator, a redirection or an expansion, even when a quote opened on an earlier line makes
-  the shell read it as code. Left: such a quote could make one masked word a command name with
-  no arguments, so the agent reports a file whose quotes do not balance; and zsh expands a word
-  that starts with `=` (`--token =ls`) to a program's path, which stays masked, since `=` ends
-  base64 tokens. An alias body is never masked by its name: any `alias` word in the command,
-  however quoted or escaped, or in quoted text it runs (`eval 'alias ...'`), shows the values
-  after it. A file over the limit keeps only its whole lines, so a token is never cut short. Property tests check
+  segment), the password or token in a URL, and secret headers and JSON keys. No shell is parsed and
+  nothing carries from one line to the next, so no line can hide another (owner's decision,
+  2026-11-18). One bit carries: a line continued by a trailing backslash may be an alias's body, so
+  only its secret-shaped words are masked; the carry can only show more. A value masked by its name
+  never holds a shell operator (`;`, `|`, `&`, `<`, `>`, a parenthesis, a backquote), white space, a
+  backslash or a `$`: a value that would is shown, unless a word of it looks like a secret (owner's
+  choice, 2026-11-18, of narrowing over documenting the gap). So masked text is never a command with
+  arguments, an operator, a redirection or an expansion, even when a quote opened on an earlier line
+  makes the shell read it as code. Left: such a quote could make one masked word a command name with
+  no arguments, so the agent reports a file whose quotes do not balance; and zsh expands a word that
+  starts with `=` (`--token =ls`) to a program's path, which stays masked, since `=` ends base64
+  tokens. An alias body is never masked by its name: a line that holds the word `alias` anywhere,
+  however quoted or escaped, has only its secret-shaped words masked, since which names it defines
+  depends on the shell's quoting (three reviews found quotings a narrower rule misread); accepted
+  downside: a short secret on such a line is shown. A file over the limit keeps only its whole
+  lines, so a token is never cut short. Property tests check
   that a command after any prefix stays shown. The first design hid every assignment's value
   with a shell lexer; five reviews each found a line it read differently from zsh or bash,
   leaking a token or letting a planted line (`# TOKEN="`) hide a later command. Accepted

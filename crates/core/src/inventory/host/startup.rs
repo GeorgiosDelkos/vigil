@@ -107,7 +107,7 @@ pub(super) struct StartupFile {
     error: Option<String>,
     /// Its lines, secrets masked as the module docs say.
     lines: Vec<String>,
-    /// Whether only the first [`FILE_LIMIT`] bytes were read.
+    /// Whether the file was over [`FILE_LIMIT`], so only its whole lines within it are shown.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
     /// For a truncated file, its size and modification time, which key it with its lines: a
@@ -214,11 +214,19 @@ fn listed(kind: FileKind, folder: &Path, root_run: Option<&Account>) -> Vec<Star
     files
 }
 
-/// The length of the whole lines at the start of `cut`, a file cut at [`FILE_LIMIT`]. A line cut
-/// part way is left out: a token cut short would fall below its shape's length and show, and
-/// a cut inside a character would show as U+FFFD.
-fn whole_lines(cut: &[u8]) -> usize {
-    cut.iter().rposition(|&b| b == b'\n').map_or(0, |at| at + 1)
+/// The part of `bytes` shown, and whether it was over [`FILE_LIMIT`]. Over the limit, only the
+/// whole lines within it are shown (a line whose newline is the byte just past it included): a
+/// line cut part way would show a token cut below its shape's length, or a cut character as
+/// U+FFFD.
+fn capped(bytes: &[u8]) -> (&[u8], bool) {
+    if bytes.len() <= FILE_LIMIT {
+        return (bytes, false);
+    }
+    let end = bytes[..=FILE_LIMIT]
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(0, |at| at + 1);
+    (&bytes[..end], true)
 }
 
 /// The file at `path`, `None` when it is not there. `root_run` is the account to check
@@ -226,12 +234,7 @@ fn whole_lines(cut: &[u8]) -> usize {
 fn read(kind: FileKind, path: &Path, root_run: Option<&Account>) -> Option<StartupFile> {
     match read_following(path) {
         Ok(bytes) => {
-            let truncated = bytes.len() > FILE_LIMIT;
-            let shown = if truncated {
-                &bytes[..whole_lines(&bytes[..FILE_LIMIT])]
-            } else {
-                &bytes[..]
-            };
+            let (shown, truncated) = capped(&bytes);
             Some(StartupFile {
                 path: path.to_string_lossy().into_owned(),
                 kind,
@@ -298,13 +301,10 @@ fn user_crontab(root: &Path, account: &Account) -> Option<StartupFile> {
         Ok(None) => None,
         Ok(Some(output)) if output.success => {
             // Capped as a file is, so a planted crontab cannot fill every bundle.
-            let truncated = output.stdout.len() > FILE_LIMIT;
-            let end = if truncated {
-                whole_lines(&output.stdout.as_bytes()[..FILE_LIMIT])
-            } else {
-                output.stdout.len()
-            };
-            Some(file(None, lines(&output.stdout[..end]), truncated))
+            let (shown, truncated) = capped(output.stdout.as_bytes());
+            // `capped` cuts after a newline, so the text stays whole UTF-8.
+            let shown = std::str::from_utf8(shown).expect("cut at a newline");
+            Some(file(None, lines(shown), truncated))
         }
         // What crontab(1) says, and exits 1 with, when the user has no crontab.
         Ok(Some(output)) if output.stderr.starts_with("crontab: no crontab for") => None,
@@ -468,6 +468,11 @@ mod tests {
             "{:?}",
             cut.lines.last()
         );
+        // A line whose newline is the byte just past the limit is whole, and kept.
+        fs::write(&path, "z".repeat(limit) + "\nb\n").unwrap();
+        let edge = read(FileKind::ShellStartup, &path, None).unwrap();
+        assert!(edge.truncated);
+        assert_eq!(edge.lines, ["z".repeat(limit)]);
     }
 
     #[test]

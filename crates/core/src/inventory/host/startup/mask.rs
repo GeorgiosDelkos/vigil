@@ -15,7 +15,8 @@
 //!   masked by its name: a literal that would hold a shell operator ([`OPERATORS`]: `;`, `|`,
 //!   `&`, `<`, `>`, a parenthesis, a backquote) or an [`UNSAFE`] character (white space, a
 //!   backslash, `$` (so a reference to another variable, `$TMPDIR/agent.sock`), a brace, a
-//!   glob character, a quote); and a path (`/`, `~/`, `./`). The word rules still mask a token
+//!   glob character, a quote); a path (`/`, `~/`, `./`); and anything on a line that holds the
+//!   word `alias` ([`holds_alias`]), whose body is code. The word rules still mask a token
 //!   inside any of them;
 //! - the password in a URL (`postgres://app:x@db`), and a token as its user
 //!   (`https://<token>@github.com`).
@@ -145,35 +146,40 @@ const BREAK: &[u8] = b" \t'\"`=;&|<>(){}[],$#\\";
 
 /// The lines of `text`, secrets masked, one for each physical line.
 pub(super) fn lines(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
     let mut names = Names::Masked;
-    text.lines()
-        .map(|line| {
-            let shown = mask(line, names);
-            // A line ending in an odd number of backslashes goes on to the next, which may be
-            // the body of an alias named above (`alias ll=ls \`), so its values are masked by
-            // shape only. The one bit carried can only show more, never hide a line.
-            let backslashes = line.bytes().rev().take_while(|&b| b == b'\\').count();
-            names = if backslashes % 2 == 1 {
-                Names::Shown
-            } else {
-                Names::Masked
-            };
-            shown
-        })
-        .collect()
+    for line in text.lines() {
+        out.push(mask(line, names));
+        // A line ending in an odd number of backslashes goes on to the next, which may be the
+        // body of an alias named above (`alias ll=ls \`), so its values are masked by shape
+        // only. The one bit carried can only show more, never hide a line.
+        let backslashes = line.bytes().rev().take_while(|&b| b == b'\\').count();
+        names = if backslashes % 2 == 1 {
+            Names::Shown
+        } else {
+            Names::Masked
+        };
+    }
+    out
 }
 
 /// Whether a line's secret-named values are masked, or only its secret-shaped words.
 #[derive(Debug, Clone, Copy)]
 enum Names {
     Masked,
-    /// A line continued from the one above, whose command this line cannot see.
+    /// A line that may define an alias ([`holds_alias`]), or one continued from the line
+    /// above, whose command this line cannot see.
     Shown,
 }
 
 /// `line` with its secret-shaped words, and with `Names::Masked` the values of its
 /// secret-named assignments and options, replaced by `(hidden)`.
 fn mask(line: &str, names: Names) -> String {
+    let names = if holds_alias(line) {
+        Names::Shown
+    } else {
+        names
+    };
     let by_name = |at| match names {
         Names::Masked => secret_value_at(line, at),
         Names::Shown => None,
@@ -322,8 +328,7 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         .unwrap_or(line.len() - name_at);
     let name = &line[name_at..name_at + name_len];
-    // An alias's body is code that runs when its name is typed: never masked by its name.
-    if !secret_name(name) || alias_definition(&line[..at]) {
+    if !secret_name(name) {
         return None;
     }
     let after = &line[name_at + name_len..];
@@ -428,55 +433,17 @@ fn narrow(form: Form, value: &str) -> Option<(usize, usize)> {
     Some((0, value.len()))
 }
 
-/// Whether a name right after `before` may be one an `alias` command defines. When unsure, it
-/// says yes, so the name's value is shown: the command it is in (after the last `;`, `&` or `|`
-/// outside quotes) holds the word `alias` anywhere, however quoted or escaped (`\alias`,
-/// `'al'ias`, `$'alias'`), which covers `then alias`, `{ alias`, `builtin alias` and
-/// `FOO=1 alias`. The scan honours backslashes outside single quotes and inside `$'...'`, so
-/// `echo \'; alias pass=x` opens no quote. A name inside quotes is decided by the quoted text
-/// alone: `eval 'alias pass=x'` defines `pass`, while `alias a='TOKEN=x rest'` holds an
-/// ordinary assignment. `alias k=k; TOKEN=x` ends the alias command first. An alias spelled
-/// through an expansion (`$A token=x`) is not seen.
-fn alias_definition(before: &str) -> bool {
-    let mut quote = None;
-    let mut opened = 0;
-    let mut escaped = false;
-    let mut command = 0;
-    let mut previous = None;
-    for (at, c) in before.char_indices() {
-        if escaped {
-            // An escaped `$` opens no `$'...'`.
-            escaped = false;
-            previous = None;
-            continue;
-        }
-        if c == '\\' && quote != Some('\'') {
-            escaped = true;
-        } else {
-            match (quote, c) {
-                // `$'...'` honours backslashes, as unquoted text does: marked as its own quote.
-                (None, '\'') if previous == Some('$') => (quote, opened) = (Some('$'), at + 1),
-                (None, '\'' | '"') => (quote, opened) = (Some(c), at + 1),
-                (Some('$'), '\'') => quote = None,
-                (Some(open), c) if c == open => quote = None,
-                (None, ';' | '&' | '|') => command = at + 1,
-                _ => {}
-            }
-        }
-        previous = Some(c);
-    }
-    if quote.is_some() {
-        // Quoted text can be code this shell runs (`eval 'alias pass=x'`, an alias that defines
-        // another), so it is decided on its own; an ordinary string holds no `alias` word.
-        return alias_definition(&before[opened..]);
-    }
-    // `(`, `{` and `!` end a word too, so `{alias` and `(alias` hold the word `alias`.
-    let mut words =
-        before[command..].split(|c: char| c.is_whitespace() || matches!(c, '(' | '{' | '!'));
-    words.any(|word| {
-        let word = word.replace("$'", "'").replace("$\"", "\"");
-        word.replace(['\\', '\'', '"'], "") == "alias"
-    })
+/// Whether `line` holds the word `alias` anywhere, however quoted or escaped (`\alias`,
+/// `'al'ias`, `$'alias'`, `eval 'alias ...'`). Such a line may define an alias, whose body is
+/// code that runs when its name is typed, so nothing on it is masked by name. Deciding which
+/// names an alias defines needs the shell's quoting rules, and three reviews in a row found a
+/// quoting this module read differently (`alias 'pass=x'`, `then alias`, `eval '...'`); a scan
+/// of the prefix for every name also cost time quadratic in the line's length. The downside
+/// accepted: a short secret on a line that also defines an alias is shown.
+fn holds_alias(line: &str) -> bool {
+    line.replace(['\\', '\'', '"'], "")
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|word| word == "alias")
 }
 
 /// The length of the shell word `value` starts with: unquoted runs and quoted parts (`'...'`,
@@ -1054,72 +1021,50 @@ mod tests {
         );
         // Brace expansion makes a word a command with arguments: shown.
         assert_eq!(mask("env {TOKEN=x,echo,ran}"), "env {TOKEN=x,echo,ran}");
-        // A second alias on the line, or an escaped one, defines an alias too; an assignment
-        // inside a body's quotes is still masked.
-        assert_eq!(mask("alias ll=ls gh_token=x"), "alias ll=ls gh_token=x");
-        assert_eq!(mask("\\alias token=x"), "\\alias token=x");
-        assert_eq!(
-            mask("alias a='GITHUB_TOKEN=abc rest'"),
-            "alias a='GITHUB_TOKEN=(hidden) rest'"
-        );
-        // Each command decides on its own whether it defines aliases.
-        assert_eq!(
-            mask("alias ll='ls -l' pass=evil-pass"),
-            "alias ll='ls -l' pass=evil-pass"
-        );
-        assert_eq!(mask("'al'ias token=evil"), "'al'ias token=evil");
-        assert_eq!(
-            mask("alias k=kubectl; export KUBE_TOKEN=abc123short"),
-            "alias k=kubectl; export KUBE_TOKEN=(hidden)"
-        );
+        // A line that holds the word `alias` anywhere, however spelled, may define one, so no
+        // value on it is masked by name; a word that only starts with it is no alias.
+        let alias_lines = [
+            "alias ll=ls gh_token=x",
+            "\\alias token=x",
+            "'al'ias token=evil",
+            "$'alias' token=evil",
+            "alias 'pass=evil-helper'",
+            "alias x='a\\' pass=evil-helper",
+            "alias a='GITHUB_TOKEN=abc rest'",
+            "alias k=kubectl; export KUBE_TOKEN=abc123short",
+            "then alias pass=evil-helper; fi",
+            "builtin alias pass=evil-helper",
+            "FOO=1 alias pass=evil-helper",
+            "x;alias pass=evil-helper",
+            "{alias pass=evilcmd}",
+            "x=`alias pass=evil-helper`",
+            "eval 'alias pass=evil-helper'",
+            "eval \"alias token=evilcmd\"",
+            "echo \\$'a\\'; alias token=evil",
+        ];
+        for line in alias_lines {
+            assert_eq!(mask(line), line);
+        }
         assert_eq!(mask("aliasrc=1 TOKEN=abc123"), "aliasrc=1 TOKEN=(hidden)");
-        // An alias command ends at `&` and `|` too, but not at a `;` inside quotes; a variable
-        // named `alias` is not the builtin.
         assert_eq!(
-            mask("alias k=kubectl & TOKEN=abc123"),
-            "alias k=kubectl & TOKEN=(hidden)"
+            mask("unalias pass; TOKEN=abc123"),
+            "unalias pass; TOKEN=(hidden)"
         );
+        // A token-shaped word is masked on an alias line too.
+        let token = format!("ghp_{}", "A".repeat(36));
         assert_eq!(
-            mask("alias k=kubectl | TOKEN=abc123"),
-            "alias k=kubectl | TOKEN=(hidden)"
+            mask(&format!("alias gh='GH_TOKEN={token} gh'")),
+            "alias gh='GH_TOKEN=(hidden) gh'"
         );
-        assert_eq!(mask("alias k='a;b' token=evil"), "alias k='a;b' token=evil");
-        // A backslash in plain single quotes escapes nothing, so the quote closes before `pass`.
-        assert_eq!(
-            mask("alias x='a\\' pass=evil-helper"),
-            "alias x='a\\' pass=evil-helper"
-        );
-        assert_eq!(mask("$alias TOKEN=abc123"), "$alias TOKEN=(hidden)");
-        // Quoted text this shell runs defines aliases too, and an ordinary string does not.
-        assert_eq!(
-            mask("eval 'alias pass=evil-helper'"),
-            "eval 'alias pass=evil-helper'"
-        );
-        assert_eq!(
-            mask("eval \"alias token=evilcmd\""),
-            "eval \"alias token=evilcmd\""
-        );
-        assert_eq!(
-            mask("alias a='alias pass=evilcmd'"),
-            "alias a='alias pass=evilcmd'"
-        );
-        assert_eq!(mask("{alias pass=evilcmd}"), "{alias pass=evilcmd}");
         // A line continued from one above may be that alias's body: masked by shape only. An
         // even run of backslashes continues nothing.
         assert_eq!(
             lines("alias ll=ls \\\npass=evil-helper\nTOKEN=abc123\n"),
             ["alias ll=ls \\", "pass=evil-helper", "TOKEN=(hidden)"]
         );
-        let token = format!("ghp_{}", "A".repeat(36));
         assert_eq!(
             lines(&format!("x \\\nTOKEN={token}\nx \\\\\nTOKEN=abc123")),
             ["x \\", "TOKEN=(hidden)", "x \\\\", "TOKEN=(hidden)"]
-        );
-        // An escaped `$` opens no `$'...'`, so the quote after it ends at the next `'` and the
-        // alias after it is seen.
-        assert_eq!(
-            mask("echo \\$'a\\'; alias token=evil"),
-            "echo \\$'a\\'; alias token=evil"
         );
         // zsh's extended globs expand too.
         assert_eq!(mask("--token a^b"), "--token a^b");
@@ -1228,7 +1173,7 @@ mod tests {
         #[test]
         fn a_secret_name_s_value_never_reaches_the_bundle(
             prefix in proptest::sample::select(vec![
-                "", "export ", "x; ", "a && ", "# ", "alias a='", "env ", "0 * * * * ",
+                "", "export ", "x; ", "a && ", "# ", "env ", "0 * * * * ",
                 "echo \"",
             ]),
             name in proptest::sample::select(vec![
@@ -1249,13 +1194,14 @@ mod tests {
             prefix in proptest::sample::select(vec![
                 "", "then ", "{ ", "builtin ", "command ", "FOO=1 ", "echo \\'; ",
                 "echo \"\\\"\"; ", "echo $'\\''; ", "x && ", "x | ", "if true; then ",
-                "eval ", "{", "! ",
+                "eval ", "{", "! ", "eval '", "x=`",
             ]),
             spelling in proptest::sample::select(vec!["alias", "\\alias", "'alias'", "$'alias'"]),
             name in proptest::sample::select(vec!["pass", "token", "GITHUB_TOKEN", "api_key"]),
+            quote in proptest::sample::select(vec!["", "'", "\""]),
             body in "[a-z][a-z0-9-]{4,12}",
         ) {
-            let line = format!("{prefix}{spelling} ll=ls {name}={body}");
+            let line = format!("{prefix}{spelling} ll=ls {quote}{name}={body}{quote}");
             let shown = mask(&line);
             proptest::prop_assert!(shown.contains(&body), "{line} -> {shown}");
         }
