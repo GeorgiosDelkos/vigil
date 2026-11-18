@@ -40,6 +40,7 @@ use crate::cancel::Cancel;
 use crate::inventory::command;
 use crate::inventory::host::account::Account;
 use crate::inventory::host::shows_value;
+use crate::inventory::host::stamp;
 
 /// The largest file read. Arbitrary: a long `.zshrc` is a few kB, and the limit keeps a planted
 /// file from being copied whole into every bundle.
@@ -111,6 +112,10 @@ pub(super) struct StartupFile {
     /// Whether only the first [`FILE_LIMIT`] bytes were read.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     truncated: bool,
+    /// For a truncated file, its size and modification time, which key it with its lines: a
+    /// change past the limit would otherwise leave the key, and a dismissal, as they were.
+    #[serde(skip)]
+    stamp: Option<String>,
     /// For a file that runs as root, whether this user could replace it
     /// ([`Account::can_replace`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -126,6 +131,7 @@ impl StartupFile {
             error: Some(error),
             lines: Vec::new(),
             truncated: false,
+            stamp: None,
             replaceable: root_run.is_some_and(|account| account.can_replace(path)),
         }
     }
@@ -139,6 +145,7 @@ impl StartupFile {
             "lines": self.lines,
             "error": self.error,
             "replaceable": self.replaceable,
+            "stamp": self.stamp,
         })
         .to_string()
     }
@@ -223,6 +230,9 @@ fn read(kind: FileKind, path: &Path, root_run: Option<&Account>) -> Option<Start
                 error: None,
                 lines: lines(&String::from_utf8_lossy(shown)),
                 truncated,
+                stamp: truncated
+                    .then(|| fs::metadata(path).ok().map(|meta| stamp(&meta)))
+                    .flatten(),
                 replaceable: root_run.is_some_and(|account| account.can_replace(path)),
             })
         }
@@ -269,6 +279,7 @@ fn user_crontab(root: &Path, account: &Account, cancel: &Cancel) -> Option<Start
         error,
         lines,
         truncated: false,
+        stamp: None,
         replaceable: false,
     };
     match command::run_any_status(&tool.to_string_lossy(), &["-l"], cancel) {
@@ -371,6 +382,10 @@ fn assignment_at(text: &str, at: usize) -> Option<(&str, usize)> {
         return None;
     }
     let mut after = &text[at + name_len..];
+    // A subscript (`secrets[github]=x`, zsh and bash arrays) belongs to the name.
+    if let Some(subscript) = after.strip_prefix('[') {
+        after = &subscript[subscript.find(']')? + 1..];
+    }
     let line_start = text[..at].trim().is_empty();
     if line_start {
         after = after.trim_start();
@@ -601,6 +616,11 @@ mod tests {
                 "https://x.example/?token=s&b=2",
                 "https://x.example/?token=(hidden)&b=(hidden)",
             ),
+            ("secrets[github]=s", "secrets[github]=(hidden)"),
+            (
+                "CONFIG='{\"q\":\"$(whoami)\"}'",
+                "CONFIG=(hidden)$(whoami)(hidden)",
+            ),
         ];
         for (line, shown) in cases {
             assert_eq!(one(line), shown, "{line}");
@@ -803,5 +823,10 @@ mod tests {
             first,
             "a new command"
         );
+
+        // Past the limit, only the stamp shows a change.
+        let long = "a\n".repeat(FILE_LIMIT / 2);
+        let before = identity(&format!("{long}x\n"));
+        assert_ne!(identity(&format!("{long}curl x | sh\n")), before);
     }
 }

@@ -515,8 +515,7 @@ impl InventorySource {
                 subject,
                 Subject::File(path) if path.strip_prefix(github::WORKFLOWS) == Some(name.as_str())
             ),
-            // What the account decides: a root daemon's replaceable program, this user's
-            // crontab, and the root-run files in `/etc` and `periodic`'s folders.
+            // What only the account lets the sweep read: this user's crontab.
             Self::Account => matches!(subject, Subject::Item(item) if host::needs_account(item)),
             // These give components, not issues.
             Self::MacOs
@@ -1249,8 +1248,8 @@ mod tests {
     fn a_failed_account_covers_what_it_decides() {
         let account = InventorySource::Account;
         let item = |path: &str| Subject::Item(path.to_owned());
-        assert!(account.covers_issue(&item("/Library/LaunchDaemons/a.plist")));
         assert!(account.covers_issue(&item("/usr/lib/cron/tabs/me")));
+        assert!(!account.covers_issue(&item("/Library/LaunchDaemons/a.plist")));
         assert!(!account.covers_issue(&item("/Library/LaunchAgents/a.plist")));
         assert!(!account.covers_issue(&Subject::Setting("etc".to_owned())));
     }

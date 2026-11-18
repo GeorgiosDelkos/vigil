@@ -195,8 +195,14 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
     ));
     let account = match Account::current(cancel) {
         Ok(Some(account)) => Some(account),
+        // `id` is part of macOS, so its absence is a failure, not a tool the user left out.
         Ok(None) => {
-            inventory.missing("/usr/bin/id");
+            let source = io::Error::new(io::ErrorKind::NotFound, "not there");
+            let path = PathBuf::from("/usr/bin/id");
+            inventory.fail(
+                InventorySource::Account,
+                InventoryError::Io { path, source },
+            );
             None
         }
         Err(e) => {
@@ -211,17 +217,13 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
     Host::new(&settings, &items, &files)
 }
 
-/// Whether an issue about the item at `path` may follow from who the sweep runs as
-/// ([`InventorySource::Account`]): a daemon's property list, which `mark_replaceable` reads,
-/// this user's crontab, and the root-run files [`startup::collect`] marks.
+/// Whether the item at `path` is one only the account lets the sweep read
+/// ([`InventorySource::Account`]): this user's crontab. Daemons and the files in `/etc` are
+/// read without it, so a failed `id` does not keep their issues open; it only leaves their
+/// `replaceable` out for one sweep. Accepted downside: a daemon whose only issue was being
+/// replaceable reads as resolved on that sweep, which `id` failing almost never causes.
 pub(crate) fn needs_account(path: &str) -> bool {
-    let path = Path::new(path);
-    path.parent()
-        .and_then(Path::file_name)
-        .is_some_and(|folder| folder == "LaunchDaemons")
-        || ["/usr/lib/cron/tabs/", "/etc/", "/usr/local/etc/periodic/"]
-            .iter()
-            .any(|folder| path.starts_with(folder))
+    Path::new(path).starts_with("/usr/lib/cron/tabs")
 }
 
 /// Marks each program and script that runs as root and that `account` could replace: a launch
@@ -237,8 +239,10 @@ fn mark_replaceable(items: &mut [Item], account: &Account) {
         if !daemon || item.user_name.as_deref().is_some_and(|user| user != "root") {
             continue;
         }
+        // A relative path is one launchd does not resolve the way Vigil could (its signature
+        // is already `unreadable`), so it is not judged against Vigil's own folder.
         for program in item.program.iter_mut().chain(item.scripts.iter_mut()) {
-            program.replaceable = account.can_replace(&program.path);
+            program.replaceable = program.path.is_absolute() && account.can_replace(&program.path);
         }
     }
 }
@@ -1993,16 +1997,13 @@ TeamIdentifier=not set
 
     #[test]
     fn what_the_account_decides_is_known_by_its_path() {
-        assert!(needs_account("/Library/LaunchDaemons/a.plist"));
-        assert!(needs_account(
-            "/Applications/A.app/Contents/Library/LaunchDaemons/d.plist"
-        ));
         assert!(needs_account("/usr/lib/cron/tabs/me"));
-        assert!(needs_account("/etc/zshrc"));
-        assert!(needs_account("/usr/local/etc/periodic/daily/x"));
-        assert!(!needs_account("/Library/LaunchAgents/a.plist"));
-        assert!(!needs_account("/Users/me/.zshrc"));
-        assert!(!needs_account("/etcetera/x"));
+        assert!(
+            !needs_account("/Library/LaunchDaemons/a.plist"),
+            "read without it"
+        );
+        assert!(!needs_account("/etc/zshrc"));
+        assert!(!needs_account("/usr/lib/cron/tabsx/me"));
     }
 
     #[test]

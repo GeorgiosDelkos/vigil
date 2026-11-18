@@ -74,7 +74,8 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
     `PATH` in every login shell, root's included, one per line in order.
 
   A file in `/etc` and a `periodic_script` have `replaceable: true` when this user could
-  replace them.
+  replace them. Judge these files from their lines here: do not open them yourself, since
+  they hold values Vigil hid on purpose, and never quote a value in `evidence`.
 
 ## Version matches
 

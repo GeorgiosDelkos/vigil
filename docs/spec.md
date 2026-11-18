@@ -445,8 +445,11 @@ Startup files and root's programs (added 2026-11-18):
   passed as an argument (`--token=x`) or written to a file. A file's key is its shown lines,
   so a new token does not show a dismissed issue again, but any other edit does. Root-run
   files (`/etc`, `/etc/crontab`, `periodic`) say whether this user could replace them.
-- An `id` that fails marks `account` unchecked, which carries the issues of daemons, this
-  user's crontab and the files in `/etc` and `periodic`'s folders.
+- An `id` that fails, or is not there, marks `account` unchecked, which carries the issues of
+  this user's crontab, the one thing it keeps the sweep from reading. Daemons and `/etc` are
+  still read, so their issues are not carried: a daemon whose only issue was being
+  replaceable reads as resolved on that sweep. Only absolute program paths are checked, since
+  launchd does not resolve a relative one the way Vigil could.
 
 Background Task Management (added 2026-11-18):
 
