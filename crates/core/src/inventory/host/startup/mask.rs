@@ -14,8 +14,8 @@
 //!   inside its quotes, a header's credential after its scheme, the default in `${T:-x}`. Not
 //!   masked by its name: a literal that would hold a shell operator ([`OPERATORS`]: `;`, `|`,
 //!   `&`, `<`, `>`, a parenthesis, a backquote) or an [`UNSAFE`] character (white space, a
-//!   backslash, `$`, a brace, a glob character, a quote); a path (`/`, `~/`, `./`); and a bare
-//!   reference to another variable (`$TMPDIR/agent.sock`). The word rules still mask a token
+//!   backslash, `$` (so a reference to another variable, `$TMPDIR/agent.sock`), a brace, a
+//!   glob character, a quote); and a path (`/`, `~/`, `./`). The word rules still mask a token
 //!   inside any of them;
 //! - the password in a URL (`postgres://app:x@db`), and a token as its user
 //!   (`https://<token>@github.com`).
@@ -33,15 +33,16 @@
 //! five reviews in a row found lines where it read the shell differently from zsh or bash, and
 //! each difference either leaked a token into the bundle or let a planted line (`# TOKEN="`)
 //! hide a later command from the agent. Masking cannot hide a line, nor a command with its
-//! arguments (see the invariant above). Accepted downside: a
-//! value under a secret name whose literal holds white space, a `$`, a backslash, a brace, a
-//! glob character or an operator (`AUTH="Bearer abc def"`, `PASSWORD='hunter$2'`,
-//! `"Cookie: a=1; session=x"`) unless a word of it looks like a secret, a
-//! short password under an innocent name (`DB=hunter2`) or passed as a bare argument
-//! (`mysql -phunter2`, `sshpass -p hunter2`) is shown, and so is a key split over lines whose
-//! lines are short, a quoted password that holds a shell operator or a parenthesis
-//! (`'P@ss(word)'`), and a capability URL whose secret is a UUID (`hc-ping.com/<uuid>`): UUIDs
-//! name too many harmless things to mask by shape.
+//! arguments (see the invariant above).
+//!
+//! Accepted downsides, each shown: a value under a secret name whose literal holds white space,
+//! a `$`, a backslash, a brace, a glob character (`~` included), a quote or an operator
+//! (`AUTH="Bearer abc def"`, `PASSWORD='hunter$2'`, `DB_PASS=~x`, `TOKEN='abc'def`,
+//! `"Cookie: a=1; session=x"`), unless a word of it looks like a secret; a short password under
+//! an innocent name (`DB=hunter2`) or passed as a bare argument (`mysql -phunter2`,
+//! `sshpass -p hunter2`); a key split over lines whose lines are short; and a capability URL
+//! whose secret is a UUID (`hc-ping.com/<uuid>`), since UUIDs name too many harmless things to
+//! mask by shape.
 
 /// What replaces a masked word.
 const HIDDEN: &str = "(hidden)";
@@ -129,11 +130,11 @@ const OPERATORS: [char; 8] = ['`', ';', '|', '&', '<', '>', '(', ')'];
 /// Characters a value masked by its name may not hold besides [`OPERATORS`]: white space
 /// (a command and its arguments), a backslash (it can turn a quote into a literal, so a
 /// string the scan sees is code to the shell), `$` (an expansion the shell splits), braces
-/// (`{TOKEN=x,echo,ran}` expands to a command and its arguments), glob characters (an
-/// expansion to file names), and quotes (so the shown line keeps every quote of the file, and
-/// the agent can judge whether they balance).
-const UNSAFE: [char; 12] = [
-    ' ', '\t', '\\', '$', '{', '}', '*', '?', '[', ']', '\'', '"',
+/// (`{TOKEN=x,echo,ran}` expands to a command and its arguments), glob characters, zsh's
+/// extended ones included (`^`, `#`, `~`: an expansion to file names), and quotes (so the
+/// shown line keeps every quote of the file, and the agent can judge whether they balance).
+const UNSAFE: [char; 15] = [
+    ' ', '\t', '\\', '$', '{', '}', '*', '?', '[', ']', '^', '#', '~', '\'', '"',
 ];
 
 /// The bytes between words. A word may hold `/`, `:`, `@`, `.`, `+`, `-` and `%`, so a URL, an
@@ -277,8 +278,8 @@ struct Span {
 /// line (a crontab's), `--name=value`, `--name value`, `launchctl setenv NAME value`,
 /// `"Name: value"` (a header, inside quotes only, ending at its quote), or `"name":"value"`
 /// (JSON). Otherwise the value is a shell word ([`word_len`]), narrowed to its literal
-/// ([`narrow`]). A literal that would hold an operator or an [`UNSAFE`] character, a path, and
-/// a bare reference give `None` (see the module docs).
+/// ([`narrow`]). A literal that would hold an operator or an [`UNSAFE`] character, and a path,
+/// give `None` (see the module docs).
 fn secret_value_at(line: &str, at: usize) -> Option<Span> {
     let bytes = line.as_bytes();
     // A name also starts after `?`, `:` or `/`: a query (`?token=x`) or npm's
@@ -292,21 +293,8 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
         .unwrap_or(line.len() - name_at);
     let name = &line[name_at..name_at + name_len];
-    // An alias's body is code that runs when its name is typed: never masked by its name. A
-    // name is an alias's when an earlier `alias` on the line (escaped or quoted too) defines
-    // it, with no quote between them: a second definition (`alias ll=ls gh_token=x`) counts,
-    // while an assignment inside a body's quotes is an ordinary one and is masked.
-    let before = &line[..at];
-    let after_alias = before
-        .match_indices("alias")
-        .filter(|(start, _)| {
-            let word_start = before[..*start]
-                .rfind(char::is_whitespace)
-                .map_or(0, |space| space + 1);
-            let prefix = &before[word_start..*start];
-            prefix.chars().all(|c| matches!(c, '\\' | '\'' | '"'))
-        })
-        .any(|(start, word)| !before[start + word.len()..].contains(['\'', '"']));
+    // An alias's body is code that runs when its name is typed: never masked by its name.
+    let after_alias = alias_definition(&line[..at]);
     if !secret_name(name) || after_alias {
         return None;
     }
@@ -364,13 +352,13 @@ fn secret_value_at(line: &str, at: usize) -> Option<Span> {
     }
     let (separator, len) = narrow(form, &line[separator..separator + len])
         .map(|(skip, len)| (separator + skip, len))?;
+    // A path holds no secret of its own and may say what runs. A reference to another
+    // variable (`$TMPDIR/agent.sock`) is refused by `UNSAFE`, which holds `$`.
     let shown = &line[separator..separator + len];
-    let unquoted = shown.trim_start_matches(['"', '\'']);
-    let path = unquoted.starts_with('/')
-        || unquoted == "~"
-        || ["~/", "./", "../"].iter().any(|p| unquoted.starts_with(p));
-    let reference = is_reference(unquoted.trim_end_matches(['"', '\'']));
-    if shown.is_empty() || shown.contains(UNSAFE) || path || reference {
+    let path = shown.starts_with('/')
+        || shown == "~"
+        || ["~/", "./", "../"].iter().any(|p| shown.starts_with(p));
+    if shown.is_empty() || shown.contains(UNSAFE) || path {
         return None;
     }
     Some(Span {
@@ -413,6 +401,32 @@ fn narrow(form: Form, value: &str) -> Option<(usize, usize)> {
     Some((0, value.len()))
 }
 
+/// Whether a name right after `before` is one an `alias` command defines: the command it is
+/// in (after the last `;`, `&` or `|` outside quotes) starts with the word `alias`, however
+/// quoted or escaped (`\alias`, `'al'ias`, `$'alias'`), and the name is not inside quotes.
+/// So `alias ll='ls -l' pass=x` defines `pass`, while `alias a='TOKEN=x rest'` holds an
+/// ordinary assignment and `alias k=k; TOKEN=x` ends the alias command first. An alias spelled
+/// through an expansion (`$A token=x`) is not seen.
+fn alias_definition(before: &str) -> bool {
+    let mut quote = None;
+    let mut command = 0;
+    for (at, c) in before.char_indices() {
+        match (quote, c) {
+            (None, '\'' | '"') => quote = Some(c),
+            (Some(open), c) if c == open => quote = None,
+            (None, ';' | '&' | '|') => command = at + 1,
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return false;
+    }
+    before[command..]
+        .split_whitespace()
+        .next()
+        .is_some_and(|word| word.trim_start_matches('$').replace(['\\', '\'', '"'], "") == "alias")
+}
+
 /// The length of the shell word `value` starts with: unquoted runs and quoted parts (`'...'`,
 /// `"..."`, `$'...'`, `$"..."`) joined, up to white space, `;`, `&` or `|`. A quote that opens
 /// the value and does not close runs to the end of the line, where the operator invariant
@@ -449,34 +463,6 @@ fn word_len(value: &str) -> usize {
         }
         len += end;
     }
-}
-
-/// Whether `value` is a bare reference to another variable, which holds no literal of its own:
-/// `$NAME` or `${NAME}`, alone or followed by a path (`$TMPDIR/agent.sock`). A default or
-/// anything after it (`${T:-x}`, `${T}x`) holds a literal and is not one.
-fn is_reference(value: &str) -> bool {
-    let Some(rest) = value.strip_prefix('$') else {
-        return false;
-    };
-    let after = if let Some(braced) = rest.strip_prefix('{') {
-        let Some(end) = braced.find('}') else {
-            return false;
-        };
-        let name = &braced[..end];
-        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
-            return false;
-        }
-        &braced[end + 1..]
-    } else {
-        let len = rest
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .unwrap_or(rest.len());
-        if len == 0 {
-            return false;
-        }
-        &rest[len..]
-    };
-    after.is_empty() || after.starts_with('/')
 }
 
 /// Whether a name says its value is secret: one of its segments, split at `_` and `-`,
@@ -998,6 +984,19 @@ mod tests {
             mask("alias a='GITHUB_TOKEN=abc rest'"),
             "alias a='GITHUB_TOKEN=(hidden) rest'"
         );
+        // Each command decides on its own whether it defines aliases.
+        assert_eq!(
+            mask("alias ll='ls -l' pass=evil-pass"),
+            "alias ll='ls -l' pass=evil-pass"
+        );
+        assert_eq!(mask("'al'ias token=evil"), "'al'ias token=evil");
+        assert_eq!(
+            mask("alias k=kubectl; export KUBE_TOKEN=abc123short"),
+            "alias k=kubectl; export KUBE_TOKEN=(hidden)"
+        );
+        assert_eq!(mask("aliasrc=1 TOKEN=abc123"), "aliasrc=1 TOKEN=(hidden)");
+        // zsh's extended globs expand too.
+        assert_eq!(mask("--token a^b"), "--token a^b");
         // The quotes of the file stay shown, so the agent sees whether they balance.
         assert_eq!(mask("TOKEN='abc'"), "TOKEN='(hidden)'");
         // Plural and short names are secret too.
@@ -1014,7 +1013,6 @@ mod tests {
             ),
             ("TOKEN=$\"hunter2\"", "TOKEN=$\"(hidden)\""),
             ("PASSWORD=.hunter2", "PASSWORD=(hidden)"),
-            ("DB_PASS=~hunter2", "DB_PASS=(hidden)"),
             ("TOKEN=${OTHER}/x", "TOKEN=${OTHER}/x"),
             ("TOKEN_FILE=~/.token", "TOKEN_FILE=~/.token"),
             ("DB_PASSWORD2=hunter2pass", "DB_PASSWORD2=(hidden)"),
