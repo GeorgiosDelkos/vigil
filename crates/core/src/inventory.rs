@@ -411,6 +411,10 @@ pub enum InventorySource {
         /// `report.json`, which a `PathBuf` of such a name cannot be.
         path: String,
     },
+    /// Background Task Management's records on this Mac (login items, agents and daemons an
+    /// app registered from its own bundle, apps that open at login), of which one file or more
+    /// could not be read.
+    BackgroundItems,
     /// A GitHub repository's open alerts of one kind, by the name its file has
     /// (`code-scanning`), which `gh` could not fetch.
     Alerts {
@@ -461,6 +465,7 @@ impl InventorySource {
             Self::Setting { .. }
             | Self::LaunchFolder { .. }
             | Self::LaunchItem { .. }
+            | Self::BackgroundItems
             | Self::Alerts { .. }
             | Self::Workflows
             | Self::Workflow { .. }
@@ -485,6 +490,13 @@ impl InventorySource {
                 Subject::Item(item) if Path::new(item).parent() == Some(Path::new(path))
             ),
             Self::LaunchItem { path } => matches!(subject, Subject::Item(item) if item == path),
+            // Every item these records give is an app bundle or a file inside one, and no
+            // launch folder item is, unless its own name ends in `.app`. A file that fails on
+            // every sweep keeps these issues open, which is the truth: none of its items was
+            // read.
+            Self::BackgroundItems => {
+                matches!(subject, Subject::Item(item) if host::is_in_app(Path::new(item)))
+            }
             Self::Alerts { name } => match subject {
                 Subject::Setting(key) => *key == github::alerts_key(name),
                 Subject::File(path) => *path == github::alerts_file(name),
@@ -541,6 +553,7 @@ impl InventorySource {
             | Self::OsPackages
             | Self::DependencyGraph
             | Self::Workflows
+            | Self::BackgroundItems
             | Self::Unknown => None,
         }
     }
@@ -565,6 +578,7 @@ impl std::fmt::Display for InventorySource {
             Self::OsPackages => f.write_str("OS packages"),
             Self::DependencyGraph => f.write_str("the dependency graph"),
             Self::Setting { key } => write!(f, "the setting {key}"),
+            Self::BackgroundItems => f.write_str("login items"),
             Self::LaunchFolder { path } => write!(f, "launch folder {path}"),
             Self::LaunchItem { path } => write!(f, "launch item {path}"),
             Self::Alerts { name } => write!(f, "{name} alerts"),
@@ -705,6 +719,18 @@ pub enum InventoryError {
         /// The largest lockfile read, in bytes.
         limit: u64,
     },
+    /// macOS refused to list a folder only a process with Full Disk Access may list.
+    #[error(
+        "{what} are not read: {} needs Full Disk Access; allow Vigil, or the terminal that runs \
+         it, in System Settings > Privacy & Security > Full Disk Access",
+        path.display()
+    )]
+    FullDiskAccess {
+        /// What is in the folder.
+        what: &'static str,
+        /// The folder.
+        path: PathBuf,
+    },
 }
 
 impl InventoryError {
@@ -735,7 +761,11 @@ impl InventoryError {
             | Self::NpmTree { .. }
             | Self::TooManyEntries { .. }
             | Self::TooLarge { .. }
-            | Self::CloudOnly { .. } => false,
+            | Self::CloudOnly { .. }
+            // Full Disk Access is the user's choice, which lasts: a Mac whose owner declines it
+            // could otherwise never be clear. Accepted downside, as for `Io` above: when access
+            // is taken away, the issues of what is in the folder read as resolved.
+            | Self::FullDiskAccess { .. } => false,
         }
     }
 
@@ -1190,6 +1220,11 @@ mod tests {
                 "the list of workflows",
                 "workflows",
             ),
+            (
+                InventorySource::BackgroundItems,
+                "login items",
+                "background_items",
+            ),
         ];
         for (source, text, kind) in names {
             assert_eq!(source.to_string(), text);
@@ -1228,6 +1263,19 @@ mod tests {
         };
         assert!(agent.covers_issue(&item) && !agent.covers_issue(&other));
         assert!(!agent.covers_issue(&setting("/Library/LaunchAgents/a.plist")));
+
+        let records = InventorySource::BackgroundItems;
+        let login_item =
+            Subject::Item("/Applications/A.app/Contents/Library/LoginItems/H.app".into());
+        assert!(records.covers_issue(&login_item));
+        assert!(records.covers_issue(&Subject::Item("/Applications/Gone.app".into())));
+        assert!(
+            !records.covers_issue(&item),
+            "a launch folder's item is read from the folder"
+        );
+        assert!(
+            !records.covers_issue(&file("A.app/x")) && !records.covers_issue(&setting("A.app"))
+        );
 
         let alerts = InventorySource::Alerts {
             name: "code-scanning".to_owned(),

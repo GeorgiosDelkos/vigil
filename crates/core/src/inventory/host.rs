@@ -6,8 +6,11 @@
 //! - `mac/settings.json`: System Integrity Protection, Gatekeeper, `FileVault` and the
 //!   application firewall, each as the line its tool prints. An issue names one by its key.
 //! - `mac/persistence.jsonl`: every launch agent and daemon outside `/System`, one per line,
-//!   with the program it starts, the script an interpreter runs, and their code signatures. An
-//!   issue names one by the property list's path.
+//!   with the program it starts, the script an interpreter runs, and their code signatures,
+//!   then what Background Task Management records that no launch folder shows ([`background`]):
+//!   login items inside apps, the agents and daemons apps registered from their own bundle,
+//!   and the apps that open at login. An issue names one by its path: the property list's, or
+//!   the app bundle's.
 //!
 //! Vigil reads signatures itself because a sweep's agent runs no commands. Every tool is called
 //! by its absolute path: these checks decide whether a program is trusted, and a `codesign`
@@ -22,11 +25,13 @@
 //! developer keeps the dismissal. The identity is part of every item issue's key, so changing
 //! its shape clears every item dismissal once.
 //!
-//! Not read yet: login items (Background Task Management, readable only with Full Disk
-//! Access), cron, kernel and system extensions, and the other persistence locations.
+//! Not read yet: cron, kernel and system extensions, and the other persistence locations. The
+//! records of Background Task Management need Full Disk Access; without it they are a note
+//! ([`InventoryError::FullDiskAccess`]), and the app asks for it ([`needs_full_disk_access`]).
 //! `/System/Library/Launch*` is left out because it is on the sealed system volume.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
@@ -44,6 +49,8 @@ use crate::inventory::InventorySource;
 use crate::inventory::command;
 use crate::inventory::command::Output;
 use crate::paths;
+
+mod background;
 
 /// What the host checks found, ready for the Mac's bundle.
 #[derive(Debug, Default)]
@@ -171,8 +178,25 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
             },
         );
     }
-    let items = launch_items(inventory, &folders, cancel);
+    let mut items = launch_items(inventory, &folders, cancel);
+    items.extend(background_items(
+        inventory,
+        &root.join(background::FOLDER),
+        cancel,
+    ));
     Host::new(&settings, &items)
+}
+
+/// Whether macOS keeps this process from reading Background Task Management's records, so
+/// login items are not checked until the user grants Vigil Full Disk Access.
+pub fn needs_full_disk_access() -> bool {
+    background::needs_full_disk_access(&system_root().join(background::FOLDER))
+}
+
+/// Whether `path` is an app bundle or inside one, as every item [`background_items`] gives is.
+pub(crate) fn is_in_app(path: &Path) -> bool {
+    path.components()
+        .any(|part| Path::new(part.as_os_str()).extension() == Some("app".as_ref()))
 }
 
 impl Host {
@@ -232,25 +256,55 @@ enum ItemKind {
     LaunchAgent,
     /// `~/Library/LaunchAgents`: runs as this user.
     UserLaunchAgent,
+    /// A launch agent an app registered from its own bundle (`SMAppService`), from
+    /// Background Task Management's records.
+    AppLaunchAgent,
+    /// A launch daemon an app registered from its own bundle, which runs as root unless it
+    /// names a `UserName`.
+    AppLaunchDaemon,
+    /// An app inside another app that starts at login (`SMLoginItemSetEnabled`).
+    LoginItem,
+    /// An app the user or the app added to Open at Login.
+    OpenAtLogin,
 }
 
-/// One launch item, as the agent reads it.
+impl ItemKind {
+    /// Whether launchd reads its `BundleProgram`, relative to the app its property list is in.
+    fn in_app_bundle(self) -> bool {
+        match self {
+            Self::AppLaunchAgent | Self::AppLaunchDaemon => true,
+            Self::LaunchDaemon
+            | Self::LaunchAgent
+            | Self::UserLaunchAgent
+            | Self::LoginItem
+            | Self::OpenAtLogin => false,
+        }
+    }
+}
+
+/// One launch item, login item or app that opens at login, as the agent reads it.
 #[derive(Debug, Serialize)]
 struct Item {
-    /// The property list's path, which an issue names. Text, with any byte that is not UTF-8
-    /// replaced, so a planted file with such a name is still listed.
+    /// The property list's path, or for a login item and an app that opens at login the app
+    /// bundle's, which an issue names. Text, with any byte that is not UTF-8 replaced, so a
+    /// planted file with such a name is still listed.
     path: String,
     kind: ItemKind,
-    /// Why the property list could not be read, when it could not; the fields below are then
-    /// empty, except `stamp`.
+    /// Why the property list (or the bundle's `Info.plist`) could not be read, when it could
+    /// not; the fields below are then empty, except `stamp` and `login_items`.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     /// The size and modification time of a property list that could not be read, so that a
     /// dismissed one shows again once it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     stamp: Option<String>,
+    /// The job's `Label`; for a login item and an app that opens at login, the name Background
+    /// Task Management records.
     label: Option<String>,
-    /// The program launchd starts, from `Program` or else the first of `ProgramArguments`.
+    /// The program launchd starts: from `Program` or else the first of `ProgramArguments`, or
+    /// for an agent or daemon an app registered, its `BundleProgram` inside that app. For a
+    /// login item and an app that opens at login, the bundle's executable; the bundle itself,
+    /// `missing`, when it is not there.
     program: Option<Program>,
     /// `ProgramArguments`, the program's own name first. Kept whole, although an argument can
     /// hold a token: the command line is what the agent judges (`sh -c`, a download piped to a
@@ -261,6 +315,8 @@ struct Item {
     /// an interpreter given by absolute path and that interpreter's script (see [`scripts`]).
     /// A bare name `env` finds on `PATH` is not resolved or checked.
     scripts: Vec<Program>,
+    /// `RunAtLoad`; `true` for a login item and an app that opens at login, which start at
+    /// every login.
     run_at_load: bool,
     /// Whether `KeepAlive` is set: `true`, or conditions under which launchd restarts it.
     keep_alive: bool,
@@ -272,6 +328,10 @@ struct Item {
     /// [`shows_value`] says. Other values can hold tokens, and their names are enough to judge
     /// them.
     environment: BTreeMap<String, Option<String>>,
+    /// The switches System Settings > General > Login Items shows, for an item from Background
+    /// Task Management's records. It runs only while both are on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    login_items: Option<background::Switches>,
 }
 
 /// A file an item runs, with its signature.
@@ -298,6 +358,7 @@ impl Item {
             disabled: false,
             user_name: None,
             environment: BTreeMap::new(),
+            login_items: None,
         }
     }
 
@@ -305,7 +366,7 @@ impl Item {
     /// items can join into the same text.
     fn identity(&self) -> String {
         let file = |p: &Program| json!([p.path, p.signature.identity()]);
-        json!({
+        let mut identity = json!({
             "program": self.program.as_ref().map(file),
             "scripts": self.scripts.iter().map(file).collect::<Vec<_>>(),
             "arguments": self.arguments,
@@ -314,8 +375,13 @@ impl Item {
             "run_at_load": self.run_at_load,
             "disabled": self.disabled,
             "unread": self.stamp,
-        })
-        .to_string()
+        });
+        // Only when set, so the identity of a launch folder's item, and the dismissal it
+        // keys, stays as it was before these records were read.
+        if let Some(switches) = self.login_items {
+            identity["login_items"] = json!(switches);
+        }
+        identity.to_string()
     }
 }
 
@@ -325,6 +391,7 @@ impl Item {
 struct Job {
     label: Option<String>,
     program: Option<String>,
+    bundle_program: Option<String>,
     program_arguments: Option<Vec<String>>,
     working_directory: Option<String>,
     run_at_load: Option<bool>,
@@ -384,6 +451,118 @@ fn launch_items(
     items
 }
 
+/// Reads what Background Task Management records in `folder` that no launch folder shows, an
+/// item per path (the same app can be recorded for several users). Its failures are of
+/// [`InventorySource::BackgroundItems`]; a check of one item that could not run is of that
+/// item's [`InventorySource::LaunchItem`], as in [`launch_items`].
+fn background_items(inventory: &mut Inventory, folder: &Path, cancel: &Cancel) -> Vec<Item> {
+    let mut failures = Vec::new();
+    let entries = background::read(folder, &mut failures);
+    for e in failures {
+        inventory.fail(InventorySource::BackgroundItems, e);
+    }
+    let mut seen = BTreeSet::new();
+    let mut items = Vec::new();
+    for entry in entries {
+        if !seen.insert(entry.path.clone()) {
+            continue;
+        }
+        if cancel.is_cancelled() {
+            let what = "reading login items".to_owned();
+            inventory.fail(
+                InventorySource::BackgroundItems,
+                InventoryError::Cancelled { what },
+            );
+            return items;
+        }
+        let mut failures = Vec::new();
+        let shown = entry.path.to_string_lossy().into_owned();
+        let mut item = match (&entry.problem, entry.kind) {
+            (Some(problem), kind) => Item::unread(kind, shown.clone(), problem.clone(), None),
+            (None, kind @ (ItemKind::LoginItem | ItemKind::OpenAtLogin)) => {
+                bundle_item(kind, &entry.path, cancel, &mut failures)
+            }
+            (None, kind) => read_item(kind, &entry.path, cancel, &mut failures),
+        };
+        if item.label.is_none() {
+            item.label = entry.name;
+        }
+        item.login_items = Some(entry.switches);
+        for e in failures {
+            let path = shown.clone();
+            inventory.fail(InventorySource::LaunchItem { path }, e);
+        }
+        items.push(item);
+    }
+    items
+}
+
+/// A login item or an app that opens at login: the app at `bundle`, which runs its
+/// executable. A bundle that is not there is kept with the bundle as its `missing` program.
+fn bundle_item(
+    kind: ItemKind,
+    bundle: &Path,
+    cancel: &Cancel,
+    failures: &mut Vec<InventoryError>,
+) -> Item {
+    let shown = bundle.to_string_lossy().into_owned();
+    let program = match bundle_executable(bundle) {
+        Ok(program) => program,
+        Err(error) => {
+            let info = bundle.join("Contents/Info.plist");
+            let stamp = fs::symlink_metadata(info).ok().map(|m| stamp(&m));
+            return Item::unread(kind, shown, error, stamp);
+        }
+    };
+    Item {
+        path: shown,
+        kind,
+        error: None,
+        stamp: None,
+        label: None,
+        program: Some(checked(program, cancel, failures)),
+        arguments: Vec::new(),
+        scripts: Vec::new(),
+        run_at_load: true,
+        keep_alive: false,
+        disabled: false,
+        user_name: None,
+        environment: BTreeMap::new(),
+        login_items: None,
+    }
+}
+
+/// The file macOS runs for the app at `bundle`: `Contents/MacOS/` and its `Info.plist`'s
+/// `CFBundleExecutable`. The bundle itself when it is not there, which [`checked`] calls
+/// `missing`.
+fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
+    /// The one key read from `Info.plist`.
+    #[derive(Deserialize)]
+    struct Info {
+        #[serde(rename = "CFBundleExecutable")]
+        executable: Option<String>,
+    }
+    match fs::symlink_metadata(bundle) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(bundle.to_owned()),
+        Err(e) => return Err(format!("cannot read the app: {e}")),
+        Ok(_) => {}
+    }
+    let info = bundle.join("Contents/Info.plist");
+    let bytes = paths::read_capped(&info, PLIST_LIMIT + 1)
+        .map_err(|e| format!("cannot read its Info.plist: {e}"))?;
+    if bytes.len() as u64 > PLIST_LIMIT {
+        return Err(format!(
+            "its Info.plist is more than the {PLIST_LIMIT} bytes read"
+        ));
+    }
+    let info: Info =
+        plist::from_bytes(&bytes).map_err(|e| format!("its Info.plist does not parse: {e}"))?;
+    let executable = info
+        .executable
+        .ok_or("its Info.plist names no CFBundleExecutable")?;
+    Ok(bundle.join("Contents/MacOS").join(executable))
+}
+
 /// The entries of `folder`, sorted. Hidden ones are kept, since launchd loads them too; only
 /// Finder's `.DS_Store` is skipped.
 fn list(folder: &Path) -> io::Result<Vec<PathBuf>> {
@@ -417,11 +596,19 @@ fn read_item(
     };
     let arguments = job.program_arguments.unwrap_or_default();
     let working_directory = job.working_directory.as_deref();
-    let program = job
-        .program
+    let in_bundle = job
+        .bundle_program
         .as_deref()
-        .or(arguments.first().map(String::as_str))
-        .map(|name| checked(resolve(name, working_directory), cancel, failures));
+        .filter(|_| kind.in_app_bundle())
+        .and_then(|name| Some(app_of(path)?.join(name)));
+    let program = match in_bundle {
+        Some(program) => Some(checked(program, cancel, failures)),
+        None => job
+            .program
+            .as_deref()
+            .or(arguments.first().map(String::as_str))
+            .map(|name| checked(resolve(name, working_directory), cancel, failures)),
+    };
     let scripts = match &program {
         Some(program) => scripts(&program.path, &arguments)
             .into_iter()
@@ -455,7 +642,15 @@ fn read_item(
         disabled: job.disabled.unwrap_or(false),
         user_name: job.user_name,
         environment,
+        login_items: None,
     }
+}
+
+/// The app whose bundle holds the property list at `path`, which `SMAppService` requires to be
+/// in the app's `Contents/Library/LaunchAgents` or `LaunchDaemons`.
+fn app_of(path: &Path) -> Option<&Path> {
+    let contents = path.parent()?.parent()?.parent()?;
+    (contents.file_name()? == "Contents").then_some(contents.parent()?)
 }
 
 /// Parses the property list at `path`, or says why it cannot be read. A link or anything but a
@@ -1351,6 +1546,180 @@ TeamIdentifier=not set
         );
     }
 
+    /// An app bundle at `path` whose `Info.plist` names `executable`, with that file.
+    fn app(path: &Path, executable: &str) {
+        let contents = path.join("Contents");
+        fs::create_dir_all(contents.join("MacOS")).unwrap();
+        let body = format!("<key>CFBundleExecutable</key><string>{executable}</string>");
+        plist(&contents, "Info.plist", &body);
+        fs::write(contents.join("MacOS").join(executable), "#!/bin/sh\n").unwrap();
+    }
+
+    #[test]
+    fn what_apps_registered_is_read_with_its_program_and_switches() {
+        use background::tests::Archiver;
+        use background::tests::Record;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let outer = tmp.path().join("Outer App.app");
+        app(&outer, "Outer");
+        let helper = outer.join("Contents/Library/LoginItems/Helper.app");
+        app(&helper, "Helper");
+        let agents = outer.join("Contents/Library/LaunchAgents");
+        fs::create_dir_all(&agents).unwrap();
+        let body = "<key>Label</key><string>com.example.agent</string>\
+             <key>BundleProgram</key><string>Contents/MacOS/Outer</string>\
+             <key>ProgramArguments</key><array/>";
+        plist(&agents, "com.example.agent.plist", body);
+        let broken = tmp.path().join("Broken.app");
+        fs::create_dir_all(broken.join("Contents")).unwrap();
+
+        let url = |path: &Path| format!("file://{}/", path.display()).replace(' ', "%20");
+        let (outer_url, broken_url) = (url(&outer), url(&broken));
+        let gone_url = url(&tmp.path().join("Gone.app"));
+        let record = |bits, identifier, url: Option<&'static str>| Record {
+            bits,
+            disposition: 0b11,
+            identifier,
+            name: Some("Recorded"),
+            url,
+            container: Some("2.outer"),
+        };
+        let records = [
+            Record {
+                disposition: 0b10,
+                container: None,
+                url: Some(&outer_url),
+                ..record(0x2, "2.outer", None)
+            },
+            record(
+                0x4,
+                "4.helper",
+                Some("Contents/Library/LoginItems/Helper.app"),
+            ),
+            Record {
+                disposition: 0b01,
+                ..record(
+                    0x8,
+                    "8.agent",
+                    Some("Contents/Library/LaunchAgents/com.example.agent.plist"),
+                )
+            },
+            Record {
+                container: None,
+                url: Some(&gone_url),
+                ..record(0x2, "2.gone", None)
+            },
+            Record {
+                container: None,
+                url: Some(&broken_url),
+                ..record(0x2, "2.broken", None)
+            },
+        ];
+        let folder = tmp.path().join("btm");
+        fs::create_dir(&folder).unwrap();
+        let archive = Archiver::user_file(&records);
+        background::tests::write(&folder.join("BackgroundItems-v18-a.btm"), &archive);
+        // The same records for another user give each item once.
+        background::tests::write(&folder.join("BackgroundItems-v18-b.btm"), &archive);
+
+        let mut inventory = Inventory::default();
+        let items = background_items(&mut inventory, &folder, &Cancel::new());
+        assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
+        let [login, agent, gone, unread] = &items[..] else {
+            panic!("four items: {items:#?}");
+        };
+
+        assert_eq!(login.kind, ItemKind::LoginItem);
+        assert_eq!(login.path, helper.to_str().unwrap());
+        let program = login.program.as_ref().unwrap();
+        assert_eq!(program.path, helper.join("Contents/MacOS/Helper"));
+        assert!(matches!(program.signature, Signature::Unsigned { .. }));
+        assert!(login.run_at_load);
+        assert_eq!(login.label.as_deref(), Some("Recorded"));
+
+        assert_eq!(agent.kind, ItemKind::AppLaunchAgent);
+        assert_eq!(agent.label.as_deref(), Some("com.example.agent"));
+        let program = agent.program.as_ref().unwrap();
+        assert_eq!(
+            program.path,
+            outer.join("Contents/MacOS/Outer"),
+            "BundleProgram"
+        );
+        let line = serde_json::to_string(agent).unwrap();
+        assert!(
+            line.contains(r#""login_items":{"enabled":true,"allowed":false}"#),
+            "{line}"
+        );
+
+        assert_eq!(gone.kind, ItemKind::OpenAtLogin);
+        let program = gone.program.as_ref().unwrap();
+        assert_eq!(program.path, tmp.path().join("Gone.app"));
+        assert_eq!(program.signature, Signature::Missing);
+
+        assert_eq!(unread.path, broken.to_str().unwrap());
+        let error = unread.error.as_deref().unwrap();
+        assert!(error.starts_with("cannot read its Info.plist"), "{error}");
+        assert!(unread.login_items.is_some());
+    }
+
+    #[test]
+    fn a_launch_folder_item_keeps_its_identity_and_a_registered_one_its_switches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = plist(
+            tmp.path(),
+            "a.plist",
+            "<key>Program</key><string>/bin/ls</string>",
+        );
+        let mut item = read(ItemKind::LaunchAgent, &path);
+        // Only an item from the records has switches, so the identities of the folders' items,
+        // and the dismissals they key, are as they were before the records were read.
+        assert_eq!(
+            item.identity(),
+            r#"{"arguments":[],"disabled":false,"environment":{},"program":["/bin/ls","apple"],"#
+                .to_owned()
+                + r#""run_at_load":false,"scripts":[],"unread":null,"user_name":null}"#
+        );
+
+        let on = |enabled, allowed| Some(background::Switches { enabled, allowed });
+        item.login_items = on(true, true);
+        let allowed = item.identity();
+        item.login_items = on(true, false);
+        assert_ne!(item.identity(), allowed, "turned off in Login Items");
+    }
+
+    #[test]
+    fn a_bundle_program_counts_only_inside_an_app() {
+        let tmp = tempfile::tempdir().unwrap();
+        let agents = tmp.path().join("A.app/Contents/Library/LaunchAgents");
+        fs::create_dir_all(&agents).unwrap();
+        let body = "<key>BundleProgram</key><string>Contents/MacOS/A</string>\
+             <key>Program</key><string>/bin/ls</string>";
+        let path = plist(&agents, "a.plist", body);
+
+        let registered = read(ItemKind::AppLaunchAgent, &path);
+        let program = registered.program.unwrap().path;
+        assert_eq!(program, tmp.path().join("A.app/Contents/MacOS/A"));
+        // launchd ignores `BundleProgram` in a launch folder's property list.
+        let folder = read(ItemKind::LaunchAgent, &path);
+        assert_eq!(folder.program.unwrap().path, Path::new("/bin/ls"));
+
+        assert_eq!(
+            app_of(Path::new("/A.app/Contents/Library/LaunchAgents/a.plist")),
+            Some(Path::new("/A.app"))
+        );
+        assert_eq!(
+            app_of(Path::new("/A.app/Library/LaunchAgents/a.plist")),
+            None
+        );
+        assert!(is_in_app(Path::new("/Applications/A.app")));
+        assert!(is_in_app(Path::new(
+            "/A.app/Contents/Library/LaunchAgents/a.plist"
+        )));
+        assert!(!is_in_app(Path::new("/Library/LaunchAgents/a.plist")));
+        assert!(!is_in_app(Path::new("/Library/LaunchAgents/app")));
+    }
+
     #[test]
     fn this_macs_settings_and_items_are_read() {
         // macOS ships every settings tool, so each one answers on any Mac, CI's included.
@@ -1374,7 +1743,20 @@ TeamIdentifier=not set
 
         // No test of this crate sets `VIGIL_TEST_LAUNCH_ROOT`, so this reads the real folders.
         assert_eq!(system_root(), Path::new("/"));
-        let host = collect(&mut Inventory::default(), &Cancel::new());
+        let mut inventory = Inventory::default();
+        let host = collect(&mut inventory, &Cancel::new());
+        // macOS 27.2's layout reads, where this process has Full Disk Access; elsewhere the
+        // folder is a note, and no failure.
+        assert!(
+            !inventory.failed.contains(&InventorySource::BackgroundItems),
+            "{:?}",
+            inventory.problems
+        );
+        let noted = inventory
+            .problems
+            .iter()
+            .any(|e| matches!(e, InventoryError::FullDiskAccess { .. }));
+        assert_eq!(noted, needs_full_disk_access());
         assert_eq!(host.settings.len(), POSTURE.len());
         assert_eq!(host.files.len(), 2);
         assert!(host.files[0].1.contains("system_integrity_protection"));

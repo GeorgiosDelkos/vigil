@@ -91,6 +91,7 @@ fn main() {
             close_fix,
             fix_log,
             dismiss,
+            open_full_disk_access,
             settings::settings_data,
             settings::detect_again,
             settings::save,
@@ -159,6 +160,9 @@ struct Overview {
     disk: Option<Disk>,
     /// The running version, the last update check, and an update waiting for a restart.
     update: UpdateView,
+    /// Whether macOS keeps sweeps from reading login items until the user grants Vigil Full
+    /// Disk Access, which no app can grant itself.
+    needs_full_disk_access: bool,
 }
 
 /// The status as the popover shows it: targets by their labels, and where the sweep is.
@@ -368,8 +372,25 @@ fn overview(app: AppHandle, runner: State<'_, Runner>) -> Overview {
                 .join()
                 .expect("startup_disk returns None on failure and does not panic"),
             update: update::view(&app),
+            needs_full_disk_access: vigil_core::needs_full_disk_access(),
         }
     })
+}
+
+/// Opens System Settings at Privacy & Security > Full Disk Access, where the user turns Vigil
+/// on (checked on macOS 27.2). Async, so waiting for `open` never stalls the UI.
+#[tauri::command(async)]
+fn open_full_disk_access() -> Result<(), String> {
+    let pane = "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles";
+    let status = Command::new("/usr/bin/open")
+        .arg(pane)
+        .status()
+        .map_err(|e| format!("cannot run open: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("open {pane} failed"))
+    }
 }
 
 /// Async, so reading the config to list the targets never stalls the UI.

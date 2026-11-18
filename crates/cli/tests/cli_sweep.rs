@@ -47,6 +47,11 @@ case "$CLAUDE_FAKE_MODE:$n" in
     else
       echo '{"findings": [], "issues": []}' > findings.json
     fi ;;
+  login-item:*)
+    app=$(grep -o '"path":"[^"]*Gone.app"' mac/persistence.jsonl | head -n 1 | cut -d'"' -f4)
+    echo '{"findings": [], "issues": [{"subject": {"item": "'"$app"'"},
+      "severity": "low", "evidence": "e", "explanation": "x",
+      "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
   retry:1) echo '{"findings": [], "issues": [], "bogus": 1}' > findings.json ;;
   retry:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
@@ -647,6 +652,78 @@ fn servers_are_swept_after_the_repositories() {
         "{report}"
     );
     assert!(sandbox.path().join("data/prompts/sweep-server.md").exists());
+}
+
+/// Background Task Management's records as macOS 27.2 writes them, one user's file in XML:
+/// an app in Open at Login whose bundle `app` is gone. macOS writes them binary, which
+/// `plutil` converts this to: the plist crate reads `CF$UID` in XML as a plain dictionary.
+fn login_items_file(app: &Path) -> String {
+    let uid = |n: u32| format!("<dict><key>CF$UID</key><integer>{n}</integer></dict>");
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+         <key>$archiver</key><string>NSKeyedArchiver</string>\
+         <key>$version</key><integer>100000</integer>\
+         <key>$top</key><dict><key>userStore</key>{store}</dict>\
+         <key>$objects</key><array>\
+         <string>$null</string>\
+         <dict><key>records</key>{records}</dict>\
+         <dict><key>NS.objects</key><array>{record}</array></dict>\
+         <dict><key>type</key><integer>2</integer><key>disposition</key><integer>11</integer>\
+         <key>identifier</key>{identifier}<key>name</key>{name}<key>url</key>{url}</dict>\
+         <string>2.com.example.gone</string>\
+         <string>Gone</string>\
+         <dict><key>NS.base</key>{null}<key>NS.relative</key>{relative}</dict>\
+         <string>file://{app}/</string>\
+         </array></dict></plist>\n",
+        store = uid(1),
+        records = uid(2),
+        record = uid(3),
+        identifier = uid(4),
+        name = uid(5),
+        url = uid(6),
+        null = uid(0),
+        relative = uid(7),
+        app = app.display(),
+    )
+}
+
+#[test]
+fn an_app_in_open_at_login_is_read_and_its_issue_named_by_the_bundle() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let records = sandbox
+        .path()
+        .join("system/private/var/db/com.apple.backgroundtaskmanagement");
+    fs::create_dir_all(&records).unwrap();
+    let app = sandbox.path().join("Applications/Gone.app");
+    let file = records.join("BackgroundItems-v18-user.btm");
+    fs::write(&file, login_items_file(&app)).unwrap();
+    let converted = Command::new("/usr/bin/plutil")
+        .args(["-convert", "binary1"])
+        .arg(&file)
+        .status()
+        .unwrap();
+    assert!(converted.success());
+
+    let out = sandbox.sweep("login-item");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let items =
+        fs::read_to_string(sandbox.sweep_dir().join("bundle/mac/persistence.jsonl")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(items.trim()).unwrap();
+    assert_eq!(line["kind"], "open_at_login", "{items}");
+    assert_eq!(line["label"], "Gone");
+    assert_eq!(line["program"]["signature"]["status"], "missing");
+    assert_eq!(
+        line["login_items"],
+        serde_json::json!({"enabled": true, "allowed": true})
+    );
+
+    // The issue names the bundle, which the sweep checks against what it read.
+    let report = sandbox.newest_report("mac");
+    assert_eq!(
+        report["issues"][0]["subject"],
+        serde_json::json!({"item": app.to_str().unwrap()}),
+        "{report}"
+    );
 }
 
 #[test]

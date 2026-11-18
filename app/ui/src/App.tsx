@@ -173,6 +173,18 @@ export function App() {
   return (
     <main class="pop" classList={{ "on-orbit": view() === "orbit" }}>
       <Show when={error()}>{(e) => <p class="banner bad">{e()}</p>}</Show>
+      <Show when={overview()?.needs_full_disk_access}>
+        <p class="banner ask">
+          <span>Login items are not checked until Vigil has Full Disk Access.</span>
+          <button
+            type="button"
+            class="btn small x"
+            onClick={() => run(() => invoke("open_full_disk_access"))}
+          >
+            Open System Settings
+          </button>
+        </p>
+      </Show>
       <Show when={overview()?.update.ready}>
         {(version) => (
           <UpdateReady

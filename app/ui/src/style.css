@@ -244,9 +244,16 @@ select:focus-visible {
 .banner .x {
   margin-left: auto;
 }
-/* Update ready: the button sits on the line's centre, not its text baseline. */
-.banner.update {
+/* Update ready and Full Disk Access: the button sits on the line's centre, not its text
+   baseline. */
+.banner.update,
+.banner.ask {
   align-items: center;
+}
+.banner.ask {
+  background: var(--group);
+  border: 1px solid var(--hair);
+  color: var(--l2);
 }
 .about-problem {
   display: block;

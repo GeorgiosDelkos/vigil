@@ -2123,6 +2123,22 @@ describe("an update", () => {
     expect((again as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("asks for Full Disk Access only while macOS withholds it, and opens its pane", async () => {
+    shown = overview({ agent: null, needs_full_disk_access: true });
+    answer({ open_full_disk_access: () => null });
+    render(() => <App />);
+    const open = await screen.findByRole("button", { name: "Open System Settings" });
+    expect(screen.getByText(/Login items are not checked/)).toBeTruthy();
+    fireEvent.click(open);
+    expect(invoke).toHaveBeenCalledWith("open_full_disk_access");
+
+    shown = overview({ agent: null });
+    handlers.get("changed")?.({ payload: null });
+    await vi.waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Open System Settings" })).toBeNull(),
+    );
+  });
+
   it("offers no restart while none is ready", async () => {
     shown = overview({ agent: null });
     answer();

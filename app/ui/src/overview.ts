@@ -221,6 +221,8 @@ export type Overview = {
   /** Null when Rust could not read the disk; the main view then has no disk row. */
   readonly disk: Disk | null;
   readonly update: UpdateView;
+  /** Whether macOS keeps sweeps from reading login items until Vigil has Full Disk Access. */
+  readonly needs_full_disk_access: boolean;
 };
 
 /** The running version and the app's updates (app/src-tauri/src/update.rs). */

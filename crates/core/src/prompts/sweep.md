@@ -21,15 +21,24 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 - `mac/settings.json`: this Mac's protections, each as the line its tool printed:
   `system_integrity_protection`, `gatekeeper`, `filevault` and `firewall`. A key that is
   missing could not be read.
-- `mac/persistence.jsonl`: every launch agent and daemon outside `/System`, one per line. Each
-  has the property list's `path`, its `kind` (`launch_daemon` runs as root unless it names a
-  `user_name`, `launch_agent` runs for every user, `user_launch_agent` for this user), its
+- `mac/persistence.jsonl`: every launch agent and daemon outside `/System`, then the login items
+  and the apps that open at login, one per line. Each has its `path` (the property list's, or
+  for a `login_item` or `open_at_login` the app bundle's), its `kind` (`launch_daemon` runs as
+  root unless it names a `user_name`, `launch_agent` runs for every user, `user_launch_agent`
+  for this user; `app_launch_daemon` and `app_launch_agent` are the same, registered by the app
+  whose bundle holds the property list; `login_item` is an app inside another app that starts
+  at login; `open_at_login` is an app in the Open at Login list), its
   `label`, the `program` launchd starts and its `arguments`, the `scripts` an interpreter runs
   (its first argument that is a file path, unless inline code such as `-c` comes first, and,
   through `env`, an interpreter given by its full path and that interpreter's script),
   `run_at_load`, `keep_alive`, `disabled` (the property list's own key only), and the
-  `environment` it sets (names only, with values for `DYLD_` variables and `PATH`). An `error`
-  says the property list could not be read, with its `stamp` (size and time). The `program`
+  `environment` it sets (names only, with values for `DYLD_` variables and `PATH`). A
+  `login_item`, `open_at_login` and app-registered item has `login_items`, the two switches
+  System Settings > General > Login Items shows: `enabled` (the app or the user turned it on)
+  and `allowed` (the user lets it run in the background); it runs only while both are true. Its
+  `program` is the bundle's executable, or the bundle itself, `missing`, when the app is gone.
+  An `error` says the property list (or the app's `Info.plist`) could not be read, with its
+  `stamp` (size and time). The `program`
   and each of the `scripts` have a `signature`, which Vigil checked with `codesign`; its
   `status` is one of:
   - `apple`: signed by Apple.
@@ -147,9 +156,12 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     high for a root daemon that runs a replaceable, unverified or inline command, or a `DYLD_`
     variable; medium for an unverified agent or inline command that runs at load; low for a
     stale item whose program is missing under a folder only this user can write. Say in
-    `evidence` which fields you read. The fix is manual: `commands` stays empty, and `steps`
-    say how to check the item and remove it (`launchctl bootout` with the domain and label,
-    then move the property list to the Trash), so the user decides.
+    `evidence` which fields you read. An item whose `login_items` are not both true does not run
+    now: lower its severity one step, and say which switch is off. The fix is manual: `commands`
+    stays empty, and `steps` say how to check the item and remove it (`launchctl bootout` with
+    the domain and label, then move the property list to the Trash; for a `login_item`,
+    `open_at_login` or app-registered item, turn it off in System Settings > General > Login
+    Items, and remove the app if it is not wanted), so the user decides.
   - Never an issue for a file of the bundle on this Mac: use `setting` or `item`. Every
     issue on this Mac has `commands` empty.
 
