@@ -504,12 +504,6 @@ fn word_len(value: &str) -> usize {
         let end = rest
             .find([' ', '\t', ';', '&', '|', '"', '\''])
             .unwrap_or(rest.len());
-        // A `$` right before a quote opens `$'...'` or `$"..."`, taken on the next turn.
-        let end = if end > 0 && rest[..end].ends_with('$') && end < rest.len() {
-            end - 1
-        } else {
-            end
-        };
         if end == 0 {
             return len;
         }
@@ -907,10 +901,35 @@ mod tests {
                 "open https://localhost:3000/@vite/client",
                 "open https://localhost:3000/@vite/client",
             ),
+            // An empty `pass:`, a URL's plain user, a quote glued to an option's name (one word
+            // to the shell), and a value that goes on after its closing quote: shown.
+            ("openssl rsa -passin pass:", "openssl rsa -passin pass:"),
+            (
+                "git clone https://bob@github.com/x",
+                "git clone https://bob@github.com/x",
+            ),
+            ("tool --token\"abc123\"", "tool --token\"abc123\""),
+            ("TOKEN='abc'def", "TOKEN='abc'def"),
+            ("TOKEN=ab$'cd'", "TOKEN=ab$'cd'"),
+            ("echo key-cafe", "echo key-cafe"),
+            ("echo Build2Release", "echo Build2Release"),
+            // A short credential after its scheme, masked by the header's name alone.
+            (
+                "curl -H \"Authorization: Bearer abc123\"",
+                "curl -H \"Authorization: Bearer (hidden)\"",
+            ),
+            // An alias right after an operator, with no space.
+            ("x;alias pass=evil-helper", "x;alias pass=evil-helper"),
         ];
         for (line, shown) in cases {
             assert_eq!(mask(line), shown, "{line}");
         }
+        // The AWS secret shape, 40 characters of all three kinds with `/` and `+`, masked even
+        // with too little entropy for the base64 rule; with a `-` it is no such secret.
+        let aws = format!("{}A1/+", "a".repeat(36));
+        assert_eq!(mask(&format!("echo {aws}")), "echo (hidden)");
+        let dashed = format!("{}A1--", "a".repeat(36));
+        assert_eq!(mask(&format!("echo {dashed}")), format!("echo {dashed}"));
         // Hex secrets, built when the test runs so the source holds no key-shaped string.
         let hex64 = "0123456789abcdef".repeat(4);
         let hex40 = format!("{}01234567", "0123456789abcdef".repeat(2));
