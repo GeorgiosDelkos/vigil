@@ -161,6 +161,7 @@ export function overview(changes: Partial<Overview> = {}): Overview {
     problem: null,
     disk: null,
     update: { version: "0.1.0", checks: true, checked: null, problem: null, ready: null },
+    needs_full_disk_access: false,
     ...changes,
   };
 }

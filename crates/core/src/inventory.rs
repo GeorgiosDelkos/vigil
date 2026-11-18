@@ -411,6 +411,10 @@ pub enum InventorySource {
         /// `report.json`, which a `PathBuf` of such a name cannot be.
         path: String,
     },
+    /// Background Task Management's records on this Mac (login items, agents and daemons an
+    /// app registered from its own bundle, apps that open at login), of which one file or more
+    /// could not be read.
+    BackgroundItems,
     /// A GitHub repository's open alerts of one kind, by the name its file has
     /// (`code-scanning`), which `gh` could not fetch.
     Alerts {
@@ -461,6 +465,7 @@ impl InventorySource {
             Self::Setting { .. }
             | Self::LaunchFolder { .. }
             | Self::LaunchItem { .. }
+            | Self::BackgroundItems
             | Self::Alerts { .. }
             | Self::Workflows
             | Self::Workflow { .. }
@@ -485,6 +490,15 @@ impl InventorySource {
                 Subject::Item(item) if Path::new(item).parent() == Some(Path::new(path))
             ),
             Self::LaunchItem { path } => matches!(subject, Subject::Item(item) if item == path),
+            // Every item these records give is an app bundle, a file inside one, or a record
+            // that could not be placed; no launch folder item is, unless a folder on its path
+            // or its own name ends in `.app` (see `host::may_come_from_records`). A file that
+            // fails on every sweep keeps these issues open, which is the truth: none of its
+            // items was read.
+            Self::BackgroundItems => matches!(
+                subject,
+                Subject::Item(item) if host::may_come_from_records(Path::new(item))
+            ),
             Self::Alerts { name } => match subject {
                 Subject::Setting(key) => *key == github::alerts_key(name),
                 Subject::File(path) => *path == github::alerts_file(name),
@@ -525,7 +539,7 @@ impl InventorySource {
             Self::Lockfile { .. } | Self::LockfileWalk { .. } => Some("places with lockfiles"),
             Self::Setting { .. } => Some("settings"),
             Self::LaunchFolder { .. } => Some("launch folders"),
-            Self::LaunchItem { .. } => Some("launch items"),
+            Self::LaunchItem { .. } => Some("startup items"),
             Self::Alerts { .. } => Some("kinds of alerts"),
             Self::Workflow { .. } => Some("workflow files"),
             Self::MacOs
@@ -541,6 +555,7 @@ impl InventorySource {
             | Self::OsPackages
             | Self::DependencyGraph
             | Self::Workflows
+            | Self::BackgroundItems
             | Self::Unknown => None,
         }
     }
@@ -565,8 +580,9 @@ impl std::fmt::Display for InventorySource {
             Self::OsPackages => f.write_str("OS packages"),
             Self::DependencyGraph => f.write_str("the dependency graph"),
             Self::Setting { key } => write!(f, "the setting {key}"),
+            Self::BackgroundItems => f.write_str("login items"),
             Self::LaunchFolder { path } => write!(f, "launch folder {path}"),
-            Self::LaunchItem { path } => write!(f, "launch item {path}"),
+            Self::LaunchItem { path } => write!(f, "startup item {path}"),
             Self::Alerts { name } => write!(f, "{name} alerts"),
             Self::Workflows => f.write_str("the list of workflows"),
             Self::Workflow { name } => write!(f, "workflow {name}"),
@@ -705,6 +721,17 @@ pub enum InventoryError {
         /// The largest lockfile read, in bytes.
         limit: u64,
     },
+    /// macOS refused to list a folder only a process with Full Disk Access may list.
+    #[error(
+        "login items and the agents apps registered are not read: {} needs Full Disk Access; \
+         allow Vigil, or the terminal that runs it, in System Settings > Privacy & Security > \
+         Full Disk Access",
+        path.display()
+    )]
+    FullDiskAccess {
+        /// The folder.
+        path: PathBuf,
+    },
 }
 
 impl InventoryError {
@@ -735,7 +762,11 @@ impl InventoryError {
             | Self::NpmTree { .. }
             | Self::TooManyEntries { .. }
             | Self::TooLarge { .. }
-            | Self::CloudOnly { .. } => false,
+            | Self::CloudOnly { .. }
+            // Full Disk Access is the user's choice, which lasts: a Mac whose owner declines it
+            // could otherwise never be clear. Accepted downside, as for `Io` above: when access
+            // is taken away, the issues of what is in the folder read as resolved.
+            | Self::FullDiskAccess { .. } => false,
         }
     }
 
@@ -1190,6 +1221,11 @@ mod tests {
                 "the list of workflows",
                 "workflows",
             ),
+            (
+                InventorySource::BackgroundItems,
+                "login items",
+                "background_items",
+            ),
         ];
         for (source, text, kind) in names {
             assert_eq!(source.to_string(), text);
@@ -1197,6 +1233,34 @@ mod tests {
             assert_eq!(value, serde_json::json!({ "kind": kind }));
             assert_eq!(InventorySource::deserialize(&value).unwrap(), source);
         }
+    }
+
+    #[test]
+    fn failed_records_cover_the_items_they_could_have_produced() {
+        let records = InventorySource::BackgroundItems;
+        let login_item =
+            Subject::Item("/Applications/A.app/Contents/Library/LoginItems/H.app".into());
+        assert!(records.covers_issue(&login_item));
+        assert!(records.covers_issue(&Subject::Item("/Applications/Gone.app".into())));
+        let unplaced = Subject::Item("(unplaced) 4.d: (no location)".into());
+        assert!(
+            records.covers_issue(&unplaced),
+            "an unplaced record's text is not absolute"
+        );
+
+        let item = Subject::Item("/Library/LaunchAgents/a.plist".to_owned());
+        assert!(
+            !records.covers_issue(&item),
+            "a launch folder's item is read from the folder"
+        );
+        let named_app = Subject::Item("/Library/LaunchAgents/app".to_owned());
+        assert!(
+            !records.covers_issue(&named_app),
+            "only an extension counts"
+        );
+        let file = Subject::File("A.app/x".to_owned());
+        let setting = Subject::Setting("A.app".to_owned());
+        assert!(!records.covers_issue(&file) && !records.covers_issue(&setting));
     }
 
     #[test]
@@ -1266,7 +1330,7 @@ mod tests {
             (
                 agent,
                 serde_json::json!({"kind": "launch_item", "path": "/Library/LaunchAgents/a.plist"}),
-                "launch item /Library/LaunchAgents/a.plist",
+                "startup item /Library/LaunchAgents/a.plist",
             ),
             (
                 alerts,

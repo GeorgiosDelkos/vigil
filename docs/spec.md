@@ -383,7 +383,7 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 | File | What it holds | An issue names it as |
 |---|---|---|
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
-| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error` | `{"item": "<path of the property list>"}` |
+| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`) | `{"item": "<path of the property list or app bundle>"}` |
 
 - A debug build reads the two system folders under `VIGIL_TEST_LAUNCH_ROOT` when it is set,
   so the CLI's end-to-end tests check no launch item of the machine they run on (each sweep
@@ -418,6 +418,35 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
   inventory; any other failure marks that setting (`setting`), folder (`launch_folder`) or
   item (`launch_item`) unchecked.
 
+Background Task Management (added 2026-11-18):
+
+- The records are in `/private/var/db/com.apple.backgroundtaskmanagement`, `NSKeyedArchiver`
+  archives of the private `ItemRecord` class (`inventory/host/background.rs`). macOS 27.2
+  writes one file per user, `BackgroundItems-v18-<user>.btm`, beside an index without records;
+  earlier releases wrote one `BackgroundItems-v<N>.btm` for every user (the v13 and v16 files
+  an upgrade left behind have this layout). Only the files of the highest version are read,
+  and beside per-user files the index is not read, so a change to it cannot mark the records
+  unchecked.
+- The same item recorded for several users is one line. It runs if it runs for any of them,
+  so a record with both switches on wins; otherwise the first is kept. A record that cannot
+  be placed on disk is named `(unplaced) <identifier>: <its text>`, so only the same record
+  from several users merges. Its text is never an absolute path, so a failed read carries
+  its issue too.
+- Only a process with Full Disk Access may list the folder. macOS cannot grant it ahead of
+  time, so the app checks on every popover refresh (`needs_full_disk_access`) and shows a
+  banner that opens System Settings > Privacy & Security > Full Disk Access. The grant goes to
+  Vigil.app, whose sweeps run in its own process; a CLI sweep needs it for its terminal.
+  Without it the sweep notes it and goes on: the user's choice lasts, and counting it as a
+  failure would keep a Mac whose owner declines it from ever being clear.
+- Records of launch folder items (the legacy bit) are left out, since the folder's property
+  list is read anyway. Records of developers and apps group the items, and an app record
+  counts only while it is enabled, which puts it in Open at Login. An app's login item and
+  registered agent name a path inside the app, which is joined to the app's own record; the
+  archive gives them the base `file:///` instead.
+- A file that cannot be read marks `background_items` unchecked, which carries every open
+  issue about an app bundle or a file in one: those are the subjects these records give, and
+  no launch folder item is one unless its own name ends in `.app`.
+
 Accepted gaps, in the order planned:
 
 - A dismissed launch item shows again when one check of it fails: its key follows what it
@@ -430,8 +459,9 @@ Accepted gaps, in the order planned:
 - The `codesign` runs per file (up to six) are not atomic: a file swapped between them can
   be reported as another signer's. A one-time scan of a path the attacker writes can be
   dodged anyway.
-- Login items (Background Task Management), which need Full Disk Access; the owner chose to
-  ask for it when that check lands.
+- The Login Items switches of a launch folder item are not read, so an item turned off there
+  shows as it would run; and the agents in other users' `~/Library/LaunchAgents`, which the
+  records list, are not read.
 - Applications in `/Applications` outside Homebrew, for both CVE matching and the dylib scan.
 - Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
   programs without library validation. Until then a changed file inside a program's bundle,
