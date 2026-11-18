@@ -438,8 +438,10 @@ Startup files and root's programs (added 2026-11-18):
   as its lines, read through a link (dotfile managers link them) but never a FIFO. The value
   of every assignment is hidden, wherever on a line it is (after `;` or `||`, in quotes, in a
   comment, in a here-document, inside a command), with `launchctl setenv`'s and parameter
-  expansion defaults (`${T:=x}`). `PATH`, `FPATH` and `DYLD_` values are shown, and so is
-  each command a value runs, itself redacted (owner's decision, 2026-11-18, over a
+  expansion defaults (`${T:=x}`). Values that are code, or say where code comes from, are shown:
+  `PATH`, `FPATH`, zsh's `path` and `fpath`, `DYLD_`, the prompts, `PROMPT_COMMAND`, zsh's
+  `functions` and hook arrays, `BASH_ENV`, `ENV`, `ZDOTDIR`. So is each command a value runs,
+  itself redacted (owner's decision, 2026-11-18, over a
   path-and-hash listing the agent opens itself, and over whole files): the files hold tokens,
   and the bundle is kept with each sweep. Still shown: a value passed as an argument
   (`--token=x`) or written to a file, and one that closes the quotes around its assignment and
@@ -450,7 +452,11 @@ Startup files and root's programs (added 2026-11-18):
   backslash; a comment carries nothing over), and each is scanned knowing whether a byte is at
   the top level, in a comment or in quotes. A value nested in a comment or quotes ends where
   they do, and at the end of its physical line at the latest. A here-document's body is text,
-  each line on its own, quotes meaning nothing. A hidden value keeps its newlines (a line it
+  each line on its own, quotes meaning nothing, its commands shown when its word is unquoted
+  (the body then runs them). A crontab is read a line at a time as cron does (a `NAME = value`
+  line hides the rest of the line, a job's command is redacted as shell code on its own), and a
+  path list is shown as it is: neither joins lines on a quote. Still shown: a value `read`
+  takes from input (`read -r T <<EOF`), like one passed as an argument. A hidden value keeps its newlines (a line it
   spans reads `(hidden)`), so line numbers match the file. A logical line over 16 KiB, or
   commands nested more than 32 deep, are replaced by a `(not shown: ...)` note, which bounds
   the scan's quadratic cases and its recursion; the agent reports such a file, and one with a

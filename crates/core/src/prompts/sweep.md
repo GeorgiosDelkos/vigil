@@ -61,8 +61,11 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 
   The file ends with the files that run commands without a launch item, each with its `path`,
   its `kind` and its `lines`. Vigil replaced the value of every variable assignment with
-  `(hidden)`, wherever on a line it is, and the lines a quoted value spans; values of `PATH`,
-  `FPATH` and `DYLD_` variables are shown, and so is each command a value runs (`$(...)`).
+  `(hidden)`, wherever on a line it is, and the lines a quoted value spans. Shown whole are the
+  values that are code or say where code comes from: `PATH`, `FPATH` and zsh's `path` and
+  `fpath`, `DYLD_` variables, the prompts (`PS1`, `PROMPT`, `RPROMPT`), `PROMPT_COMMAND`, zsh's
+  `functions` and hook arrays, `BASH_ENV`, `ENV` and `ZDOTDIR`; in any other value, each command
+  it runs (`$(...)`) is shown. In a crontab, a `NAME = value` line hides its whole value.
   `truncated` says only the start was read; an `error` says it could not be read. The kinds:
   - `shell_startup`: a startup file of zsh or bash. One in the home folder runs as this user
     in every shell; one in `/etc` runs for every user who starts that shell, root's shells

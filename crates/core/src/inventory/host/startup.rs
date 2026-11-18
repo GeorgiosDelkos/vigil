@@ -42,6 +42,7 @@ use crate::cancel::Cancel;
 use crate::inventory::command;
 use crate::inventory::host::account::Account;
 use crate::inventory::host::stamp;
+use crate::inventory::host::startup::redact::Syntax;
 use crate::inventory::host::startup::redact::lines;
 
 mod redact;
@@ -124,6 +125,17 @@ pub(super) struct StartupFile {
     /// ([`Account::can_replace`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     replaceable: bool,
+}
+
+impl FileKind {
+    /// The syntax its lines are in.
+    fn syntax(self) -> Syntax {
+        match self {
+            Self::ShellStartup | Self::PeriodicScript => Syntax::Shell,
+            Self::Crontab => Syntax::Crontab,
+            Self::PathList => Syntax::PathList,
+        }
+    }
 }
 
 impl StartupFile {
@@ -232,7 +244,7 @@ fn read(kind: FileKind, path: &Path, root_run: Option<&Account>) -> Option<Start
                 path: path.to_string_lossy().into_owned(),
                 kind,
                 error: None,
-                lines: lines(&String::from_utf8_lossy(shown)),
+                lines: lines(&String::from_utf8_lossy(shown), kind.syntax()),
                 truncated,
                 stamp: truncated
                     .then(|| fs::metadata(path).ok().map(|meta| stamp(&meta)))
@@ -289,7 +301,9 @@ fn user_crontab(root: &Path, account: &Account, cancel: &Cancel) -> Option<Start
     };
     match command::run_any_status(&tool.to_string_lossy(), &["-l"], cancel) {
         Ok(None) => None,
-        Ok(Some(output)) if output.success => Some(file(None, lines(&output.stdout))),
+        Ok(Some(output)) if output.success => {
+            Some(file(None, lines(&output.stdout, Syntax::Crontab)))
+        }
         // What crontab(1) says, and exits 1 with, when the user has no crontab.
         Ok(Some(output)) if output.stderr.starts_with("crontab: no crontab for") => None,
         Ok(Some(output)) => Some(file(Some(output.detail), Vec::new())),
