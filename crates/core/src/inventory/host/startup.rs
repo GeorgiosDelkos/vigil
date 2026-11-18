@@ -1,15 +1,10 @@
 //! Files that run commands without a launch item: the shells' startup files, crontabs, and
 //! `periodic`'s scripts.
 //!
-//! Each file goes to the agent as its lines, with the literal value of every variable
-//! assignment hidden ([`redact`]): these files often hold tokens (`export GITHUB_TOKEN=...`),
-//! and the bundle is kept with each sweep's history (owner's decision, 2026-11-18, over a
-//! path-and-hash listing the agent would open itself, and over whole files). `PATH`, `FPATH`
-//! and `DYLD_` values are shown, as for launch items, and so is each command a value runs
-//! (`$(...)`, backticks), itself redacted: that is what runs. A token passed on a command line
-//! (`gh auth login --with-token abc`) is not an assignment and is shown, and so is a value
-//! that closes the quotes around its assignment and goes on outside them
-//! (`alias a='A='abc''`): the shell joins the two, but the scan ends the value at the quote.
+//! Each file goes to the agent as its lines, with its secrets masked ([`mask`]): these files
+//! often hold tokens (`export GITHUB_TOKEN=...`), and the bundle is kept with each sweep's
+//! history (owner's decision, 2026-11-18, over a path-and-hash listing the agent would open
+//! itself, and over whole files). Every command stays as written.
 //!
 //! What is read, under [`super::system_root`] for the system's files:
 //!
@@ -42,10 +37,9 @@ use crate::cancel::Cancel;
 use crate::inventory::command;
 use crate::inventory::host::account::Account;
 use crate::inventory::host::stamp;
-use crate::inventory::host::startup::redact::Syntax;
-use crate::inventory::host::startup::redact::lines;
+use crate::inventory::host::startup::mask::lines;
 
-mod redact;
+mod mask;
 
 /// The largest file read. Arbitrary: a long `.zshrc` is a few kB, and the limit keeps a planted
 /// file from being copied whole into every bundle.
@@ -112,7 +106,7 @@ pub(super) struct StartupFile {
     /// Why it could not be read; `lines` is then empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    /// Its lines, values hidden as the module docs say.
+    /// Its lines, secrets masked as the module docs say.
     lines: Vec<String>,
     /// Whether only the first [`FILE_LIMIT`] bytes were read.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -125,17 +119,6 @@ pub(super) struct StartupFile {
     /// ([`Account::can_replace`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     replaceable: bool,
-}
-
-impl FileKind {
-    /// The syntax its lines are in.
-    fn syntax(self) -> Syntax {
-        match self {
-            Self::ShellStartup | Self::PeriodicScript => Syntax::Shell,
-            Self::Crontab => Syntax::Crontab,
-            Self::PathList => Syntax::PathList,
-        }
-    }
 }
 
 impl StartupFile {
@@ -152,7 +135,7 @@ impl StartupFile {
         }
     }
 
-    /// What keys an issue about it: its shown lines, so changing a hidden token does not show a
+    /// What keys an issue about it: its shown lines, so changing a masked token does not show a
     /// dismissed issue again, and whether it could be replaced. Any other edit shows it again,
     /// an installer's added lines included: what the agent judged has changed. JSON, so no two
     /// files join into the same text.
@@ -244,7 +227,7 @@ fn read(kind: FileKind, path: &Path, root_run: Option<&Account>) -> Option<Start
                 path: path.to_string_lossy().into_owned(),
                 kind,
                 error: None,
-                lines: lines(&String::from_utf8_lossy(shown), kind.syntax()),
+                lines: lines(&String::from_utf8_lossy(shown)),
                 truncated,
                 stamp: truncated
                     .then(|| fs::metadata(path).ok().map(|meta| stamp(&meta)))
@@ -301,9 +284,7 @@ fn user_crontab(root: &Path, account: &Account, cancel: &Cancel) -> Option<Start
     };
     match command::run_any_status(&tool.to_string_lossy(), &["-l"], cancel) {
         Ok(None) => None,
-        Ok(Some(output)) if output.success => {
-            Some(file(None, lines(&output.stdout, Syntax::Crontab)))
-        }
+        Ok(Some(output)) if output.success => Some(file(None, lines(&output.stdout))),
         // What crontab(1) says, and exits 1 with, when the user has no crontab.
         Ok(Some(output)) if output.stderr.starts_with("crontab: no crontab for") => None,
         Ok(Some(output)) => Some(file(Some(output.detail), Vec::new())),

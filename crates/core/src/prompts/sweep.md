@@ -60,13 +60,10 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   user or owned by them (mode bits; ACLs are not read, so the absence proves nothing).
 
   The file ends with the files that run commands without a launch item, each with its `path`,
-  its `kind` and its `lines`. Vigil replaced the value of every variable assignment with
-  `(hidden)`, wherever on a line it is, and the lines a quoted value spans. Shown whole are the
-  values that are code or say where code comes from: `PATH`, `FPATH` and zsh's `path` and
-  `fpath`, `DYLD_` variables, the prompts (`PS1`, `PROMPT`, `RPROMPT`), `PROMPT_COMMAND`, zsh's
-  `functions` and hook arrays, `BASH_ENV`, `ENV` and `ZDOTDIR`; in any other value, each command
-  it runs (`$(...)`) is shown. In a crontab, a `NAME = value` line hides its whole value.
-  `truncated` says only the start was read; an `error` says it could not be read. The kinds:
+  its `kind` and its `lines`, copied as they are except that Vigil replaced with `(hidden)` each
+  word shaped like a secret (a token format, a JWT, a random-looking string) and the value of
+  each assignment or option whose name says it is secret (`TOKEN`, `KEY`, `SECRET`, `PASS`,
+  `AUTH`). `truncated` says only the start was read; an `error` says it could not be read. The kinds:
   - `shell_startup`: a startup file of zsh or bash. One in the home folder runs as this user
     in every shell; one in `/etc` runs for every user who starts that shell, root's shells
     included.
@@ -204,13 +201,11 @@ Write `findings.json` in this folder, following `findings.schema.json`:
       `&`) that is not a known tool's;
     - runs as root (`/etc`, `periodic_script`, `path_list`, a root line in `/etc/crontab`) and
       is `replaceable`, which is high;
-    - holds what Vigil could not show: a `(not shown: ...)` line, or a value that runs over
-      more than a few lines (lines that read `(hidden)` alone continue the value above), unless
-      its name says it is a key or certificate. You cannot see what such lines run, and a
-      planted file can use them to hide a command.
+    - runs a value it set, by `eval`, `sh -c`, `source` or as a command (`$X`), when that value
+      is `(hidden)`: you cannot see what it runs.
 
-    A line that only sets a value Vigil hid is not a finding: the value is not shown, and
-    holding a token in a startup file is the user's choice. Leave out lines a tool's installer
+    A line that only sets a value Vigil hid is not a finding: holding a token in a startup file
+    is the user's choice. Leave out lines a tool's installer
     writes (Homebrew's `brew shellenv`, `rustup`'s `. "$HOME/.cargo/env"`, `nvm`, `pyenv`,
     `conda`, `direnv` hooks) unless they point somewhere else than that tool's own folder.
     Severity: high for one that runs as root, a `replaceable` one, or a download run in every

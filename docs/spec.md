@@ -435,35 +435,21 @@ Startup files and root's programs (added 2026-11-18):
 - `mac/persistence.jsonl` ends with zsh's and bash's startup files (home and `/etc`, with
   `/etc/zshrc_Apple_Terminal`), `path_helper`'s `/etc/paths` and `/etc/paths.d`, this user's
   crontab (`crontab -l`), `/etc/crontab`, and `periodic`'s scripts (none on macOS 27.2), each
-  as its lines, read through a link (dotfile managers link them) but never a FIFO. The value
-  of every assignment is hidden, wherever on a line it is (after `;` or `||`, in quotes, in a
-  comment, in a here-document, inside a command), with `launchctl setenv`'s and parameter
-  expansion defaults (`${T:=x}`). Values that are code, or say where code comes from, are shown:
-  `PATH`, `FPATH`, zsh's `path` and `fpath`, `DYLD_`, the prompts, `PROMPT_COMMAND`, zsh's
-  `functions` and hook arrays, `BASH_ENV`, `ENV`, `ZDOTDIR`. So is each command a value runs,
-  itself redacted (owner's decision, 2026-11-18, over a
-  path-and-hash listing the agent opens itself, and over whole files): the files hold tokens,
-  and the bundle is kept with each sweep. Still shown: a value passed as an argument
-  (`--token=x`) or written to a file, and one that closes the quotes around its assignment and
-  goes on outside them.
-- Hiding follows the shell's lexing in both directions, since a value read too long hides a
-  command from the agent (`# TOKEN="` followed by `curl ... | sh`). Physical lines are joined
-  into the shell's logical lines first (an open quote, `$(`, `(` or `${`, or a trailing
-  backslash; a comment carries nothing over), and each is scanned knowing whether a byte is at
-  the top level, in a comment or in quotes. A value nested in a comment or quotes ends where
-  they do, and at the end of its physical line at the latest. A here-document's body is text,
-  each line on its own, quotes meaning nothing, its commands shown when its word is unquoted
-  (the body then runs them). A crontab is read a line at a time as cron does (a `NAME = value`
-  line hides the rest of the line, a job's command is redacted as shell code on its own), and a
-  path list is shown as it is: neither joins lines on a quote. Still shown: a value `read`
-  takes from input (`read -r T <<EOF`), like one passed as an argument. A hidden value keeps its newlines (a line it
-  spans reads `(hidden)`), so line numbers match the file. A logical line over 16 KiB, or
-  commands nested more than 32 deep, are replaced by a `(not shown: ...)` note, which bounds
-  the scan's quadratic cases and its recursion; the agent reports such a file, and one with a
-  value over more than a few lines. Property tests check both sides: a generated literal never
-  comes through, and a command after a closed line always does, here-documents included. A file's key is its shown lines,
-  so a new token does not show a dismissed issue again, but any other edit does. Root-run
-  files (`/etc`, `/etc/crontab`, `periodic`) say whether this user could replace them.
+  as its lines, read through a link (dotfile managers link them) but never a FIFO. Each line
+  is copied as it is, with secrets masked (`inventory/host/startup/mask.rs`): words shaped
+  like a secret (published token prefixes, JWTs, 32 hex digits or more, an AWS secret key,
+  and random-looking parts of a word: 20 characters or more with all three kinds, no `.`,
+  3.5 bits of entropy per character), and the value of an assignment or option whose name
+  says it is secret (`TOKEN`, `SECRET`, `PASS`, `AUTH`, `CREDENTIAL`, `API_KEY`). No shell is
+  parsed and nothing carries from one line to the next, so no line can hide another (owner's
+  decision, 2026-11-18). The first design hid every assignment's value with a shell lexer;
+  five reviews each found a line it read differently from zsh or bash, leaking a token or
+  letting a planted line (`# TOKEN="`) hide a later command. Accepted downside: a short
+  password under an innocent name (`DB=hunter2`) is shown. Rejected: whole files (tokens kept
+  with each sweep) and a path-and-hash listing the agent opens itself (it sees the tokens). A
+  file's key is its shown lines, so a new token does not show a dismissed issue again, but any
+  other edit does. Root-run files (`/etc`, `/etc/crontab`, `periodic`) say whether this user
+  could replace them.
 - An `id` that fails, or is not there, marks `account` unchecked, which carries the issues of
   this user's crontab, the one thing it keeps the sweep from reading. Daemons and `/etc` are
   still read, so their issues are not carried: a daemon whose only issue was being

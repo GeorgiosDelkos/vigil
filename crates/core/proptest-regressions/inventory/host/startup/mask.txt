@@ -4,4 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc 4f1981980d2a2518b5375e2ea85987e9728f5192520dd2ee3f3095b9e2667f9b # shrinks to prefix = "", name = "PS0", secret = "00aa00aa0a00", heredoc = false, quote = "", suffix = ""
+cc e89863428b450e41dac3994e8725c02babd669ec3bb6dc136be866d2d6c2b9c9 # shrinks to prefix = "", token = "SG.", body = "a0AA0AaaaaA0a0AA", suffix = "", space = ":"
