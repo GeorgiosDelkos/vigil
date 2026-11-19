@@ -322,8 +322,8 @@ fn safari_extensions(inventory: &mut Inventory, root: &Path, cancel: &Cancel) ->
         let listed = match command::run(&tool.to_string_lossy(), &["-mAv", "-p", point], cancel) {
             Ok(Some(listed)) => listed,
             Ok(None) => return items,
-            // A `pluginkit` that fails for one point fails for the others, and one failure
-            // covers every `.appex`.
+            // One failure already covers every `.appex`; the other points would add time,
+            // not coverage.
             Err(e) => {
                 inventory.fail(InventorySource::SafariExtensions, e);
                 return items;
@@ -2001,6 +2001,7 @@ TeamIdentifier=not set
                 .failed
                 .contains(&InventorySource::SafariExtensions)
         );
+        assert_eq!(inventory.problems.len(), 1, "stops at the first failure");
         // One that is not there lists none, and fails nothing.
         let mut inventory = Inventory::default();
         let none = safari_extensions(&mut inventory, &tmp.path().join("x"), &Cancel::new());

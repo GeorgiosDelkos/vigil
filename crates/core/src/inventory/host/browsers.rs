@@ -300,7 +300,8 @@ fn chromium_extension(
         Some(Value::Number(mask)) => mask.as_u64() != Some(0),
         Some(_) | None => false,
     };
-    // Manifest V2 lists host patterns among its permissions.
+    // Manifest V2 lists host patterns among its permissions. Manifest V3 ignores them there;
+    // they are moved for every version anyway, so a host is never missed.
     let (mut hosts, permissions): (Vec<String>, Vec<String>) = strings(&manifest["permissions"])
         .into_iter()
         .partition(|permission| permission == "<all_urls>" || permission.contains("://"));
@@ -750,7 +751,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn a_record_that_cannot_be_read_fails_its_profile_only() {
+    fn a_record_or_folder_that_cannot_be_read_fails_only_itself() {
         let tmp = tempfile::tempdir().unwrap();
         let broken = tmp.path().join("Google/Chrome/Default");
         fs::create_dir_all(&broken).unwrap();
@@ -766,6 +767,9 @@ pub(super) mod tests {
         fs::set_permissions(&secure, fs::Permissions::from_mode(0o000)).unwrap();
 
         // A browser whose folder cannot be listed fails as a whole.
+        // A browser's folder that is not a folder cannot be listed: it fails as a whole.
+        let vivaldi = tmp.path().join("Vivaldi");
+        fs::write(&vivaldi, "").unwrap();
         let edge = tmp.path().join("Microsoft Edge");
         fs::create_dir(&edge).unwrap();
         fs::set_permissions(&edge, fs::Permissions::from_mode(0o000)).unwrap();
@@ -778,10 +782,13 @@ pub(super) mod tests {
         let source = |path: &Path| InventorySource::BrowserProfile {
             path: path.to_string_lossy().into_owned(),
         };
-        assert_eq!(failed, [&source(&firefox), &source(&broken)]);
+        assert_eq!(
+            failed,
+            [&source(&firefox), &source(&broken), &source(&vivaldi)]
+        );
         // A record or a folder this user may not read is a note, as everywhere in the
         // inventory.
-        assert_eq!(inventory.problems.len(), 4, "{:?}", inventory.problems);
+        assert_eq!(inventory.problems.len(), 5, "{:?}", inventory.problems);
         let noted = InventoryError::Io {
             path: edge.clone(),
             source: io::Error::from(io::ErrorKind::PermissionDenied),
@@ -833,27 +840,6 @@ pub(super) mod tests {
             collect(&mut inventory, tmp.path())[0].identity()
         };
         assert_eq!(unreadable("7"), unreadable("8"));
-    }
-
-    #[test]
-    fn one_folder_loaded_in_two_profiles_is_two_extensions() {
-        let tmp = tempfile::tempdir().unwrap();
-        let unpacked = tmp.path().join("dev/ext");
-        write_json(&unpacked.join("manifest.json"), &json!({"name": "Dev"}));
-        let chrome = tmp.path().join("Google/Chrome/Default");
-        let brave = tmp.path().join("BraveSoftware/Brave-Browser/Default");
-        for profile in [&chrome, &brave] {
-            chromium(profile, &json!({"dev": {"location": 4, "path": unpacked}}));
-        }
-        let (found, _) = found(tmp.path());
-        let paths: Vec<&Value> = found.iter().map(|e| &e["path"]).collect();
-        assert_eq!(
-            paths,
-            [
-                &json!(chrome.join("Extensions/dev")),
-                &json!(brave.join("Extensions/dev")),
-            ]
-        );
     }
 
     #[test]

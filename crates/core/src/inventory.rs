@@ -423,7 +423,8 @@ pub enum InventorySource {
     /// A browser profile on this Mac whose record of its extensions could not be read, or a
     /// browser's folder of profiles that could not be listed.
     BrowserProfile {
-        /// The profile's folder, decoded lossily as the extensions' paths are.
+        /// The profile's folder, or the browser's folder of profiles, decoded lossily as the
+        /// extensions' paths are.
         path: String,
     },
     /// Which account the sweep runs as, from `id`: without it, no program that runs as root is
