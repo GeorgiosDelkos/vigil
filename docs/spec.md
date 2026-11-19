@@ -664,8 +664,9 @@ Accepted gaps, in the order planned:
 Dylib hijacking (added 2026-11-19, phase 6 of the KnockKnock and Dylib Hijack Scanner review;
 the owner asked for it to be designed and built without a further stop):
 
-- **What is read.** The program each startup item runs (`program` in `mac/persistence.jsonl`)
-  and the main executable of each app the inventory listed in `/Applications` and
+- **What is read.** What each startup item runs (`program` in `mac/persistence.jsonl`, and the
+  `scripts` an interpreter or `env` runs, since `env /path/tool` loads `tool`; a kernel
+  extension is left out, as the kernel loads it, not the loader), and the main executable of each app the inventory listed in `/Applications` and
   `~/Applications` (its `Info.plist`'s `CFBundleExecutable`), each once, named by its real
   path, so its issue keeps its key whichever item names it first. A relative program path
   is not read. Vigil reads each one's Mach-O header, load commands and code signature itself
@@ -677,13 +678,19 @@ the owner asked for it to be designed and built without a further stop):
   program run as root) and the program does not enforce library validation. Validation is
   enforced for a signature flagged `library-validation`, the hardened runtime without
   `com.apple.security.cs.disable-library-validation`, or a platform binary; with it, the
-  loader refuses a library not signed by Apple or the program's own team. Anyone who signs a
+  loader refuses a library not signed by Apple or the program's own team. The entitlement is
+  read from both the XML and the DER blob `codesign` writes; either one turning validation off
+  counts, so a program whose two forms disagree is listed. Anyone who signs a
   file can set the code directory's platform byte, and the kernel honors it only for Apple's
-  own code, so the claim counts only for a program on the sealed system volume. The places are a weak load
+  own code, so the claim counts only for a program on the sealed system volume, and a code
+  directory too short to hold the byte is malformed. `runs_as_root` holds for a launch daemon
+  that names no other user and for a system extension (a driver, `.dext`, runs as
+  `_driverkit`). The places are a weak load
   (`LC_LOAD_WEAK_DYLIB`) of a library that is not there (`weak_missing`: every place it looks),
   and an `@rpath/` load found only in a later `LC_RPATH` folder (`earlier_rpath`: the earlier
   folders). `@executable_path` and `@loader_path`, bare or with a path after them, are the
-  program's folder, since only main executables are read. The shared cache holds Apple's
+  program's folder, since only main executables are read; a path after them is joined as text,
+  so `@executable_path//lib` stays under the folder. The shared cache holds Apple's
   libraries off disk, and Vigil cannot ask the loader what it holds (`unsafe` is forbidden):
   on the sealed volume (`/System` but `/System/Volumes`, `/usr` but `/usr/local`, `/bin`,
   `/sbin`), a library linked by absolute path counts as found, and so does the Swift runtime
@@ -699,8 +706,9 @@ the owner asked for it to be designed and built without a further stop):
   one this user may not read (root's `/Library/PrivilegedHelperTools`, another user's files)
   or that does not hold together is a note. Without the account (`id` failed) nothing is
   listed and every program's `load_commands` is unchecked, which carries its issue. A folder
-  of apps that could not be listed (`application_folder`) carries the issues of the programs
-  under it; one whose apps' versions were not read because `brew` failed (`cask_apps`) does
+  of apps that could not be listed (`application_folder`) carries the issues of the apps'
+  executables under it (`<app>/Contents/MacOS/<name>`) and nothing else, since an app's login
+  items are read from their own records; one whose apps' versions were not read because `brew` failed (`cask_apps`) does
   not, since its executables were still read.
 - **Not read:** the libraries those programs load in turn, an app's other executables
   (helpers, plug-ins, XPC services), loads relative to the working directory, the loader's

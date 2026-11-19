@@ -238,7 +238,7 @@ fn places(name: &str, rpaths: &[String], folder: &Path) -> Vec<PathBuf> {
             .strip_prefix("@executable_path/")
             .or_else(|| path.strip_prefix("@loader_path/"));
         match relative {
-            Some(relative) => Some(normal(&folder.join(relative))),
+            Some(relative) => Some(normal(&under(folder, relative))),
             None if path.starts_with('/') => Some(normal(Path::new(path))),
             None => None,
         }
@@ -247,10 +247,17 @@ fn places(name: &str, rpaths: &[String], folder: &Path) -> Vec<PathBuf> {
         Some(rest) => rpaths
             .iter()
             .filter_map(|rpath| expand(rpath))
-            .map(|rpath| normal(&rpath.join(rest)))
+            .map(|rpath| normal(&under(&rpath, rest)))
             .collect(),
         None => expand(name).into_iter().collect(),
     }
+}
+
+/// `relative` under `folder`, as the loader joins them, by text: a slash at its start
+/// (`@executable_path//lib`) keeps it under the folder, where `Path::join` would start over
+/// at the root.
+fn under(folder: &Path, relative: &str) -> PathBuf {
+    folder.join(relative.trim_start_matches('/'))
 }
 
 /// Whether `path` is on the sealed system volume, which only Apple writes: under `/System`
@@ -618,6 +625,12 @@ mod tests {
             "relative to the working directory"
         );
 
+        // A slash after the token keeps the place under the folder, as the loader joins text.
+        let doubled = ["@executable_path//lib".to_owned()];
+        assert_eq!(
+            super::places("@rpath//z.dylib", &doubled, folder),
+            [folder.join("lib/z.dylib")]
+        );
         let bare = ["@executable_path".to_owned()];
         assert_eq!(
             super::places("@rpath/z.dylib", &bare, folder),

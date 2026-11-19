@@ -251,16 +251,31 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
 /// The programs the dylib check reads: what each startup item runs, then the main executable of
 /// each app the inventory found.
 fn dylib_programs(items: &[Item], apps: &[PathBuf]) -> Vec<dylibs::Program> {
-    // A relative path is one launchd does not resolve the way Vigil could (its signature is
-    // already `unreadable`), so it is not read against Vigil's own folder.
-    let item_programs = items.iter().filter_map(|item| {
-        let program = item.program.as_ref().filter(|p| p.path.is_absolute())?;
-        Some(dylibs::Program {
-            path: program.path.clone(),
-            used_by: item.path.clone(),
-            as_root: item.runs_as_root(),
-        })
-    });
+    let item_programs = items
+        .iter()
+        // The kernel loads a kernel extension, not the loader, so its loads decide nothing.
+        .filter(|item| !matches!(item.kind, ItemKind::KernelExtension))
+        .flat_map(|item| {
+            // A system extension runs as root too, but a driver (`.dext`) as `_driverkit`.
+            let system_extension = matches!(item.kind, ItemKind::SystemExtension)
+                && Path::new(&item.path)
+                    .extension()
+                    .is_none_or(|e| e != "dext");
+            let as_root = item.runs_as_root() || system_extension;
+            // The program, and the files an interpreter or `env` runs, of which a Mach-O tool
+            // (`env /Users/me/bin/tool`) is what the loader loads. A relative path is one
+            // launchd does not resolve the way Vigil could (its signature is already
+            // `unreadable`), so it is not read against Vigil's own folder.
+            item.program
+                .iter()
+                .chain(&item.scripts)
+                .filter(|program| program.path.is_absolute())
+                .map(move |program| dylibs::Program {
+                    path: program.path.clone(),
+                    used_by: item.path.clone(),
+                    as_root,
+                })
+        });
     let app_programs = apps.iter().filter_map(|app| match bundle_executable(app) {
         Ok(Bundled::Program(path)) => Some(dylibs::Program {
             path,
@@ -1724,6 +1739,56 @@ TeamIdentifier=not set
         let strings = format!("<string>{strings}</string>");
         let body = format!("<key>ProgramArguments</key><array>{strings}</array>{extra}");
         read(ItemKind::LaunchDaemon, &plist(dir, name, &body))
+    }
+
+    #[test]
+    fn the_dylib_check_reads_what_the_loader_loads_with_the_rights_it_runs_with() {
+        let program = |path: &str| Program {
+            path: PathBuf::from(path),
+            signature: Signature::Missing,
+            replaceable: false,
+        };
+        let item = |kind, path: &str, runs: &str, scripts: &[&str]| {
+            let mut item = Item::unread(kind, path.to_owned(), String::new(), None);
+            item.program = Some(program(runs));
+            item.scripts = scripts.iter().map(|s| program(s)).collect();
+            item
+        };
+        let items = [
+            item(
+                ItemKind::LaunchDaemon,
+                "/L/d.plist",
+                "/usr/bin/env",
+                &["/opt/tool"],
+            ),
+            item(ItemKind::LaunchAgent, "/L/a.plist", "relative/tool", &[]),
+            item(
+                ItemKind::KernelExtension,
+                "/Library/Extensions/K.kext",
+                "/K/K",
+                &[],
+            ),
+            item(
+                ItemKind::SystemExtension,
+                "/A.app/x.systemextension",
+                "/S/x",
+                &[],
+            ),
+            item(ItemKind::SystemExtension, "/A.app/d.dext", "/S/d", &[]),
+        ];
+        let programs: Vec<String> = dylib_programs(&items, &[])
+            .into_iter()
+            .map(|p| format!("{} {} {}", p.path.display(), p.used_by, p.as_root))
+            .collect();
+        assert_eq!(
+            programs,
+            [
+                "/usr/bin/env /L/d.plist true",
+                "/opt/tool /L/d.plist true",
+                "/S/x /A.app/x.systemextension true",
+                "/S/d /A.app/d.dext false",
+            ]
+        );
     }
 
     #[test]

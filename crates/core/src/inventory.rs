@@ -577,11 +577,14 @@ impl InventorySource {
             Self::LaunchItem { path } | Self::LoadCommands { path } => {
                 matches!(subject, Subject::Item(item) if item == path)
             }
-            // An app's executable is under it, so a folder that was not listed carries the
-            // dylib issues of the apps in it.
+            // An app's executable (`<app>/Contents/MacOS/<name>`) is under it, so a folder that
+            // was not listed carries the dylib issues of the apps in it, and nothing else: an
+            // app's login items are read from Background Task Management.
             Self::ApplicationFolder { path } => matches!(
                 subject,
                 Subject::Item(item) if Path::new(item).starts_with(path)
+                    && Path::new(item).parent().and_then(Path::file_name)
+                        == Some(std::ffi::OsStr::new("MacOS"))
             ),
             // Every item these records give is an app bundle, a file inside one, or a record
             // that could not be placed; no launch folder item is, unless a folder on its path
@@ -1545,6 +1548,11 @@ mod tests {
         };
         assert!(folder.covers_issue(&item(program)));
         assert!(!folder.covers_issue(&item("/Applications2/A.app/Contents/MacOS/A")));
+        let login_item = "/Applications/A.app/Contents/Library/LoginItems/H.app";
+        assert!(
+            !folder.covers_issue(&item(login_item)),
+            "read from its own records"
+        );
         assert!(!folder.covers_issue(&Subject::Setting("gatekeeper".into())));
     }
 

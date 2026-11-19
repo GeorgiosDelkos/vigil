@@ -87,8 +87,10 @@ const CPU_TYPE_X86_64: u32 = 0x0100_0007;
 const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
 const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
 const CSMAGIC_EMBEDDED_ENTITLEMENTS: u32 = 0xfade_7171;
+const CSMAGIC_EMBEDDED_DER_ENTITLEMENTS: u32 = 0xfade_7172;
 const CSSLOT_CODEDIRECTORY: u32 = 0;
 const CSSLOT_ENTITLEMENTS: u32 = 5;
+const CSSLOT_DER_ENTITLEMENTS: u32 = 7;
 const CS_REQUIRE_LV: u32 = 0x2000;
 const CS_RUNTIME: u32 = 0x1_0000;
 
@@ -285,6 +287,10 @@ fn read_validation(file: &std::fs::File, at: u64, len: u64) -> Result<Validation
     if be32(&directory, 0) != CSMAGIC_CODEDIRECTORY {
         return Err(malformed("its code directory has the wrong magic"));
     }
+    // Shorter than `end_earliest` (44 bytes), byte 38 would be the next blob's.
+    if be32(&directory, 4) < 44 {
+        return Err(malformed("its code directory is too short"));
+    }
     let flags = be32(&directory, 12);
     let platform = directory[38] != 0;
     let found = |flagged| Validation { flagged, platform };
@@ -295,24 +301,54 @@ fn read_validation(file: &std::fs::File, at: u64, len: u64) -> Result<Validation
         return Ok(found(false));
     }
 
-    let Some(entitlements_at) = slot(CSSLOT_ENTITLEMENTS) else {
-        return Ok(found(true));
+    // The entitlements come as XML and, from recent `codesign`, also as DER. Either one
+    // turning validation off counts, so a program whose two forms disagree is listed rather
+    // than missed.
+    let entitlements = |slot_at: Option<u64>, magic: u32| -> Result<Option<Vec<u8>>, ReadError> {
+        let Some(at) = slot_at else {
+            return Ok(None);
+        };
+        let header = blob(at, 8)?;
+        let length = be32(&header, 4);
+        if be32(&header, 0) != magic || !(8..=ENTITLEMENTS_LIMIT).contains(&length) {
+            return Err(malformed("its entitlements blob is not one"));
+        }
+        blob(at + 8, u64::from(length) - 8).map(Some)
     };
-    let header = blob(entitlements_at, 8)?;
-    let length = be32(&header, 4);
-    if be32(&header, 0) != CSMAGIC_EMBEDDED_ENTITLEMENTS
-        || !(8..=ENTITLEMENTS_LIMIT).contains(&length)
-    {
-        return Err(malformed("its entitlements blob is not one"));
-    }
-    let xml = blob(entitlements_at + 8, u64::from(length) - 8)?;
-    let entitlements: plist::Dictionary = plist::from_bytes(&xml)
-        .map_err(|e| malformed(&format!("its entitlements do not parse: {e}")))?;
-    let disabled = entitlements
-        .get(DISABLE_LIBRARY_VALIDATION)
-        .and_then(plist::Value::as_boolean)
-        .unwrap_or(false);
-    Ok(found(!disabled))
+    let xml = entitlements(slot(CSSLOT_ENTITLEMENTS), CSMAGIC_EMBEDDED_ENTITLEMENTS)?;
+    let der = entitlements(
+        slot(CSSLOT_DER_ENTITLEMENTS),
+        CSMAGIC_EMBEDDED_DER_ENTITLEMENTS,
+    )?;
+    let xml_disables = match xml {
+        Some(xml) => {
+            let entitlements: plist::Dictionary = plist::from_bytes(&xml)
+                .map_err(|e| malformed(&format!("its entitlements do not parse: {e}")))?;
+            entitlements
+                .get(DISABLE_LIBRARY_VALIDATION)
+                .and_then(plist::Value::as_boolean)
+                .unwrap_or(false)
+        }
+        None => false,
+    };
+    let der_disables = der.is_some_and(|der| der_sets_true(&der, DISABLE_LIBRARY_VALIDATION));
+    Ok(found(!(xml_disables || der_disables)))
+}
+
+/// Whether DER entitlements set `key` to true: its `UTF8String` (tag 0x0c, a one-byte length,
+/// as every entitlement name is under 128 bytes) followed at once by `BOOLEAN TRUE` (01 01 ff),
+/// the pair each entitlement's `SEQUENCE` holds. A search for that byte run is enough: the
+/// key's own bytes cannot hold it.
+fn der_sets_true(der: &[u8], key: &str) -> bool {
+    let Ok(len) = u8::try_from(key.len()) else {
+        return false;
+    };
+    let pattern: Vec<u8> = [0x0c, len]
+        .into_iter()
+        .chain(key.bytes())
+        .chain([0x01, 0x01, 0xff])
+        .collect();
+    der.windows(pattern.len()).any(|window| window == pattern)
 }
 
 /// The string a load command holds at the offset its third field gives, up to its NUL.
@@ -518,6 +554,7 @@ mod tests {
     fn directory(flags: u32, platform: u8) -> Vec<u8> {
         let mut out = vec![0; 44];
         out[..4].copy_from_slice(&CSMAGIC_CODEDIRECTORY.to_be_bytes());
+        out[4..8].copy_from_slice(&44_u32.to_be_bytes());
         out[12..16].copy_from_slice(&flags.to_be_bytes());
         out[38] = platform;
         out
@@ -567,6 +604,28 @@ mod tests {
             (CSSLOT_ENTITLEMENTS, entitlements(&xml("<false/>"))),
         ]);
         assert_eq!(validation_of(&kept), (true, false));
+
+        // The DER form, as `codesign` writes it (checked on macOS 27.2), counts on its own.
+        let key = DISABLE_LIBRARY_VALIDATION.as_bytes();
+        let der = |value: &[u8]| {
+            let mut body = vec![0x30, 0x35, 0x0c, u8::try_from(key.len()).unwrap()];
+            body.extend(key);
+            body.extend(value);
+            let mut blob = CSMAGIC_EMBEDDED_DER_ENTITLEMENTS.to_be_bytes().to_vec();
+            blob.extend(u32::try_from(8 + body.len()).unwrap().to_be_bytes());
+            blob.extend(body);
+            blob
+        };
+        let der_only = superblob(&[
+            (CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0)),
+            (CSSLOT_DER_ENTITLEMENTS, der(&[0x01, 0x01, 0xff])),
+        ]);
+        assert_eq!(validation_of(&der_only), (false, false));
+        let der_false = superblob(&[
+            (CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0)),
+            (CSSLOT_DER_ENTITLEMENTS, der(&[0x01, 0x01, 0x00])),
+        ]);
+        assert_eq!(validation_of(&der_false), (true, false));
     }
 
     #[test]
@@ -590,6 +649,12 @@ mod tests {
         assert_eq!(
             detail(superblob(&[(CSSLOT_CODEDIRECTORY, directory_magic)])),
             "its code directory has the wrong magic"
+        );
+        let mut too_short = directory(0, 1);
+        too_short[4..8].copy_from_slice(&40_u32.to_be_bytes());
+        assert_eq!(
+            detail(superblob(&[(CSSLOT_CODEDIRECTORY, too_short)])),
+            "its code directory is too short"
         );
         let short = superblob(&[(CSSLOT_CODEDIRECTORY, vec![0; 8])]);
         assert_eq!(
