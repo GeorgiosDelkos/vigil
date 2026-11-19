@@ -22,12 +22,16 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   `system_integrity_protection`, `gatekeeper`, `filevault` and `firewall`. A key that is
   missing could not be read.
 - `mac/persistence.jsonl`: every launch agent and daemon outside `/System`, then the login items
-  and the apps that open at login, one per line. Each has its `path` (the property list's, or
-  for a `login_item` or `open_at_login` the app bundle's), its `kind` (`launch_daemon` runs as
+  and the apps that open at login, then the kernel and system extensions, one per line. Each has
+  its `path` (the property list's, for a `login_item` or `open_at_login` the app bundle's, for
+  an extension its bundle's), its `kind` (`launch_daemon` runs as
   root unless it names a `user_name`, `launch_agent` runs for every user, `user_launch_agent`
   for this user; `app_launch_daemon` and `app_launch_agent` are the same, registered by the app
   whose bundle holds the property list; `login_item` is an app inside another app that starts
-  at login; `open_at_login` is an app in the Open at Login list), its
+  at login; `open_at_login` is an app in the Open at Login list; `kernel_extension` is a
+  `.kext` in `/Library/Extensions`, code the kernel loads once the user allows it;
+  `system_extension` is one an app installed, which runs as root, named by its bundle inside
+  that app), its
   `label`, the `program` launchd starts and its `arguments`, the `scripts` an interpreter runs
   (its first argument that is a file path, unless inline code such as `-c` comes first, and,
   through `env`, an interpreter given by its full path and that interpreter's script),
@@ -36,7 +40,13 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   `login_item`, `open_at_login` and app-registered item has `login_items`, the two switches
   System Settings > General > Login Items shows: `enabled` (the app or the user turned it on)
   and `allowed` (the user lets it run in the background); it runs only while both are true. Its
-  `program` is the bundle's executable, or the bundle itself, `missing`, when the app is gone.
+  `program` is the bundle's executable, or the bundle itself, `missing`, when the app is gone;
+  an extension's is its bundle's executable too (for a `system_extension`, of the copy macOS
+  runs). A `system_extension` has `system_extension`, what macOS records of it: its
+  `identifier`, the `team` the app claimed, its `categories` (`network_extension` sees or
+  filters network traffic, `endpoint_security` sees every process and file event,
+  `driver_extension` drives hardware) and its `state`: it runs only when `activated_enabled`,
+  and `activated_waiting_for_user` waits for the user to allow it in System Settings.
   An `error` says the property list (or the app's `Info.plist`) could not be read, with its
   `stamp` (size and time). The `program`
   and each of the `scripts` have a `signature`, which Vigil checked with `codesign`; its
@@ -172,6 +182,19 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     - its label, path and program do not belong together (a label that imitates Apple's
       `com.apple.` for a program that is not Apple's);
     - its property list could not be read (`error`): launchd may still load it;
+    - it is a `kernel_extension` or `system_extension` whose program is neither `apple` nor
+      `apple_issued` with a `developer_id` or `app_store` certificate, or whose `team` is not
+      the program's: macOS loads one signed otherwise only with System Integrity Protection
+      lowered, so it is broken, tampered with, or a sign that protection was turned off. A
+      kernel extension that is signed so is still worth a `low` issue: Apple deprecated them,
+      and it runs with the kernel's full power. One with no `program` is codeless: its
+      `Info.plist` only matches a driver to devices, and Vigil did not check its signature, so
+      report it (`low`) only when its name or path looks out of place. An `endpoint_security`
+      or `network_extension` from a team that does not match software the user evidently
+      installed (its app's path and identifier) is high, since it sees every process, file or
+      connection; a `driver_extension` so is medium, since it runs as a driver for USB, PCI or
+      input devices. A `system_extension` whose `run_at_load` is false (its `state` is not
+      `activated_enabled`) does not run now: lower its severity one step and give its state;
     - a program or script it runs as root is `replaceable`: any process of this user can
       become root through it, so this is high.
 
@@ -187,8 +210,11 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     switch is off. The fix is manual: `commands` stays empty, and `steps` say how to check the
     item and remove it (`launchctl bootout` with the domain and label, then move the property
     list to the Trash; for a `login_item`, `open_at_login` or app-registered item, turn it off
-    in System Settings > General > Login Items, and remove the app if it is not wanted), so the
-    user decides.
+    in System Settings > General > Login Items, and remove the app if it is not wanted; for a
+    `kernel_extension`, move the `.kext` out of `/Library/Extensions` with an administrator's
+    password and restart; for a `system_extension`, turn it off in System Settings > General >
+    Login Items & Extensions, or move the app that installed it to the Trash, which removes the
+    extension), so the user decides.
 
     For a `shell_startup`, `crontab`, `periodic_script` or `path_list` file, report it when a
     line:

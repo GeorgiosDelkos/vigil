@@ -258,7 +258,7 @@ fn user_entries(archive: &Archive<'_>, records: &[&Dictionary]) -> Vec<Entry> {
 
 /// The path of a `file://` URL with an empty host, without the trailing `/` a folder's URL
 /// has.
-fn file_path(url: &str) -> PathBuf {
+pub(super) fn file_path(url: &str) -> PathBuf {
     let path = url.strip_prefix("file://").unwrap_or(url);
     let path = path
         .strip_suffix('/')

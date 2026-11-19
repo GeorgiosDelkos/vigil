@@ -182,7 +182,8 @@ struct Finding { key: FindingKey, target: TargetId, advisory_ids: Vec<String>, c
   failed source could have produced, unless this sweep reported an issue about the same
   subject (decided 2026-11-17). Each failed source covers only what it failed to read: its
   setting for `setting` (a Mac settings tool, or a GitHub setting), the items directly in the
-  folder for `launch_folder`, its item for `launch_item`, the setting and file of one kind of
+  folder for `launch_folder`, its item for `launch_item`, every system extension for
+  `system_extensions`, the setting and file of one kind of
   alerts for `alerts`, the workflow files for `workflows` and one for `workflow`. Never a whole
   kind: a failure that repeats on every sweep (a tool that always times out, a program too
   large to hash in time) would keep every issue of the kind open, a removed launch agent's
@@ -383,7 +384,7 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 | File | What it holds | An issue names it as |
 |---|---|---|
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
-| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then shell startup files, crontabs and `periodic` scripts as their lines, assignment values hidden | `{"item": "<path of the property list, app bundle or file>"}` |
+| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then each `.kext` in `/Library/Extensions` and each system extension `/Library/SystemExtensions/db.plist` records, with what it records. Then shell startup files, crontabs and `periodic` scripts as their lines, assignment values hidden | `{"item": "<path of the property list, app bundle, extension or file>"}` |
 
 - A debug build reads the two system folders under `VIGIL_TEST_LAUNCH_ROOT` when it is set,
   so the CLI's end-to-end tests check no launch item of the machine they run on (each sweep
@@ -503,6 +504,36 @@ Background Task Management (added 2026-11-18):
   issue about an app bundle or a file in one: those are the subjects these records give, and
   no launch folder item is one unless its own name ends in `.app`.
 
+Kernel and system extensions (added 2026-11-19):
+
+- Each `.kext` bundle in `/Library/Extensions` is a `kernel_extension` item, checked as a
+  bundle: its `Info.plist`'s `CFBundleExecutable` under `Contents/MacOS`. Other entries there
+  are skipped, since the kernel loads nothing else. A codeless kext (its `Info.plist` names no
+  executable and only matches a driver to devices) has no `program`; its signature, on the
+  bundle, is not checked, since signatures are read for regular files only. It is keyed by
+  its `Info.plist`'s content, so a replaced one shows again.
+  `/System/Library/Extensions` is on the sealed system volume and left out, as
+  `/System/Library/Launch*` is. Kexts loaded from elsewhere (`kmutil showloaded`) are not
+  listed.
+- Each record of `/Library/SystemExtensions/db.plist`, which `sysextd` writes, is a
+  `system_extension` item (`inventory/host/extensions.rs`; the layout KnockKnock and
+  Datadog's agent read, since the Mac this was written on had none). It is named by
+  `originPath`, its bundle inside the app that installed it, and its program is the staged
+  copy's executable (`stagedBundleURL`), which is what runs; an update stages a new copy
+  under a new UUID, so naming it by the copy would show a dismissed extension again after
+  each update. Its `system_extension` field holds the record's `identifier`, `teamID` (as
+  `team`), `state` and `categories`, all part of its key: an extension the user then allows
+  is a new issue. macOS keeps an old version's record until reboot, so of the records for one
+  path the first `activated_enabled` one is kept, else the first.
+- A database that cannot be read or parsed marks `system_extensions` unchecked, which carries
+  every open issue whose item is a `.systemextension` bundle, or a `.dext` (a DriverKit
+  driver). Login item records do not carry them, though their paths are inside an app. A
+  system extension's `run_at_load` is true only while it is `activated_enabled`, and its
+  program enters its key without its path: the staged copy's folder changes on each update. A folder listing failure of
+  `/Library/Extensions` is a `launch_folder` failure (shown as "startup folder"), which carries
+  the kexts directly in it.
+- Neither is marked `replaceable`: the kernel and `sysextd` load only root-owned copies.
+
 Accepted gaps, in the order planned:
 
 - A dismissed launch item shows again when one check of it fails: its key follows what it
@@ -525,7 +556,7 @@ Accepted gaps, in the order planned:
 - Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
   programs without library validation. Until then a changed file inside a program's bundle,
   such as a framework it loads, is not seen, since signatures skip the bundle's resources.
-- Kernel and system extensions, keyboard event taps and browser extensions.
+- Keyboard event taps and browser extensions.
 
 ### GitHub repositories (decided 2026-11-06)
 
