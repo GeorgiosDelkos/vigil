@@ -511,7 +511,7 @@ Kernel and system extensions (added 2026-11-19):
   are skipped, since the kernel loads nothing else. A codeless kext (its `Info.plist` names no
   executable and only matches a driver to devices) has no `program`; its signature, on the
   bundle, is not checked, since signatures are read for regular files only. It is keyed by
-  its `Info.plist`'s size and modification time, so a replaced one shows again.
+  its `Info.plist`'s content, so a replaced one shows again.
   `/System/Library/Extensions` is on the sealed system volume and left out, as
   `/System/Library/Launch*` is. Kexts loaded from elsewhere (`kmutil showloaded`) are not
   listed.

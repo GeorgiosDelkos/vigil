@@ -37,6 +37,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
@@ -433,9 +434,8 @@ struct Item {
     /// not; the fields below are then empty, except `stamp` and `login_items`.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    /// The size and modification time of a property list that could not be read, or of a
-    /// codeless kext's `Info.plist`, the only part of it read, so that a dismissed one shows
-    /// again once it changes.
+    /// The size and modification time of a property list that could not be read, so that a
+    /// dismissed one shows again once it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     stamp: Option<String>,
     /// The job's `Label`; for a login item and an app that opens at login, the name Background
@@ -477,6 +477,11 @@ struct Item {
     /// What macOS records of a system extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     system_extension: Option<extensions::Record>,
+    /// A codeless kext's `Info.plist`, in hex, which keys it: the only part of it read, so a
+    /// kext replaced at the same path shows again. Not in the bundle: the agent judges the
+    /// path, and the file can be large.
+    #[serde(skip)]
+    codeless_info: Option<String>,
 }
 
 /// A file an item runs, with its signature.
@@ -509,6 +514,7 @@ impl Item {
             environment: BTreeMap::new(),
             login_items: None,
             system_extension: None,
+            codeless_info: None,
         }
     }
 
@@ -556,6 +562,9 @@ impl Item {
         }
         if let Some(record) = &self.system_extension {
             identity["system_extension"] = json!(record);
+        }
+        if let Some(info) = &self.codeless_info {
+            identity["codeless_info"] = json!(info);
         }
         identity.to_string()
     }
@@ -720,22 +729,30 @@ fn bundle_item(
     failures: &mut Vec<InventoryError>,
 ) -> Item {
     let shown = bundle.to_string_lossy().into_owned();
-    let info_stamp = || {
+    let unread = |error: String| {
         let info = bundle.join("Contents/Info.plist");
-        fs::symlink_metadata(info).ok().map(|m| stamp(&m))
+        let stamp = fs::symlink_metadata(info).ok().map(|m| stamp(&m));
+        Item::unread(kind, shown.clone(), error, stamp)
     };
-    let unread = |error: String| Item::unread(kind, shown.clone(), error, info_stamp());
-    let (program, stamp) = match bundle_executable(bundle) {
-        Ok(Some(program)) => (Some(checked(program, cancel, failures)), None),
-        Ok(None) if kind == ItemKind::KernelExtension => (None, info_stamp()),
-        Ok(None) => return unread("its Info.plist names no CFBundleExecutable".to_owned()),
+    let (program, codeless_info) = match bundle_executable(bundle) {
+        Ok(Bundled::Program(program)) => (Some(checked(program, cancel, failures)), None),
+        Ok(Bundled::Codeless(info)) if kind == ItemKind::KernelExtension => {
+            let hex = info.iter().fold(String::new(), |mut hex, byte| {
+                write!(hex, "{byte:02x}").expect("writing to a String does not fail");
+                hex
+            });
+            (None, Some(hex))
+        }
+        Ok(Bundled::Codeless(_)) => {
+            return unread("its Info.plist names no CFBundleExecutable".to_owned());
+        }
         Err(error) => return unread(error),
     };
     Item {
         path: shown,
         kind,
         error: None,
-        stamp,
+        stamp: None,
         label: None,
         program,
         arguments: Vec::new(),
@@ -747,13 +764,14 @@ fn bundle_item(
         environment: BTreeMap::new(),
         login_items: None,
         system_extension: None,
+        codeless_info,
     }
 }
 
 /// The file macOS runs for the bundle at `bundle`: `Contents/MacOS/` and its `Info.plist`'s
 /// `CFBundleExecutable`. The bundle itself when it is not there, which [`checked`] calls
-/// `missing`; `None` when its `Info.plist` names no executable.
-fn bundle_executable(bundle: &Path) -> Result<Option<PathBuf>, String> {
+/// `missing`.
+fn bundle_executable(bundle: &Path) -> Result<Bundled, String> {
     /// The one key read from `Info.plist`.
     #[derive(Debug, Deserialize)]
     struct Info {
@@ -761,7 +779,9 @@ fn bundle_executable(bundle: &Path) -> Result<Option<PathBuf>, String> {
         executable: Option<String>,
     }
     match fs::symlink_metadata(bundle) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(bundle.to_owned())),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(Bundled::Program(bundle.to_owned()));
+        }
         Err(e) => return Err(format!("cannot read the bundle: {e}")),
         Ok(_) => {}
     }
@@ -776,7 +796,7 @@ fn bundle_executable(bundle: &Path) -> Result<Option<PathBuf>, String> {
     let info: Info =
         plist::from_bytes(&bytes).map_err(|e| format!("its Info.plist does not parse: {e}"))?;
     let Some(executable) = info.executable else {
-        return Ok(None);
+        return Ok(Bundled::Codeless(bytes));
     };
     let program =
         inside(bundle, &Path::new("Contents/MacOS").join(&executable)).ok_or_else(|| {
@@ -784,7 +804,16 @@ fn bundle_executable(bundle: &Path) -> Result<Option<PathBuf>, String> {
                 "its Info.plist names the executable {executable:?}, which is not in the bundle"
             )
         })?;
-    Ok(Some(program))
+    Ok(Bundled::Program(program))
+}
+
+/// What a bundle runs, as [`bundle_executable`] finds it.
+#[derive(Debug)]
+enum Bundled {
+    /// The executable its `Info.plist` names.
+    Program(PathBuf),
+    /// No executable: its `Info.plist`, as read.
+    Codeless(Vec<u8>),
 }
 
 /// `relative` under `bundle`, unless it is absolute or steps out with `..`, which `join` would
@@ -888,6 +917,7 @@ fn read_item(
         environment,
         login_items: None,
         system_extension: None,
+        codeless_info: None,
     }
 }
 
@@ -1815,7 +1845,11 @@ TeamIdentifier=not set
         app(&kext, "Driver");
         let codeless = tmp.path().join("Match.kext");
         fs::create_dir_all(codeless.join("Contents")).unwrap();
-        plist(&codeless.join("Contents"), "Info.plist", "");
+        plist(
+            &codeless.join("Contents"),
+            "Info.plist",
+            "<key>A</key><true/>",
+        );
         app(&tmp.path().join("Other.bundle"), "Other");
         fs::write(tmp.path().join("notes.txt"), "").unwrap();
 
@@ -1833,10 +1867,16 @@ TeamIdentifier=not set
         // A codeless kext has no program, and is not a property list that failed to read.
         assert!(items[1].program.is_none() && items[1].error.is_none());
         assert!(items[1].run_at_load);
-        // Its key follows its Info.plist, the only part read, so a replaced one shows again.
+        // Its key follows its Info.plist's content, the only part read, so one replaced at
+        // the same path shows again, even with the same size and modification time.
         let before = items[1].identity();
-        let longer = plist_text("<key>IOKitPersonalities</key><dict/>");
-        fs::write(codeless.join("Contents/Info.plist"), longer).unwrap();
+        let info = codeless.join("Contents/Info.plist");
+        let time = fs::metadata(&info).unwrap().modified().unwrap();
+        let swapped = plist_text("<key>B</key><true/>");
+        assert_eq!(swapped.len(), fs::read_to_string(&info).unwrap().len());
+        fs::write(&info, swapped).unwrap();
+        let file = fs::File::options().write(true).open(&info).unwrap();
+        file.set_modified(time).unwrap();
         let items = launch_items(&mut inventory, &folders, &Cancel::new());
         assert_ne!(items[1].identity(), before);
     }
