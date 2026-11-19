@@ -179,15 +179,16 @@ pub(super) fn not_scanned(inventory: &mut Inventory, programs: Vec<Program>) {
 #[derive(Debug)]
 struct Read {
     /// What its issue names it by. The real path, so the key does not depend on which item
-    /// names it first; for an app's executable, the first path in an app that names it
-    /// ([`Program::in_app`]), which the inventory keeps from sweep to sweep.
+    /// names it first; for an app's executable, its path in the app ([`Program::in_app`]).
+    /// The inventory lists each app once, by its real bundle, so one app names a file.
+    /// Accepted downside: on a sweep that cannot list the app's folder, a startup item that runs
+    /// the same file names it by its real path, so that sweep shows a second issue for it. It
+    /// takes a linked app, an item running its executable and a listing failure at once.
     name: PathBuf,
     /// What runs it.
     used_by: Vec<String>,
     /// Whether any of those runs it as root.
     runs_as_root: bool,
-    /// Whether `name` is a path in an app.
-    named_in_app: bool,
 }
 
 /// `programs` by their real paths.
@@ -195,15 +196,13 @@ fn by_real_path(programs: Vec<Program>) -> BTreeMap<PathBuf, Read> {
     let mut by_file: BTreeMap<PathBuf, Read> = BTreeMap::new();
     for program in programs {
         let real = fs::canonicalize(&program.path).unwrap_or_else(|_| program.path.clone());
-        let read = by_file.entry(real.clone()).or_insert_with(|| Read {
-            name: real,
+        let read = by_file.entry(real).or_insert_with_key(|real| Read {
+            name: real.clone(),
             used_by: Vec::new(),
             runs_as_root: false,
-            named_in_app: false,
         });
-        if program.in_app && !read.named_in_app {
+        if program.in_app {
             read.name = program.path;
-            read.named_in_app = true;
         }
         read.used_by.push(program.used_by);
         read.runs_as_root |= program.as_root;
