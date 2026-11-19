@@ -125,8 +125,8 @@ pub(super) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Option<Cask
 pub(super) struct CaskApps {
     /// By the app's file name (`Docker.app`), from the casks' `app` artifacts.
     pub(super) by_name: BTreeMap<String, String>,
-    /// By the bundle identifiers a cask quits before it uninstalls (`com.adobe.Reader`), which
-    /// also names an app a `pkg` installer put in place, as no `app` artifact does.
+    /// By the bundle identifiers a cask with no `app` artifact (a `pkg` installer) quits before
+    /// it uninstalls (`com.adobe.Reader`). A cask that names its app is known only by that name.
     pub(super) by_identifier: BTreeMap<String, String>,
 }
 
@@ -178,19 +178,19 @@ fn parse(json: &str, inventory: &mut Inventory) -> Option<CaskApps> {
         // The first cask listed keeps a name or identifier two of them give, so the result
         // does not depend on which is read last. Homebrew refuses to install a cask's app over
         // another's unless forced, so two names rarely meet.
-        for name in app_names(&cask.artifacts) {
-            apps.by_name
-                .entry(name)
-                .or_insert_with(|| cask.token.clone());
-        }
+        let names = app_names(&cask.artifacts);
         // Only a cask with no `app` artifact (a `pkg` installer) is known by what it quits:
         // otherwise an older copy of its app kept a folder down, found first, would claim it.
-        let pkg_only = app_names(&cask.artifacts).is_empty();
-        let identifiers = if pkg_only {
+        let identifiers = if names.is_empty() {
             quit_identifiers(&cask.artifacts)
         } else {
             Vec::new()
         };
+        for name in names {
+            apps.by_name
+                .entry(name)
+                .or_insert_with(|| cask.token.clone());
+        }
         for identifier in identifiers {
             apps.by_identifier
                 .entry(identifier)

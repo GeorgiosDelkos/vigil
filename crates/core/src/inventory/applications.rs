@@ -9,12 +9,12 @@
 //! the app.
 //!
 //! An app a cask installed (by its file name, or for a `pkg` cask by a bundle identifier the
-//! cask quits) gives only its Electron, as part of the cask: the cask itself is already in the inventory. When
-//! `brew` ran and failed, which apps casks installed is not known, so no app is read and each
-//! folder holding apps fails: their findings carry over instead of showing twice, once under
-//! the cask and once under the app. Accepted: a failed listing of `/Applications` fails only
-//! the folder, which covers apps, not casks, so the Electron findings of the casks' apps in it
-//! read as resolved for that sweep.
+//! cask quits) gives only its Electron, as part of the cask: the cask itself is already in the
+//! inventory. When `brew` ran and failed, which apps casks installed is not known, so no app is
+//! read and each folder holding apps fails: their findings carry over instead of showing twice,
+//! once under the cask and once under the app. Accepted: a failed listing of `/Applications`
+//! fails only the folder, which covers apps, not casks, so the Electron findings of the casks'
+//! apps in it read as resolved for that sweep.
 
 use std::collections::BTreeSet;
 use std::fs;

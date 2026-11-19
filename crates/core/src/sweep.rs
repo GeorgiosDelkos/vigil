@@ -1922,7 +1922,26 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::inventory::AppSource;
+    use crate::inventory::ELECTRON;
     use crate::inventory::VersionManager;
+
+    #[test]
+    fn an_apps_electron_is_headed_by_its_product_not_the_app() {
+        let component = |product: &str| Component {
+            lookup: Lookup::Product(product.parse().unwrap()),
+            version: "37.7.0".to_owned(),
+            found_in: FoundIn::Application {
+                path: "/Applications/Code.app".into(),
+                source: AppSource::Direct,
+            },
+        };
+        assert_eq!(
+            group_name(&component("microsoft:visual_studio_code")),
+            "Code"
+        );
+        assert_eq!(group_name(&component(ELECTRON)), ELECTRON);
+    }
 
     #[test]
     fn the_retry_prompt_says_whether_the_file_was_missing_or_refused() {
