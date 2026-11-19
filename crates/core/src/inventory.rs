@@ -1267,6 +1267,7 @@ mod tests {
         let app = "/Applications/A.app/Contents/Library/SystemExtensions/x.systemextension";
         assert!(database.covers_issue(&item(app)));
         assert!(database.covers_issue(&item("/Library/SystemExtensions/U/x.systemextension")));
+        assert!(database.covers_issue(&item("/Applications/D.app/Contents/Library/x.dext")));
         assert!(!database.covers_issue(&item("/Library/Extensions/x.kext")));
         assert!(!database.covers_issue(&item("/Applications/A.app")));
         assert!(!database.covers_issue(&Subject::File("x.systemextension".to_owned())));

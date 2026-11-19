@@ -286,6 +286,7 @@ fn system_extensions(inventory: &mut Inventory, database: &Path, cancel: &Cancel
         let mut item = bundle_item(ItemKind::SystemExtension, bundle, cancel, &mut failures);
         item.path = extension.origin.to_string_lossy().into_owned();
         item.label.clone_from(&extension.record.identifier);
+        item.run_at_load = extension.runs();
         item.system_extension = Some(extension.record);
         for e in failures {
             let path = item.path.clone();
@@ -297,9 +298,10 @@ fn system_extensions(inventory: &mut Inventory, database: &Path, cancel: &Cancel
 }
 
 /// Whether an item at `path` can come from [`system_extensions`]: a bundle named
-/// `.systemextension`, as every system extension's is.
+/// `.systemextension`, or `.dext` for a DriverKit driver, as every system extension's is.
 pub(crate) fn may_be_system_extension(path: &Path) -> bool {
-    path.extension() == Some("systemextension".as_ref())
+    path.extension()
+        .is_some_and(|extension| extension == "systemextension" || extension == "dext")
 }
 
 /// Whether macOS keeps this process from reading Background Task Management's records, so
@@ -454,7 +456,8 @@ struct Item {
     /// A bare name `env` finds on `PATH` is not resolved or checked.
     scripts: Vec<Program>,
     /// `RunAtLoad`; `true` for a login item and an app that opens at login, which start at
-    /// every login, and for an extension, which macOS loads at startup.
+    /// every login, for a kernel extension, which the kernel may load at startup or when its
+    /// device appears, and for a system extension that is `activated_enabled`.
     run_at_load: bool,
     /// Whether `KeepAlive` is set: `true`, or conditions under which launchd restarts it.
     keep_alive: bool,
@@ -705,8 +708,9 @@ fn background_items(inventory: &mut Inventory, folder: &Path, cancel: &Cancel) -
 
 /// A login item, an app that opens at login, or an extension: the bundle at `bundle`, which runs
 /// its executable. A bundle that is not there is kept with the bundle as its `missing` program.
-/// A kernel extension with no executable (one that only matches a driver to a device) is an
-/// item with that `error`, which the agent judges.
+/// A kernel extension with no executable (a codeless one, whose `Info.plist` only matches a
+/// driver to devices) has no `program`: its signature is on the bundle, which [`signature`]
+/// does not check, since it reads only regular files.
 fn bundle_item(
     kind: ItemKind,
     bundle: &Path,
@@ -714,13 +718,16 @@ fn bundle_item(
     failures: &mut Vec<InventoryError>,
 ) -> Item {
     let shown = bundle.to_string_lossy().into_owned();
+    let unread = |error: String| {
+        let info = bundle.join("Contents/Info.plist");
+        let stamp = fs::symlink_metadata(info).ok().map(|m| stamp(&m));
+        Item::unread(kind, shown.clone(), error, stamp)
+    };
     let program = match bundle_executable(bundle) {
-        Ok(program) => program,
-        Err(error) => {
-            let info = bundle.join("Contents/Info.plist");
-            let stamp = fs::symlink_metadata(info).ok().map(|m| stamp(&m));
-            return Item::unread(kind, shown, error, stamp);
-        }
+        Ok(Some(program)) => Some(checked(program, cancel, failures)),
+        Ok(None) if kind == ItemKind::KernelExtension => None,
+        Ok(None) => return unread("its Info.plist names no CFBundleExecutable".to_owned()),
+        Err(error) => return unread(error),
     };
     Item {
         path: shown,
@@ -728,7 +735,7 @@ fn bundle_item(
         error: None,
         stamp: None,
         label: None,
-        program: Some(checked(program, cancel, failures)),
+        program,
         arguments: Vec::new(),
         scripts: Vec::new(),
         run_at_load: true,
@@ -743,8 +750,8 @@ fn bundle_item(
 
 /// The file macOS runs for the bundle at `bundle`: `Contents/MacOS/` and its `Info.plist`'s
 /// `CFBundleExecutable`. The bundle itself when it is not there, which [`checked`] calls
-/// `missing`.
-fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
+/// `missing`; `None` when its `Info.plist` names no executable.
+fn bundle_executable(bundle: &Path) -> Result<Option<PathBuf>, String> {
     /// The one key read from `Info.plist`.
     #[derive(Debug, Deserialize)]
     struct Info {
@@ -752,7 +759,7 @@ fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
         executable: Option<String>,
     }
     match fs::symlink_metadata(bundle) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(bundle.to_owned()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Some(bundle.to_owned())),
         Err(e) => return Err(format!("cannot read the bundle: {e}")),
         Ok(_) => {}
     }
@@ -766,12 +773,16 @@ fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
     }
     let info: Info =
         plist::from_bytes(&bytes).map_err(|e| format!("its Info.plist does not parse: {e}"))?;
-    let executable = info
-        .executable
-        .ok_or("its Info.plist names no CFBundleExecutable")?;
-    inside(bundle, &Path::new("Contents/MacOS").join(&executable)).ok_or_else(|| {
-        format!("its Info.plist names the executable {executable:?}, which is not in the bundle")
-    })
+    let Some(executable) = info.executable else {
+        return Ok(None);
+    };
+    let program =
+        inside(bundle, &Path::new("Contents/MacOS").join(&executable)).ok_or_else(|| {
+            format!(
+                "its Info.plist names the executable {executable:?}, which is not in the bundle"
+            )
+        })?;
+    Ok(Some(program))
 }
 
 /// `relative` under `bundle`, unless it is absolute or steps out with `..`, which `join` would
@@ -1817,10 +1828,9 @@ TeamIdentifier=not set
         assert_eq!(program.path, kext.join("Contents/MacOS/Driver"));
         assert!(matches!(program.signature, Signature::Unsigned { .. }));
         assert_eq!(items[0].kind, ItemKind::KernelExtension);
-        assert_eq!(
-            items[1].error.as_deref(),
-            Some("its Info.plist names no CFBundleExecutable")
-        );
+        // A codeless kext has no program, and is not a property list that failed to read.
+        assert!(items[1].program.is_none() && items[1].error.is_none());
+        assert!(items[1].run_at_load);
     }
 
     #[test]
@@ -1870,6 +1880,8 @@ TeamIdentifier=not set
                 "categories": ["com.apple.system_extension.endpoint_security"],
             })
         );
+        // Only an enabled extension runs.
+        assert!(item.run_at_load && !items[1].run_at_load);
         // With no staged copy, the app's bundle is checked; here it is gone.
         let program = items[1].program.as_ref().unwrap();
         assert_eq!(program.path, gone);

@@ -46,7 +46,8 @@ pub(super) struct SystemExtension {
 }
 
 impl SystemExtension {
-    fn runs(&self) -> bool {
+    /// Whether macOS runs it: only an enabled extension runs.
+    pub(super) fn runs(&self) -> bool {
         self.record.state.as_deref() == Some("activated_enabled")
     }
 }

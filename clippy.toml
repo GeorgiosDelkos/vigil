@@ -13,4 +13,5 @@ too-many-lines-threshold = 100
 # clippy's defaults (GitHub, WebAssembly, ...). Add the project's own names.
 doc-valid-idents = [
     "..", "OpenAI", "macOS", "PyPI", "OSV", "NVD", "Homebrew", "SemVer", "RubyGems", "KnockKnock",
+    "DriverKit",
 ]

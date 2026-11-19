@@ -182,14 +182,19 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     - its label, path and program do not belong together (a label that imitates Apple's
       `com.apple.` for a program that is not Apple's);
     - its property list could not be read (`error`): launchd may still load it;
-    - it is a `kernel_extension` or `system_extension` whose program is not `apple_issued` with
-      a `developer_id` or `app_store` certificate, or whose `team` is not the program's: macOS
-      loads one signed otherwise only with System Integrity Protection lowered, so it is broken,
-      tampered with, or a sign that protection was turned off. A kernel extension that is signed
-      so is still worth a `low` issue: Apple deprecated them, and it runs with the kernel's full
-      power. An `endpoint_security` or `network_extension` from a team that does not match
-      software the user evidently installed (its app's path and identifier) is high, since it
-      sees every process, file or connection;
+    - it is a `kernel_extension` or `system_extension` whose program is neither `apple` nor
+      `apple_issued` with a `developer_id` or `app_store` certificate, or whose `team` is not
+      the program's: macOS loads one signed otherwise only with System Integrity Protection
+      lowered, so it is broken, tampered with, or a sign that protection was turned off. A
+      kernel extension that is signed so is still worth a `low` issue: Apple deprecated them,
+      and it runs with the kernel's full power. One with no `program` is codeless: its
+      `Info.plist` only matches a driver to devices, and Vigil did not check its signature, so
+      report it (`low`) only when its name or path looks out of place. An `endpoint_security`
+      or `network_extension` from a team that does not match software the user evidently
+      installed (its app's path and identifier) is high, since it sees every process, file or
+      connection; a `driver_extension` so is medium, since it runs as a driver for USB, PCI or
+      input devices. A `system_extension` whose `run_at_load` is false (its `state` is not
+      `activated_enabled`) does not run now: lower its severity one step and give its state;
     - a program or script it runs as root is `replaceable`: any process of this user can
       become root through it, so this is high.
 
@@ -205,8 +210,11 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     switch is off. The fix is manual: `commands` stays empty, and `steps` say how to check the
     item and remove it (`launchctl bootout` with the domain and label, then move the property
     list to the Trash; for a `login_item`, `open_at_login` or app-registered item, turn it off
-    in System Settings > General > Login Items, and remove the app if it is not wanted), so the
-    user decides.
+    in System Settings > General > Login Items, and remove the app if it is not wanted; for a
+    `kernel_extension`, move the `.kext` out of `/Library/Extensions` with an administrator's
+    password and restart; for a `system_extension`, turn it off in System Settings > General >
+    Login Items & Extensions, or move the app that installed it to the Trash, which removes the
+    extension), so the user decides.
 
     For a `shell_startup`, `crontab`, `periodic_script` or `path_list` file, report it when a
     line:

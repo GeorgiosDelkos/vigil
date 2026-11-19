@@ -508,8 +508,9 @@ Kernel and system extensions (added 2026-11-19):
 
 - Each `.kext` bundle in `/Library/Extensions` is a `kernel_extension` item, checked as a
   bundle: its `Info.plist`'s `CFBundleExecutable` under `Contents/MacOS`. Other entries there
-  are skipped, since the kernel loads nothing else. A kext with no executable (one that only
-  matches a driver to a device) is an item with that `error`. `/System/Library/Extensions` is
+  are skipped, since the kernel loads nothing else. A codeless kext (its `Info.plist` names no
+  executable and only matches a driver to devices) has no `program`; its signature, on the
+  bundle, is not checked, since signatures are read for regular files only. `/System/Library/Extensions` is
   on the sealed system volume and left out, as `/System/Library/Launch*` is. Kexts loaded from
   elsewhere (`kmutil showloaded`) are not listed.
 - Each record of `/Library/SystemExtensions/db.plist`, which `sysextd` writes, is a
@@ -523,7 +524,10 @@ Kernel and system extensions (added 2026-11-19):
   is a new issue. macOS keeps an old version's record until reboot, so of the records for one
   path the first `activated_enabled` one is kept, else the first.
 - A database that cannot be read or parsed marks `system_extensions` unchecked, which carries
-  every open issue whose item is a `.systemextension` bundle. A folder listing failure of
+  every open issue whose item is a `.systemextension` bundle, or a `.dext` (a DriverKit
+  driver). Login item records do not carry them, though their paths are inside an app. A
+  system extension's `run_at_load` is true only while it is `activated_enabled`, and its
+  program enters its key without its path: the staged copy's folder changes on each update. A folder listing failure of
   `/Library/Extensions` is a `launch_folder` failure (shown as "startup folder"), which carries
   the kexts directly in it.
 - Neither is marked `replaceable`: the kernel and `sysextd` load only root-owned copies.
