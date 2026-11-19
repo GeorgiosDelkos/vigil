@@ -64,7 +64,6 @@ impl From<io::Error> for ReadError {
 }
 
 // Magic numbers, from `mach-o/loader.h` and `mach-o/fat.h`.
-const MH_MAGIC: u32 = 0xfeed_face;
 const MH_MAGIC_64: u32 = 0xfeed_facf;
 const FAT_MAGIC: u32 = 0xcafe_babe;
 const FAT_MAGIC_64: u32 = 0xcafe_babf;
@@ -172,16 +171,17 @@ fn fat(file: &std::fs::File, len: u64, wide: bool) -> Result<Vec<Image>, ReadErr
 
 /// The image of `size` bytes at `base`, or `None` for an architecture this Mac does not run.
 fn image(file: &std::fs::File, base: u64, size: u64) -> Result<Option<Image>, ReadError> {
+    // Only the 64-bit header: `MH_MAGIC`, the 32-bit one, is for i386 and older, which no Mac
+    // runs today.
+    let header_len: u32 = 32;
     let mut header = [0; 32];
-    if size < 28 {
+    if size < u64::from(header_len) {
         return Err(ReadError::NotMachO);
     }
-    file.read_exact_at(&mut header[..28], base)?;
-    let header_len: u32 = match le32(&header, 0) {
-        MH_MAGIC => 28,
-        MH_MAGIC_64 => 32,
-        _ => return Err(ReadError::NotMachO),
-    };
+    file.read_exact_at(&mut header, base)?;
+    if le32(&header, 0) != MH_MAGIC_64 {
+        return Err(ReadError::NotMachO);
+    }
     if !runs_here(le32(&header, 4)) {
         return Ok(None);
     }

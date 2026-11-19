@@ -139,11 +139,9 @@ pub(super) fn scan(
             }
         };
         let folder = real.parent().unwrap_or(Path::new("/"));
-        // The platform claim counts only where only Apple writes (see `Image::platform`).
-        let platform = on_sealed_volume(&real);
         let plants: BTreeSet<Plant> = images
             .iter()
-            .filter(|image| !(image.library_validation || image.platform && platform))
+            .filter(|image| !validated(image, &real))
             .flat_map(|image| plants(image, folder, account))
             .collect();
         if !plants.is_empty() {
@@ -182,6 +180,13 @@ fn by_real_path(programs: Vec<Program>) -> BTreeMap<PathBuf, (Vec<String>, bool)
     by_file
 }
 
+/// Whether the loader validates the libraries of `image`, the program at `real`: then a
+/// planted one is refused. The platform claim counts only where only Apple writes (see
+/// `Image::platform`).
+fn validated(image: &Image, real: &Path) -> bool {
+    image.library_validation || image.platform && on_sealed_volume(real)
+}
+
 /// The places a library planted would load from, for the image of a program in `folder`, that
 /// this user could create.
 fn plants(image: &Image, folder: &Path, account: &Account) -> Vec<Plant> {
@@ -206,12 +211,13 @@ fn plants(image: &Image, folder: &Path, account: &Account) -> Vec<Plant> {
         let present = |place: &Path| in_cache(place) || place.try_exists().unwrap_or(true);
         let found = places.iter().position(|place| present(place));
         let (earlier, why) = match found {
-            // Every earlier place is tried first, and is empty.
-            Some(i) if i > 0 => (&places[..i], Why::EarlierRpath),
+            // Every earlier place is tried first, and is empty. Found at the first, there is
+            // none.
+            Some(i) => (&places[..i], Why::EarlierRpath),
             // Not found: a weak load starts without it, and loads it from any place it looks.
             None if load.weak => (&places[..], Why::WeakMissing),
-            // Found at the first place, or a strong load not found, which does not start at all.
-            Some(_) | None => continue,
+            // A strong load not found, which does not start at all.
+            None => continue,
         };
         let plantable = earlier
             .iter()
@@ -497,20 +503,46 @@ mod tests {
     fn a_platform_claim_counts_only_on_the_sealed_volume() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = fs::canonicalize(tmp.path()).unwrap();
-        let weak = Load {
-            name: dir.join("gone.dylib").to_str().unwrap().to_owned(),
-            weak: true,
-        };
-        let claimed = Image {
-            loads: vec![weak],
+        let image = |library_validation, platform| Image {
+            loads: vec![Load {
+                name: dir.join("gone.dylib").to_str().unwrap().to_owned(),
+                weak: true,
+            }],
             rpaths: Vec::new(),
-            library_validation: false,
-            platform: true,
+            library_validation,
+            platform,
         };
+        let app = dir.join("app");
+        let sealed = Path::new("/bin/ls");
+
         // A copy of a planted program that sets the byte is still read.
+        let claimed = image(false, true);
+        assert!(!validated(&claimed, &app));
         assert_eq!(plants(&claimed, &dir, &account()).len(), 1);
-        assert!(on_sealed_volume(Path::new("/bin/ls")));
-        assert!(!on_sealed_volume(&dir.join("app")));
+        // Apple's own claim, on the sealed volume, is honored; without it, nothing is validated.
+        assert!(validated(&claimed, sealed));
+        assert!(!validated(&image(false, false), sealed));
+        // Library validation holds anywhere.
+        assert!(validated(&image(true, false), &app));
+    }
+
+    #[test]
+    fn a_program_not_read_carries_its_issue_once_by_its_real_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = fs::canonicalize(tmp.path()).unwrap();
+        fs::write(dir.join("tool"), "").unwrap();
+        std::os::unix::fs::symlink(dir.join("tool"), dir.join("link")).unwrap();
+        let mut inventory = Inventory::default();
+        let programs = vec![
+            program(&dir.join("link"), "/L/one.plist", false),
+            program(&dir.join("tool"), "/L/two.plist", true),
+        ];
+
+        not_scanned(&mut inventory, programs);
+
+        let path = dir.join("tool").display().to_string();
+        let expected = BTreeSet::from([InventorySource::LoadCommands { path }]);
+        assert_eq!(inventory.failed, expected);
     }
 
     #[test]
@@ -551,6 +583,14 @@ mod tests {
         let bare = image("@rpath/Foo.framework/Foo", false, &rpaths);
         let own = dir.join("MacOS/Foo.framework/Foo");
         assert_eq!(found(&bare), [own.display().to_string()]);
+        // A place off the sealed volume that this user cannot create is left out.
+        let locked = [
+            "/Library/vigil-test-absent",
+            "@executable_path/../Frameworks",
+        ];
+        let gone = image("@rpath/Gone.framework/Gone", true, &locked);
+        let gone_here = dir.join("Frameworks/Gone.framework/Gone");
+        assert_eq!(found(&gone), [gone_here.display().to_string()]);
         // A weak load with no rpath looks nowhere.
         let nowhere = image("@rpath/Foo.framework/Foo", true, &[]);
         assert_eq!(found(&nowhere), Vec::<String>::new());
