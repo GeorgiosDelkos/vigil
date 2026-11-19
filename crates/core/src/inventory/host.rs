@@ -336,6 +336,8 @@ fn safari_extensions(inventory: &mut Inventory, root: &Path, cancel: &Cancel) ->
             let mut failures = Vec::new();
             let mut item = bundle_item(ItemKind::SafariExtension, path, cancel, &mut failures);
             item.label = Some(label.to_owned());
+            // Safari runs it while Safari runs, not at login.
+            item.run_at_load = false;
             for e in failures {
                 let path = item.path.clone();
                 inventory.fail(InventorySource::LaunchItem { path }, e);
@@ -1986,6 +1988,7 @@ TeamIdentifier=not set
         assert_eq!(items[0].path, appex.to_str().unwrap());
         assert_eq!(items[0].kind, ItemKind::SafariExtension);
         assert_eq!(items[0].label.as_deref(), Some("com.e.block"));
+        assert!(!items[0].run_at_load);
         let program = items[0].program.as_ref().unwrap();
         assert_eq!(program.path, appex.join("Contents/MacOS/Block"));
 

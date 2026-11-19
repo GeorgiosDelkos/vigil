@@ -242,9 +242,12 @@ Write `findings.json` in this folder, following `findings.schema.json`:
       malicious configuration profile can force extensions), `external_pref` or
       `external_pref_download` from a program other than a known one (Google's own Docs and
       Drive extensions are), or `from_store` false with `source` `internal`;
-    - its `update_url` is not its browser's store (Chrome's
-      `https://clients2.google.com/service/update2/crx`, Edge's `edge.microsoft.com`,
-      Firefox's `addons.mozilla.org`): whoever runs that address decides its next version;
+    - it names an `update_url` that is not its browser's store (Chrome's and Brave's
+      `https://clients2.google.com/service/update2/crx`, Edge's
+      `https://edge.microsoft.com/extensionwebstorebase/v1/crx`, Opera's
+      `extension-updates.opera.com`, Firefox's `addons.mozilla.org`): whoever runs that
+      address decides its next version. A Firefox add-on from the store usually has none, and
+      none is not a finding; for Firefox, `installed_from` outside `addons.mozilla.org` is;
     - Firefox's `source` is `app-system-local`, `app-system-share` or `app-temporary`, or its
       `signed` is not `signed`, `system` or `privileged`;
     - it may read and change every site (`hosts` holding `<all_urls>`, `*://*/*`,

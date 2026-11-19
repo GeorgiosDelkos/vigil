@@ -565,8 +565,13 @@ Browser extensions (added 2026-11-19):
   that `browser_profile` unchecked, which carries the open issues of every extension under it.
   A record or folder this user may not read is a note.
 - Not read: Chromium's granted and optional permissions (the manifest's requested ones are
-  shown), other users' browsers, Firefox forks (LibreWolf, Zen, Waterfox) and Chromium
-  browsers outside the list.
+  shown), other users' browsers, Firefox profiles that `profiles.ini` places outside
+  `Profiles`, Firefox forks (LibreWolf, Zen, Waterfox) and Chromium browsers outside the list.
+  Safari's own on and off switch per extension, in its container, is not read, so a
+  `safari_extension` has `run_at_load` false: Safari runs it, not login.
+- Opera's profile is its browser folder, which holds its other profiles, so a failure there
+  also carries the issues of extensions in a profile inside it that was read. Accepted: it
+  keeps an issue open one sweep longer, never drops one.
 
 Accepted gaps, in the order planned:
 

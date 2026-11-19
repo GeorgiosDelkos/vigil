@@ -17,6 +17,7 @@
 //!   are not extensions (themes, dictionaries, language packs) are left out. `signedState` is
 //!   named as `AddonManager` names it
 //!   ([AddonManager.sys.mjs](https://github.com/mozilla-firefox/firefox/blob/615217b20e60e956769e7876514f920c339e9a76/toolkit/mozapps/extensions/AddonManager.sys.mjs#L4307)).
+//!   A profile that `profiles.ini` places outside `Profiles` is not read.
 //!
 //! Safari's extensions are app extensions, listed by `pluginkit` in [`super`].
 //!
@@ -111,9 +112,9 @@ pub(super) struct BrowserExtension {
     signed: Option<&'static str>,
     /// Where it updates from, when it names a place.
     update_url: Option<String>,
-    /// The API permissions it asks for (Chromium's manifest) or was granted (Firefox).
+    /// The API permissions it asks for (Chromium's manifest) or was granted (Firefox), sorted.
     permissions: Vec<String>,
-    /// The sites it may read and change: host permissions (for Manifest V2, the entries of
+    /// The sites it may read and change, sorted: host permissions (for Manifest V2, the entries of
     /// `permissions` that are host patterns), and for Chromium the pages its content scripts
     /// run on.
     hosts: Vec<String>,
@@ -329,12 +330,8 @@ fn chromium_extension(
         installed_from: None,
         signed: None,
         update_url: manifest["update_url"].as_str().map(str::to_owned),
-        permissions,
-        hosts: hosts
-            .into_iter()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
+        permissions: sorted(permissions),
+        hosts: sorted(hosts),
     }
 }
 
@@ -462,8 +459,8 @@ fn firefox_profile(profile: &Path) -> Result<Vec<BrowserExtension>, InventoryErr
                 installed_from: addon.source_uri,
                 signed: Some(signed_name(addon.signed_state)),
                 update_url: addon.update_url,
-                permissions,
-                hosts,
+                permissions: sorted(permissions),
+                hosts: sorted(hosts),
             })
         })
         .collect();
@@ -522,6 +519,15 @@ fn read_json(path: &Path) -> Result<Value, String> {
     // Chromium accepts a byte order mark at the start of a manifest.
     let bytes = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&bytes);
     serde_json::from_slice(bytes).map_err(|e| format!("{name} does not parse: {e}"))
+}
+
+/// `list` sorted, each once: the order a manifest lists them in means nothing, and is part of
+/// the key, which an update that only reorders them must not change.
+fn sorted(list: Vec<String>) -> Vec<String> {
+    list.into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// The strings in a JSON list; anything else in it (Chromium's permission objects) is left
@@ -807,6 +813,9 @@ pub(super) mod tests {
             first, update,
             "an update that asks for nothing new keeps the key"
         );
+        let two = key(json!({"version": "1", "permissions": ["tabs", "cookies"]}));
+        let reordered = key(json!({"version": "2", "permissions": ["cookies", "tabs"]}));
+        assert_eq!(two, reordered, "reordering what it asks for keeps the key");
         let more = key(json!({"name": "A", "version": "2", "permissions": ["tabs", "cookies"]}));
         assert_ne!(first, more);
         let hosts = key(json!({"name": "A", "version": "1", "permissions": ["tabs"],
