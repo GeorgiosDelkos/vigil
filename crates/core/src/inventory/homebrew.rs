@@ -175,9 +175,6 @@ fn parse(json: &str, inventory: &mut Inventory) -> Option<CaskApps> {
         let Some(version) = cask.installed else {
             continue;
         };
-        // The first cask listed keeps a name or identifier two of them give, so the result
-        // does not depend on which is read last. Homebrew refuses to install a cask's app over
-        // another's unless forced, so two names rarely meet.
         let names = app_names(&cask.artifacts);
         // Only a cask with no `app` artifact (a `pkg` installer) is known by what it quits:
         // otherwise an older copy of its app kept a folder down, found first, would claim it.
@@ -186,6 +183,9 @@ fn parse(json: &str, inventory: &mut Inventory) -> Option<CaskApps> {
         } else {
             Vec::new()
         };
+        // The first cask listed keeps a name or identifier two of them give, so the result
+        // does not depend on which is read last. Homebrew refuses to install a cask's app over
+        // another's unless forced, so two names rarely meet.
         for name in names {
             apps.by_name
                 .entry(name)
