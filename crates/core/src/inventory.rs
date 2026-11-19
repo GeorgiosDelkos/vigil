@@ -418,8 +418,14 @@ pub enum InventorySource {
     /// that telling the managers apart is not worth a field.
     VersionManagers,
     /// A folder of apps that could not be listed (`/Applications`, `~/Applications`, or a
-    /// folder in one), or that was not read because Homebrew's casks could not be listed.
+    /// folder in one): neither its apps' versions nor their executables were read.
     ApplicationFolder {
+        /// The folder.
+        path: PathBuf,
+    },
+    /// A folder of apps whose versions were not read because Homebrew's casks could not be
+    /// listed. Its apps' executables were still read for the dylib check.
+    CaskApps {
         /// The folder.
         path: PathBuf,
     },
@@ -522,7 +528,7 @@ impl InventorySource {
             Self::VersionManagers => matches!(place, FoundIn::VersionManager { .. }),
             // A folder in `/Applications` covers its own apps, and `/Applications` those of
             // the folders in it too, as they were not listed either.
-            Self::ApplicationFolder { path: folder } => {
+            Self::ApplicationFolder { path: folder } | Self::CaskApps { path: folder } => {
                 matches!(place, FoundIn::Application { path, .. } if path.starts_with(folder))
             }
             Self::Lockfile { path } => {
@@ -618,6 +624,7 @@ impl InventorySource {
             Self::Account => matches!(subject, Subject::Item(item) if host::needs_account(item)),
             // These give components, not issues.
             Self::MacOs
+            | Self::CaskApps { .. }
             | Self::Homebrew
             | Self::Rustup
             | Self::CargoInstall
@@ -649,7 +656,7 @@ impl InventorySource {
             Self::BrowserProfile { .. } => Some("browser profiles"),
             Self::Alerts { .. } => Some("kinds of alerts"),
             Self::Workflow { .. } => Some("workflow files"),
-            Self::ApplicationFolder { .. } => Some("app folders"),
+            Self::ApplicationFolder { .. } | Self::CaskApps { .. } => Some("app folders"),
             Self::MacOs
             | Self::Homebrew
             | Self::Rustup
@@ -687,6 +694,7 @@ impl std::fmt::Display for InventorySource {
             Self::Pipx => f.write_str("pipx"),
             Self::VersionManagers => f.write_str("version managers"),
             Self::ApplicationFolder { path } => write!(f, "app folder {}", path.display()),
+            Self::CaskApps { path } => write!(f, "app versions in {}", path.display()),
             Self::Lockfile { path } => write!(f, "lockfile {}", path.display()),
             Self::LockfileWalk { root } => write!(f, "lockfiles under {}", root.display()),
             Self::OsPackages => f.write_str("OS packages"),

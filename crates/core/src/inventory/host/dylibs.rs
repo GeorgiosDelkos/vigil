@@ -20,9 +20,11 @@
 //! executables inside an app (helpers, plug-ins), and loads relative to the working directory,
 //! which depend on how the program is started.
 //!
-//! Libraries in the system's shared cache are not files on disk: an install name under
-//! `/System/` or `/usr/` (but `/usr/local/`) counts as found, as the loader finds it in the cache,
-//! and nobody but Apple can write there, on the sealed system volume.
+//! Libraries in the system's shared cache are not files on disk, and Vigil cannot ask the
+//! loader what the cache holds (`unsafe` is forbidden in this workspace). An absolute install
+//! name on the sealed system volume counts as found there, as does the Swift runtime
+//! (`libswift*.dylib`) through `/usr/lib/swift`; any other place on that volume is empty, and
+//! only Apple writes there.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -55,8 +57,8 @@ pub(super) struct Program {
 /// A program a planted library could take over, one line of `mac/dylibs.jsonl`.
 #[derive(Debug, Serialize)]
 pub(super) struct Hijackable {
-    /// The program, as the first item or app that runs it names it. An issue names it by this
-    /// path. Text, as an item's path is.
+    /// The program's real path, its links followed. An issue names it by this path. Text, as
+    /// an item's path is.
     pub(super) path: String,
     /// What runs it: startup items and apps, by path.
     used_by: Vec<String>,
@@ -98,27 +100,17 @@ enum Why {
 }
 
 /// The programs in `programs` a planted library could take over. A program several items or
-/// apps run is read once, by its real path. A program that is not there or is not Mach-O (a
-/// script) is left out: the item already says so. One that cannot be read fails its
+/// apps run is read once, and named by its real path, so the issue keeps its key whichever
+/// item names it first. A program that is not there or is not Mach-O (a script) is left out:
+/// the item already says so. One that cannot be read fails its
 /// [`InventorySource::LoadCommands`].
 pub(super) fn scan(
     inventory: &mut Inventory,
     programs: Vec<Program>,
     account: &Account,
 ) -> Vec<Hijackable> {
-    // By real path: the path the first item or app gives, what runs it, and whether as root.
-    let mut by_file: BTreeMap<PathBuf, (PathBuf, Vec<String>, bool)> = BTreeMap::new();
-    for program in programs {
-        let real = fs::canonicalize(&program.path).unwrap_or_else(|_| program.path.clone());
-        let seen = by_file
-            .entry(real)
-            .or_insert_with(|| (program.path, Vec::new(), false));
-        seen.1.push(program.used_by);
-        seen.2 |= program.as_root;
-    }
-
     let mut found = Vec::new();
-    for (real, (path, used_by, runs_as_root)) in by_file {
+    for (real, (used_by, runs_as_root)) in by_real_path(programs) {
         let images = match macho::read(&real) {
             Ok(images) => images,
             Err(macho::ReadError::NotMachO) => continue,
@@ -126,22 +118,20 @@ pub(super) fn scan(
             // Root's own helpers (`/Library/PrivilegedHelperTools`) and other users' files stay
             // unreadable on every sweep: a note, as `InventoryError::Io` makes it elsewhere.
             Err(macho::ReadError::Io(e)) if e.kind() == io::ErrorKind::PermissionDenied => {
-                let path = path.clone();
                 let detail = format!("cannot read it: {e}");
+                let path = real;
                 inventory
                     .problems
                     .push(InventoryError::MachO { path, detail });
                 continue;
             }
             Err(macho::ReadError::Io(e)) => {
-                let source = InventorySource::LoadCommands {
-                    path: path.to_string_lossy().into_owned(),
-                };
-                inventory.fail(source, InventoryError::io(&path, e));
+                let source = InventorySource::LoadCommands { path: text(&real) };
+                inventory.fail(source, InventoryError::io(&real, e));
                 continue;
             }
             Err(macho::ReadError::Malformed(detail)) => {
-                let path = path.clone();
+                let path = real;
                 inventory
                     .problems
                     .push(InventoryError::MachO { path, detail });
@@ -149,15 +139,16 @@ pub(super) fn scan(
             }
         };
         let folder = real.parent().unwrap_or(Path::new("/"));
+        // The platform claim counts only where only Apple writes (see `Image::platform`).
+        let platform = on_sealed_volume(&real);
         let plants: BTreeSet<Plant> = images
             .iter()
-            .filter(|image| !image.library_validation)
-            .flat_map(|image| plants(image, folder))
-            .filter(|plant| account.can_replace(Path::new(&plant.path)))
+            .filter(|image| !(image.library_validation || image.platform && platform))
+            .flat_map(|image| plants(image, folder, account))
             .collect();
         if !plants.is_empty() {
             found.push(Hijackable {
-                path: path.to_string_lossy().into_owned(),
+                path: text(&real),
                 used_by,
                 runs_as_root,
                 plants,
@@ -167,12 +158,53 @@ pub(super) fn scan(
     found
 }
 
-/// The places a library planted would load from, for the image of a program in `folder`.
-fn plants(image: &Image, folder: &Path) -> Vec<Plant> {
+/// Records the programs in `programs` as not read, when where this user could plant a library
+/// is not known: their issues carry over instead of reading as resolved.
+pub(super) fn not_scanned(inventory: &mut Inventory, programs: Vec<Program>) {
+    for real in by_real_path(programs).into_keys() {
+        let path = text(&real);
+        inventory
+            .failed
+            .insert(InventorySource::LoadCommands { path });
+    }
+}
+
+/// `programs` by their real paths, each with what runs it and whether any of those runs it as
+/// root.
+fn by_real_path(programs: Vec<Program>) -> BTreeMap<PathBuf, (Vec<String>, bool)> {
+    let mut by_file: BTreeMap<PathBuf, (Vec<String>, bool)> = BTreeMap::new();
+    for program in programs {
+        let real = fs::canonicalize(&program.path).unwrap_or(program.path);
+        let (used_by, as_root) = by_file.entry(real).or_default();
+        used_by.push(program.used_by);
+        *as_root |= program.as_root;
+    }
+    by_file
+}
+
+/// The places a library planted would load from, for the image of a program in `folder`, that
+/// this user could create.
+fn plants(image: &Image, folder: &Path, account: &Account) -> Vec<Plant> {
     let mut plants = Vec::new();
     for load in &image.loads {
         let places = places(&load.name, &image.rpaths, folder);
-        let found = places.iter().position(|place| is_present(place));
+        // On the sealed volume, a library linked by absolute path is Apple's, in the shared
+        // cache rather than on disk. Through `@rpath`, only the Swift runtime is there: the
+        // `libswift*.dylib` in `/usr/lib/swift`, the rpath Apple's toolchain puts first. Any
+        // other place there is empty, and nobody but Apple can plant in it, so the loader goes
+        // on to the next one.
+        let by_rpath = load.name.starts_with("@rpath/");
+        let swift_runtime = |place: &Path| {
+            place.parent() == Some(Path::new("/usr/lib/swift"))
+                && place
+                    .file_name()
+                    .is_some_and(|name| name.as_encoded_bytes().starts_with(b"libswift"))
+        };
+        let in_cache =
+            |place: &Path| on_sealed_volume(place) && (!by_rpath || swift_runtime(place));
+        // A place that cannot be checked counts as found, so no plant is guessed behind it.
+        let present = |place: &Path| in_cache(place) || place.try_exists().unwrap_or(true);
+        let found = places.iter().position(|place| present(place));
         let (earlier, why) = match found {
             // Every earlier place is tried first, and is empty.
             Some(i) if i > 0 => (&places[..i], Why::EarlierRpath),
@@ -181,10 +213,13 @@ fn plants(image: &Image, folder: &Path) -> Vec<Plant> {
             // Found at the first place, or a strong load not found, which does not start at all.
             Some(_) | None => continue,
         };
-        plants.extend(earlier.iter().map(|place| Plant {
+        let plantable = earlier
+            .iter()
+            .filter(|place| !on_sealed_volume(place) && account.can_replace(place));
+        plants.extend(plantable.map(|place| Plant {
             load: load.name.clone(),
             weak: load.weak,
-            path: place.to_string_lossy().into_owned(),
+            path: text(place),
             why,
         }));
     }
@@ -196,6 +231,9 @@ fn plants(image: &Image, folder: &Path) -> Vec<Plant> {
 /// `@executable_path`: its folder. A name relative to the working directory gives none.
 fn places(name: &str, rpaths: &[String], folder: &Path) -> Vec<PathBuf> {
     let expand = |path: &str| -> Option<PathBuf> {
+        if path == "@executable_path" || path == "@loader_path" {
+            return Some(folder.to_owned());
+        }
         let relative = path
             .strip_prefix("@executable_path/")
             .or_else(|| path.strip_prefix("@loader_path/"));
@@ -215,12 +253,18 @@ fn places(name: &str, rpaths: &[String], folder: &Path) -> Vec<PathBuf> {
     }
 }
 
-/// Whether the loader would find a library at `place`: a file there, or a place on the sealed
-/// system volume, whose libraries live in the shared cache rather than on disk.
-fn is_present(place: &Path) -> bool {
-    let sealed = (place.starts_with("/System") || place.starts_with("/usr"))
-        && !place.starts_with("/usr/local");
-    sealed || fs::metadata(place).is_ok()
+/// Whether `path` is on the sealed system volume, which only Apple writes: under `/System`
+/// (but its writable `/System/Volumes`), `/usr` (but `/usr/local`), `/bin` or `/sbin`.
+fn on_sealed_volume(path: &Path) -> bool {
+    (path.starts_with("/System") && !path.starts_with("/System/Volumes"))
+        || (path.starts_with("/usr") && !path.starts_with("/usr/local"))
+        || path.starts_with("/bin")
+        || path.starts_with("/sbin")
+}
+
+/// `path` as text, any byte that is not UTF-8 replaced, as an item's path is.
+fn text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 /// `path` with `.` and `..` resolved by name, so a place reads as a plain path. A link inside
@@ -246,6 +290,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Cancel;
+    use crate::inventory::host::macho::Load;
 
     fn run(program: &str, args: &[&str], dir: &Path) {
         let out = Command::new(program)
@@ -406,9 +451,102 @@ mod tests {
                 .all(|i| i.library_validation)
         );
 
-        // Apple's own programs are platform binaries, which the loader always validates.
+        // Apple's own programs claim to be platform binaries, which the loader always
+        // validates; the claim counts only on the sealed volume, where only Apple writes.
         let ls = macho::read(Path::new("/bin/ls")).unwrap();
-        assert!(ls.iter().all(|i| i.library_validation));
+        assert!(ls.iter().all(|i| i.platform));
+    }
+
+    #[test]
+    fn the_issue_key_follows_the_places_and_root_not_what_runs_it() {
+        let plant = |path: &str| Plant {
+            load: "@rpath/a.dylib".to_owned(),
+            weak: false,
+            path: path.to_owned(),
+            why: Why::EarlierRpath,
+        };
+        let program = |used_by: &str, runs_as_root, place: &str| Hijackable {
+            path: "/A.app/Contents/MacOS/A".to_owned(),
+            used_by: vec![used_by.to_owned()],
+            runs_as_root,
+            plants: BTreeSet::from([plant(place)]),
+        };
+        let first = program("/A.app", false, "/x/a.dylib");
+        assert_eq!(
+            first.identity(),
+            program("/L/b.plist", false, "/x/a.dylib").identity()
+        );
+        assert_ne!(
+            first.identity(),
+            program("/A.app", true, "/x/a.dylib").identity()
+        );
+        assert_ne!(
+            first.identity(),
+            program("/A.app", false, "/y/a.dylib").identity()
+        );
+    }
+
+    #[test]
+    fn a_platform_claim_counts_only_on_the_sealed_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = fs::canonicalize(tmp.path()).unwrap();
+        let weak = Load {
+            name: dir.join("gone.dylib").to_str().unwrap().to_owned(),
+            weak: true,
+        };
+        let claimed = Image {
+            loads: vec![weak],
+            rpaths: Vec::new(),
+            library_validation: false,
+            platform: true,
+        };
+        // A copy of a planted program that sets the byte is still read.
+        assert_eq!(plants(&claimed, &dir, &account()).len(), 1);
+        assert!(on_sealed_volume(Path::new("/bin/ls")));
+        assert!(!on_sealed_volume(&dir.join("app")));
+    }
+
+    #[test]
+    fn a_sealed_place_holds_only_apples_libraries_so_the_search_goes_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = fs::canonicalize(tmp.path()).unwrap();
+        fs::create_dir_all(dir.join("Frameworks")).unwrap();
+        let image = |name: &str, weak: bool, rpaths: &[&str]| Image {
+            loads: vec![Load {
+                name: name.to_owned(),
+                weak,
+            }],
+            rpaths: rpaths.iter().map(|r| (*r).to_owned()).collect(),
+            library_validation: false,
+            platform: false,
+        };
+        let found = |image: &Image| -> Vec<String> {
+            let plants = plants(image, &dir.join("MacOS"), &account());
+            plants.into_iter().map(|p| p.path).collect()
+        };
+        let frameworks = dir.join("Frameworks/Foo.framework/Foo");
+
+        // An app's own framework is not in `/usr/lib/swift`: the search goes on to `Frameworks`.
+        let swift_first = ["/usr/lib/swift", "@executable_path/../Frameworks"];
+        let missing = image("@rpath/Foo.framework/Foo", true, &swift_first);
+        assert_eq!(found(&missing), [frameworks.display().to_string()]);
+        // The Swift runtime is in the cache through `/usr/lib/swift`.
+        let swift = image("@rpath/libswiftCore.dylib", true, &swift_first);
+        assert_eq!(found(&swift), Vec::<String>::new());
+        // So is a system library linked by absolute path, though not on disk.
+        let system = image("/usr/lib/libvigil-test-missing.dylib", true, &[]);
+        assert_eq!(found(&system), Vec::<String>::new());
+        // A bare `@loader_path` is the program's own folder, tried first.
+        fs::create_dir_all(dir.join("MacOS")).unwrap();
+        fs::create_dir_all(frameworks.parent().unwrap()).unwrap();
+        fs::write(&frameworks, "").unwrap();
+        let rpaths = ["@loader_path", "@executable_path/../Frameworks"];
+        let bare = image("@rpath/Foo.framework/Foo", false, &rpaths);
+        let own = dir.join("MacOS/Foo.framework/Foo");
+        assert_eq!(found(&bare), [own.display().to_string()]);
+        // A weak load with no rpath looks nowhere.
+        let nowhere = image("@rpath/Foo.framework/Foo", true, &[]);
+        assert_eq!(found(&nowhere), Vec::<String>::new());
     }
 
     #[test]
@@ -450,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn places_follow_the_loaders_names_and_the_shared_cache_counts_as_found() {
+    fn places_follow_the_loaders_names_and_the_sealed_volume_is_apples() {
         let folder = Path::new("/A/X.app/Contents/MacOS");
         let rpaths = [
             "@executable_path/../Frameworks".to_owned(),
@@ -480,12 +618,20 @@ mod tests {
             "relative to the working directory"
         );
 
-        assert!(is_present(Path::new("/usr/lib/libSystem.B.dylib")));
-        assert!(is_present(Path::new(
-            "/System/Library/Frameworks/Gone.framework/Gone"
-        )));
-        assert!(!is_present(Path::new(
-            "/usr/local/lib/vigil-test-missing.dylib"
-        )));
+        let bare = ["@executable_path".to_owned()];
+        assert_eq!(
+            super::places("@rpath/z.dylib", &bare, folder),
+            [folder.join("z.dylib")]
+        );
+        for (path, sealed) in [
+            ("/usr/lib/libSystem.B.dylib", true),
+            ("/System/Library/Frameworks/A.framework/A", true),
+            ("/System/Volumes/Data/Users/me/lib.dylib", false),
+            ("/usr/local/lib/a.dylib", false),
+            ("/sbin/launchd", true),
+            ("/Library/Frameworks/A.framework/A", false),
+        ] {
+            assert_eq!(on_sealed_volume(Path::new(path)), sealed, "{path}");
+        }
     }
 }

@@ -146,7 +146,7 @@ pub(super) fn collect(
                 let error = InventoryError::NoCaskList {
                     folder: folder.clone(),
                 };
-                inventory.fail(InventorySource::ApplicationFolder { path: folder }, error);
+                inventory.fail(InventorySource::CaskApps { path: folder }, error);
             }
             continue;
         };
@@ -554,7 +554,7 @@ mod tests {
         let folders = [home.join("Applications"), root.join("Applications")];
         let expected = folders
             .iter()
-            .map(|f| format!("app folder {}", f.display()));
+            .map(|f| format!("app versions in {}", f.display()));
         assert_eq!(failed, expected.collect::<Vec<_>>());
         assert!(matches!(
             inventory.problems[..],

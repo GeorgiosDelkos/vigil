@@ -113,8 +113,9 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   line. Vigil read the program each startup item runs and the main executable of each app in
   `/Applications` and `~/Applications`, and lists one only when it does not enforce library
   validation (the loader would load a library someone else signed) and this user could create
-  a file where it would load one. Each has its `path`, `used_by` (the startup items, by their
-  path in `mac/persistence.jsonl`, and apps that run it), `runs_as_root`, and `plants`: each
+  a file where it would load one. Each has its `path` (the program's, links followed),
+  `used_by` (the startup items, by their path in `mac/persistence.jsonl`, and apps that run
+  it), `runs_as_root`, and `plants`: each
   with the install name it `load`s, whether the load is `weak`, the `path` where a planted
   library would load, and `why`: `weak_missing` (a weak load of a library that is not there:
   the program starts without it and loads one put there) or `earlier_rpath` (an `@rpath/`

@@ -235,14 +235,15 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
     let files = startup::collect(&root, home.as_deref(), account.as_ref());
     let support = home.map(|home| home.join("Library/Application Support"));
     let browsers = support.map_or_else(Vec::new, |support| browsers::collect(inventory, &support));
-    // Without the account, where this user could plant a library is not known, so nothing is
-    // listed; their issues read as resolved for that sweep, as for `needs_account`.
+    // Without the account, where this user could plant a library is not known: every
+    // program is recorded as not read, which carries its issue.
+    let programs = dylib_programs(&items, &inventory.apps);
     let hijackable = match &account {
-        Some(account) if !cancel.is_cancelled() => {
-            let programs = dylib_programs(&items, &inventory.apps);
-            dylibs::scan(inventory, programs, account)
+        Some(account) if !cancel.is_cancelled() => dylibs::scan(inventory, programs, account),
+        Some(_) | None => {
+            dylibs::not_scanned(inventory, programs);
+            Vec::new()
         }
-        Some(_) | None => Vec::new(),
     };
     Host::new(&settings, &items, &files, &browsers, &hijackable)
 }
@@ -250,9 +251,12 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
 /// The programs the dylib check reads: what each startup item runs, then the main executable of
 /// each app the inventory found.
 fn dylib_programs(items: &[Item], apps: &[PathBuf]) -> Vec<dylibs::Program> {
+    // A relative path is one launchd does not resolve the way Vigil could (its signature is
+    // already `unreadable`), so it is not read against Vigil's own folder.
     let item_programs = items.iter().filter_map(|item| {
+        let program = item.program.as_ref().filter(|p| p.path.is_absolute())?;
         Some(dylibs::Program {
-            path: item.program.as_ref()?.path.clone(),
+            path: program.path.clone(),
             used_by: item.path.clone(),
             as_root: item.runs_as_root(),
         })

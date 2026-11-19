@@ -18,18 +18,22 @@ use std::path::Path;
 
 use crate::paths;
 
-/// One architecture's image in a program: a thin file has one, a universal file one per
-/// slice.
+/// One architecture's image in a program that this Mac can run: a thin file has one, a
+/// universal file one per `arm64` or `x86_64` slice.
 #[derive(Debug)]
 pub(super) struct Image {
     /// The libraries it loads, in load-command order.
     pub(super) loads: Vec<Load>,
     /// Its `LC_RPATH` entries, in the order the loader tries them.
     pub(super) rpaths: Vec<String>,
-    /// Whether the loader refuses a library not signed by Apple or the program's own team:
-    /// a platform binary, a signature flagged `library-validation`, or the hardened runtime
-    /// without the entitlement that turns validation off.
+    /// Whether its signature makes the loader refuse a library not signed by Apple or the
+    /// program's own team: flagged `library-validation`, or the hardened runtime without the
+    /// entitlement that turns validation off.
     pub(super) library_validation: bool,
+    /// Whether its code directory claims a platform binary, which the loader always validates.
+    /// Anyone who signs a file can set the byte; the kernel honors it only for Apple's own
+    /// code, so the caller trusts it only where only Apple writes.
+    pub(super) platform: bool,
 }
 
 /// A library a program loads, by the install name its load command gives.
@@ -74,6 +78,11 @@ const LC_LOAD_UPWARD_DYLIB: u32 = 0x8000_0023;
 const LC_RPATH: u32 = 0x8000_001c;
 const LC_CODE_SIGNATURE: u32 = 0x1d;
 
+// The architectures a Mac runs, from `mach/machine.h`: arm64 (arm64e included, a subtype), and
+// x86_64 under Rosetta. Slices of others (i386, ppc) never load, so they are not read.
+const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+
 // Code signature blobs and flags, from `cs_blobs.h`.
 const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xfade_0cc0;
 const CSMAGIC_CODEDIRECTORY: u32 = 0xfade_0c02;
@@ -117,8 +126,12 @@ pub(super) fn read(path: &Path) -> Result<Vec<Image>, ReadError> {
     match u32::from_be_bytes(magic) {
         FAT_MAGIC => fat(&file, len, false),
         FAT_MAGIC_64 => fat(&file, len, true),
-        _ => Ok(vec![image(&file, 0, len)?]),
+        _ => Ok(image(&file, 0, len)?.into_iter().collect()),
     }
+}
+
+fn runs_here(cputype: u32) -> bool {
+    matches!(cputype, CPU_TYPE_ARM64 | CPU_TYPE_X86_64)
 }
 
 /// The slices of a universal file of `len` bytes: `fat_arch` entries of 20 bytes, or
@@ -129,7 +142,7 @@ fn fat(file: &std::fs::File, len: u64, wide: bool) -> Result<Vec<Image>, ReadErr
         return Err(ReadError::NotMachO);
     }
     let entry = if wide { 32 } else { 20 };
-    let mut table = vec![0; usize::try_from(count).expect("at most 16") * entry];
+    let mut table = vec![0; count as usize * entry];
     file.read_exact_at(&mut table, 8)
         .map_err(|_| malformed("its universal header is cut short"))?;
     let mut images = Vec::new();
@@ -142,22 +155,34 @@ fn fat(file: &std::fs::File, len: u64, wide: bool) -> Result<Vec<Image>, ReadErr
         if offset.checked_add(size).is_none_or(|end| end > len) {
             return Err(malformed("a slice lies past the end of the file"));
         }
-        images.push(image(file, offset, size)?);
+        if !runs_here(be32(arch, 0)) {
+            continue;
+        }
+        // A slice that is not Mach-O is skipped, and the others still count.
+        match image(file, offset, size) {
+            Ok(slice) => images.extend(slice),
+            Err(ReadError::NotMachO) => {}
+            Err(e) => return Err(e),
+        }
     }
     Ok(images)
 }
 
-/// The image of `size` bytes at `base`.
-fn image(file: &std::fs::File, base: u64, size: u64) -> Result<Image, ReadError> {
+/// The image of `size` bytes at `base`, or `None` for an architecture this Mac does not run.
+fn image(file: &std::fs::File, base: u64, size: u64) -> Result<Option<Image>, ReadError> {
     let mut header = [0; 32];
-    if size < 28 || file.read_exact_at(&mut header[..28], base).is_err() {
+    if size < 28 {
         return Err(ReadError::NotMachO);
     }
+    file.read_exact_at(&mut header[..28], base)?;
     let header_len: u32 = match le32(&header, 0) {
         MH_MAGIC => 28,
         MH_MAGIC_64 => 32,
         _ => return Err(ReadError::NotMachO),
     };
+    if !runs_here(le32(&header, 4)) {
+        return Ok(None);
+    }
     let ncmds = le32(&header, 16);
     let sizeofcmds = le32(&header, 20);
     if sizeofcmds > COMMANDS_LIMIT || u64::from(header_len + sizeofcmds) > size {
@@ -189,7 +214,7 @@ fn image(file: &std::fs::File, base: u64, size: u64) -> Result<Image, ReadError>
             LC_CODE_SIGNATURE => {
                 let fields = command
                     .get(8..16)
-                    .ok_or_else(|| malformed("LC_CODE_SIGNATURE"))?;
+                    .ok_or_else(|| malformed("its LC_CODE_SIGNATURE command is cut short"))?;
                 signature = Some((le32(fields, 0), le32(fields, 4)));
             }
             _ => {}
@@ -197,32 +222,41 @@ fn image(file: &std::fs::File, base: u64, size: u64) -> Result<Image, ReadError>
         at += cmdsize;
     }
 
-    let library_validation = match signature {
+    let validation = match signature {
         Some((offset, len)) => {
             let (offset, len) = (u64::from(offset), u64::from(len));
             if offset + len > size {
                 return Err(malformed("its code signature lies past its end"));
             }
-            validates_libraries(file, base + offset, len)?
+            read_validation(file, base + offset, len)?
         }
-        None => false,
+        None => Validation::default(),
     };
-    Ok(Image {
+    Ok(Some(Image {
         loads,
         rpaths,
-        library_validation,
-    })
+        library_validation: validation.flagged,
+        platform: validation.platform,
+    }))
 }
 
-/// Whether the embedded signature of `len` bytes at `at` makes the loader validate libraries.
-fn validates_libraries(file: &std::fs::File, at: u64, len: u64) -> Result<bool, ReadError> {
+/// What a signature says of library validation: see [`Image`].
+#[derive(Debug, Default)]
+struct Validation {
+    flagged: bool,
+    platform: bool,
+}
+
+/// What the embedded signature of `len` bytes at `at` says of library validation.
+fn read_validation(file: &std::fs::File, at: u64, len: u64) -> Result<Validation, ReadError> {
     let blob = |offset: u64, want: u64| -> Result<Vec<u8>, ReadError> {
         if offset.checked_add(want).is_none_or(|end| end > len) {
             return Err(malformed(
                 "a code signature blob lies past the signature's end",
             ));
         }
-        let mut bytes = vec![0; usize::try_from(want).expect("limited above")];
+        // At most `ENTITLEMENTS_LIMIT` or a few blob headers, within the signature's `u32`.
+        let mut bytes = vec![0; usize::try_from(want).expect("a blob is within a u32 size")];
         file.read_exact_at(&mut bytes, at + offset)?;
         Ok(bytes)
     };
@@ -253,15 +287,16 @@ fn validates_libraries(file: &std::fs::File, at: u64, len: u64) -> Result<bool, 
     }
     let flags = be32(&directory, 12);
     let platform = directory[38] != 0;
-    if platform || flags & CS_REQUIRE_LV != 0 {
-        return Ok(true);
+    let found = |flagged| Validation { flagged, platform };
+    if flags & CS_REQUIRE_LV != 0 {
+        return Ok(found(true));
     }
     if flags & CS_RUNTIME == 0 {
-        return Ok(false);
+        return Ok(found(false));
     }
 
     let Some(entitlements_at) = slot(CSSLOT_ENTITLEMENTS) else {
-        return Ok(true);
+        return Ok(found(true));
     };
     let header = blob(entitlements_at, 8)?;
     let length = be32(&header, 4);
@@ -277,7 +312,7 @@ fn validates_libraries(file: &std::fs::File, at: u64, len: u64) -> Result<bool, 
         .get(DISABLE_LIBRARY_VALIDATION)
         .and_then(plist::Value::as_boolean)
         .unwrap_or(false);
-    Ok(!disabled)
+    Ok(found(!disabled))
 }
 
 /// The string a load command holds at the offset its third field gives, up to its NUL.
@@ -319,6 +354,8 @@ fn be64(bytes: &[u8], at: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     /// A thin 64-bit image holding `commands`, each a whole load command.
@@ -435,5 +472,207 @@ mod tests {
             malformed_detail(&fat),
             "a slice lies past the end of the file"
         );
+    }
+
+    /// An `LC_CODE_SIGNATURE` command pointing at `signature`, appended to `file` after its
+    /// load commands, as the linker places it.
+    fn signed(mut commands: Vec<Vec<u8>>, signature: &[u8]) -> Vec<u8> {
+        let mut command = Vec::new();
+        for field in [
+            LC_CODE_SIGNATURE,
+            16,
+            0,
+            u32::try_from(signature.len()).unwrap(),
+        ] {
+            command.extend(field.to_le_bytes());
+        }
+        commands.push(command);
+        let mut file = thin(&commands);
+        let at = u32::try_from(file.len()).unwrap();
+        let fields = file.len() - 8;
+        file[fields..fields + 4].copy_from_slice(&at.to_le_bytes());
+        file.extend(signature);
+        file
+    }
+
+    /// An embedded signature holding `blobs`, each with its slot type.
+    fn superblob(blobs: &[(u32, Vec<u8>)]) -> Vec<u8> {
+        let header = 12 + 8 * blobs.len();
+        let mut index = Vec::new();
+        let mut body: Vec<u8> = Vec::new();
+        for (slot, blob) in blobs {
+            index.extend(slot.to_be_bytes());
+            index.extend(u32::try_from(header + body.len()).unwrap().to_be_bytes());
+            body.extend(blob);
+        }
+        let mut out = Vec::new();
+        out.extend(CSMAGIC_EMBEDDED_SIGNATURE.to_be_bytes());
+        out.extend(u32::try_from(header + body.len()).unwrap().to_be_bytes());
+        out.extend(u32::try_from(blobs.len()).unwrap().to_be_bytes());
+        out.extend(index);
+        out.extend(body);
+        out
+    }
+
+    /// A code directory with `flags` and the platform byte.
+    fn directory(flags: u32, platform: u8) -> Vec<u8> {
+        let mut out = vec![0; 44];
+        out[..4].copy_from_slice(&CSMAGIC_CODEDIRECTORY.to_be_bytes());
+        out[12..16].copy_from_slice(&flags.to_be_bytes());
+        out[38] = platform;
+        out
+    }
+
+    fn entitlements(xml: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(CSMAGIC_EMBEDDED_ENTITLEMENTS.to_be_bytes());
+        out.extend(u32::try_from(8 + xml.len()).unwrap().to_be_bytes());
+        out.extend(xml.as_bytes());
+        out
+    }
+
+    fn validation_of(signature: &[u8]) -> (bool, bool) {
+        let images = read_bytes(&signed(Vec::new(), signature)).unwrap();
+        (images[0].library_validation, images[0].platform)
+    }
+
+    #[test]
+    fn the_signature_decides_library_validation() {
+        let plain = superblob(&[(CSSLOT_CODEDIRECTORY, directory(0, 0))]);
+        assert_eq!(validation_of(&plain), (false, false));
+        let flagged = superblob(&[(CSSLOT_CODEDIRECTORY, directory(CS_REQUIRE_LV, 0))]);
+        assert_eq!(validation_of(&flagged), (true, false));
+        let hardened = superblob(&[(CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0))]);
+        assert_eq!(validation_of(&hardened), (true, false));
+        let claim = superblob(&[(CSSLOT_CODEDIRECTORY, directory(0, 2))]);
+        assert_eq!(
+            validation_of(&claim),
+            (false, true),
+            "a claim, not validation"
+        );
+
+        let xml = |value: &str| {
+            format!(
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>{DISABLE_LIBRARY_VALIDATION}\
+                 </key>{value}</dict></plist>"
+            )
+        };
+        let disabled = superblob(&[
+            (CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0)),
+            (CSSLOT_ENTITLEMENTS, entitlements(&xml("<true/>"))),
+        ]);
+        assert_eq!(validation_of(&disabled), (false, false));
+        let kept = superblob(&[
+            (CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0)),
+            (CSSLOT_ENTITLEMENTS, entitlements(&xml("<false/>"))),
+        ]);
+        assert_eq!(validation_of(&kept), (true, false));
+    }
+
+    #[test]
+    fn a_broken_signature_says_what_is_wrong() {
+        let detail = |signature: Vec<u8>| malformed_detail(&signed(Vec::new(), &signature));
+        let mut wrong_magic = superblob(&[(CSSLOT_CODEDIRECTORY, directory(0, 0))]);
+        wrong_magic[0] = 0;
+        assert_eq!(
+            detail(wrong_magic),
+            "its code signature is not an embedded signature"
+        );
+        let mut many = superblob(&[]);
+        many[8..12].copy_from_slice(&65_u32.to_be_bytes());
+        assert_eq!(detail(many), "its code signature lists too many blobs");
+        assert_eq!(
+            detail(superblob(&[])),
+            "its code signature has no code directory"
+        );
+        let mut directory_magic = directory(0, 0);
+        directory_magic[0] = 0;
+        assert_eq!(
+            detail(superblob(&[(CSSLOT_CODEDIRECTORY, directory_magic)])),
+            "its code directory has the wrong magic"
+        );
+        let short = superblob(&[(CSSLOT_CODEDIRECTORY, vec![0; 8])]);
+        assert_eq!(
+            detail(short),
+            "a code signature blob lies past the signature's end"
+        );
+        let mut bad_length = entitlements("x");
+        bad_length[4..8].copy_from_slice(&4_u32.to_be_bytes());
+        let blobs = [
+            (CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0)),
+            (CSSLOT_ENTITLEMENTS, bad_length),
+        ];
+        assert_eq!(
+            detail(superblob(&blobs)),
+            "its entitlements blob is not one"
+        );
+        let blobs = [
+            (CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0)),
+            (CSSLOT_ENTITLEMENTS, entitlements("not a plist")),
+        ];
+        assert!(detail(superblob(&blobs)).starts_with("its entitlements do not parse"));
+
+        let mut past = signed(Vec::new(), &superblob(&[]));
+        let fields = 32 + 8;
+        past[fields..fields + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            malformed_detail(&past),
+            "its code signature lies past its end"
+        );
+    }
+
+    #[test]
+    fn a_universal_file_gives_the_slices_this_mac_runs() {
+        let slice = thin(&[with_string(LC_RPATH, "/a")]);
+        let mut intel = slice.clone();
+        intel[4..8].copy_from_slice(&CPU_TYPE_X86_64.to_le_bytes());
+        let mut i386 = slice.clone();
+        i386[4..8].copy_from_slice(&7_u32.to_le_bytes());
+        let slices = [(CPU_TYPE_ARM64, slice), (CPU_TYPE_X86_64, intel), (7, i386)];
+        let header = 8 + 32 * slices.len();
+        let mut file = Vec::new();
+        file.extend(FAT_MAGIC_64.to_be_bytes());
+        file.extend(u32::try_from(slices.len()).unwrap().to_be_bytes());
+        let mut at = header;
+        for (cputype, bytes) in &slices {
+            file.extend(cputype.to_be_bytes());
+            file.extend(0_u32.to_be_bytes());
+            file.extend(u64::try_from(at).unwrap().to_be_bytes());
+            file.extend(u64::try_from(bytes.len()).unwrap().to_be_bytes());
+            file.extend([0; 8]);
+            at += bytes.len();
+        }
+        for (_, bytes) in &slices {
+            file.extend(bytes);
+        }
+        let images = read_bytes(&file).unwrap();
+        assert_eq!(images.len(), 2, "i386 does not run on a Mac today");
+
+        // A thin file for an architecture no Mac runs has no image to read.
+        let mut ppc = thin(&[]);
+        ppc[4..8].copy_from_slice(&18_u32.to_le_bytes());
+        assert!(read_bytes(&ppc).unwrap().is_empty());
+    }
+
+    proptest! {
+        /// Any bytes, and a valid image with bytes changed, read without a panic: the file
+        /// may be planted.
+        #[test]
+        fn any_bytes_read_without_panicking(
+            bytes in proptest::collection::vec(any::<u8>(), 0..512),
+            flips in proptest::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 0..8),
+        ) {
+            drop(read_bytes(&bytes));
+            let signature = superblob(&[
+                (CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0)),
+                (CSSLOT_ENTITLEMENTS, entitlements("<plist><dict/></plist>")),
+            ]);
+            let mut image = signed(vec![with_string(LC_RPATH, "/a")], &signature);
+            for (at, byte) in flips {
+                let at = at.index(image.len());
+                image[at] = byte;
+            }
+            drop(read_bytes(&image));
+        }
     }
 }

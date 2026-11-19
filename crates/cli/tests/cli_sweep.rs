@@ -460,7 +460,7 @@ fn a_failed_inventory_source_is_saved_and_shown_as_not_checked() {
         serde_json::json!([
             {"kind": "homebrew"},
             {"kind": "npm_global"},
-            {"kind": "application_folder", "path": apps},
+            {"kind": "cask_apps", "path": apps},
             {"kind": "lockfile", "path": lockfile},
         ])
     );
@@ -469,7 +469,7 @@ fn a_failed_inventory_source_is_saved_and_shown_as_not_checked() {
     let stdout = text(&out.stdout);
     assert!(
         stdout.contains(&format!(
-            "not fully checked: Homebrew, npm global packages, app folder {}, lockfile {}",
+            "not fully checked: Homebrew, npm global packages, app versions in {}, lockfile {}",
             apps.display(),
             lockfile.display()
         )),
@@ -966,7 +966,9 @@ fn an_app_that_would_load_a_planted_library_is_an_issue() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let lines = fs::read_to_string(sandbox.sweep_dir().join("bundle/mac/dylibs.jsonl")).unwrap();
     let line: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
-    assert_eq!(line["path"], program.to_str().unwrap(), "{lines}");
+    // Named by its real path, which the sandbox's `/var` link resolves to `/private/var`.
+    let real = fs::canonicalize(&program).unwrap();
+    assert_eq!(line["path"], real.to_str().unwrap(), "{lines}");
     assert_eq!(line["used_by"], serde_json::json!([app.to_str().unwrap()]));
     assert_eq!(line["plants"][0]["path"], gone);
     assert_eq!(line["plants"][0]["why"], "weak_missing");
@@ -974,7 +976,7 @@ fn an_app_that_would_load_a_planted_library_is_an_issue() {
     let report = sandbox.newest_report("mac");
     assert_eq!(
         report["issues"][0]["subject"],
-        serde_json::json!({"item": program.to_str().unwrap()}),
+        serde_json::json!({"item": real.to_str().unwrap()}),
         "{report}"
     );
 }
