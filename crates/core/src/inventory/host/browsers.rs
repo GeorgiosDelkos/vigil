@@ -441,10 +441,10 @@ fn firefox_profile(profile: &Path) -> Result<Vec<BrowserExtension>, InventoryErr
             let id = addon.id?;
             let path = profile.join("extensions").join(format!("{id}.xpi"));
             let loaded_from = addon.path.filter(|kept| Path::new(kept) != path);
-            let (permissions, hosts) = addon
-                .user_permissions
-                .map(|p| (p.permissions, p.origins))
-                .unwrap_or_default();
+            let (permissions, hosts) = match addon.user_permissions {
+                Some(granted) => (granted.permissions, granted.origins),
+                None => (Vec::new(), Vec::new()),
+            };
             Some(BrowserExtension {
                 path: path.to_string_lossy().into_owned(),
                 kind: "browser_extension",
