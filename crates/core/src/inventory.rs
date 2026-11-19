@@ -506,6 +506,7 @@ impl InventorySource {
             Self::BackgroundItems => matches!(
                 subject,
                 Subject::Item(item) if host::may_come_from_records(Path::new(item))
+                    && !host::may_be_system_extension(Path::new(item))
             ),
             Self::SystemExtensions => matches!(
                 subject,
@@ -1287,6 +1288,13 @@ mod tests {
         let login_item =
             Subject::Item("/Applications/A.app/Contents/Library/LoginItems/H.app".into());
         assert!(records.covers_issue(&login_item));
+        let extension = Subject::Item(
+            "/Applications/A.app/Contents/Library/SystemExtensions/x.systemextension".into(),
+        );
+        assert!(
+            !records.covers_issue(&extension),
+            "a system extension is read from its own database"
+        );
         assert!(records.covers_issue(&Subject::Item("/Applications/Gone.app".into())));
         let unplaced = Subject::Item("(unplaced) 4.d: (no location)".into());
         assert!(

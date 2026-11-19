@@ -240,7 +240,8 @@ pub(crate) fn needs_account(path: &str) -> bool {
 /// Marks each program and script that runs as root and that `account` could replace: a launch
 /// daemon's, or an app's registered daemon's, that names no other `UserName`. Only those: an
 /// agent runs as a user who could replace it anyway, and marking it would change the key of
-/// every dismissed agent whose program is in the home folder.
+/// every dismissed agent whose program is in the home folder. Extensions are not marked: the
+/// kernel and `sysextd` load only root-owned copies.
 fn mark_replaceable(items: &mut [Item], account: &Account) {
     for item in items {
         let daemon = matches!(
@@ -394,8 +395,9 @@ enum ItemKind {
     /// A kernel extension in `/Library/Extensions`, which the kernel loads once the user has
     /// allowed it in System Settings.
     KernelExtension,
-    /// A system extension an app installed (`OSSystemExtensionRequest`), which runs as root
-    /// outside the kernel while its `state` is `activated_enabled`.
+    /// A system extension an app installed (`OSSystemExtensionRequest`), which runs outside the
+    /// kernel (as root, or as `_driverkit` for a driver) while its `state` is
+    /// `activated_enabled`.
     SystemExtension,
 }
 
@@ -518,8 +520,22 @@ impl Item {
                 json!([p.path, p.signature.identity()])
             }
         };
+        // A system extension's program is in the copy macOS staged under a new UUID on each
+        // update, so its path is left out: the item's path and the signature's identity say
+        // what runs, and an update from the same team keeps the dismissal.
+        let program = self.program.as_ref().map(|p| match self.kind {
+            ItemKind::SystemExtension => json!([p.signature.identity()]),
+            ItemKind::LaunchDaemon
+            | ItemKind::LaunchAgent
+            | ItemKind::UserLaunchAgent
+            | ItemKind::AppLaunchAgent
+            | ItemKind::AppLaunchDaemon
+            | ItemKind::LoginItem
+            | ItemKind::OpenAtLogin
+            | ItemKind::KernelExtension => file(p),
+        });
         let mut identity = json!({
-            "program": self.program.as_ref().map(file),
+            "program": program,
             "scripts": self.scripts.iter().map(file).collect::<Vec<_>>(),
             "arguments": self.arguments,
             "environment": self.environment,
@@ -1868,6 +1884,19 @@ TeamIdentifier=not set
             !items[0].identity().contains("login_items"),
             "the extension's identity is its own"
         );
+
+        // An update stages the same program under a new UUID: the key holds, unless the
+        // program itself changes.
+        let restaged = tmp.path().join("staged-2/x.systemextension");
+        app(&restaged, "x");
+        let url = format!("file://{}/", restaged.display());
+        let update = [record(origin.to_str().unwrap(), &url, "activated_enabled")];
+        fs::write(&db, database(&update)).unwrap();
+        let updated = system_extensions(&mut inventory, &db, &Cancel::new());
+        assert_eq!(updated[0].identity(), items[0].identity());
+        fs::write(restaged.join("Contents/MacOS/x"), "#!/bin/sh\nexit 1\n").unwrap();
+        let changed = system_extensions(&mut inventory, &db, &Cancel::new());
+        assert_ne!(changed[0].identity(), items[0].identity());
 
         // A database that does not parse marks the extensions unchecked.
         fs::write(&db, "not a plist").unwrap();

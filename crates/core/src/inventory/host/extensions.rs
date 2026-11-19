@@ -45,8 +45,14 @@ pub(super) struct SystemExtension {
     pub(super) record: Record,
 }
 
+impl SystemExtension {
+    fn runs(&self) -> bool {
+        self.record.state.as_deref() == Some("activated_enabled")
+    }
+}
+
 /// What a record says besides its paths, as the bundle shows it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Serialize)]
 pub(super) struct Record {
     pub(super) identifier: Option<String>,
     /// The team the app's signature named when it asked for the extension. The staged copy's
@@ -151,12 +157,6 @@ pub(super) fn read(path: &Path) -> Result<Vec<SystemExtension>, InventoryError> 
     Ok(extensions)
 }
 
-impl SystemExtension {
-    fn runs(&self) -> bool {
-        self.record.state.as_deref() == Some("activated_enabled")
-    }
-}
-
 #[cfg(test)]
 pub(super) mod tests {
     use std::fs;
@@ -213,13 +213,13 @@ pub(super) mod tests {
         let copy = Path::new("/Library/SystemExtensions/U-1/My X.systemextension");
         assert_eq!(found[0].staged.as_deref(), Some(copy));
         assert_eq!(
-            found[0].record,
-            Record {
-                identifier: Some("com.example.agent".to_owned()),
-                team: Some("ABCDE12345".to_owned()),
-                state: Some("activated_enabled".to_owned()),
-                categories: vec!["com.apple.system_extension.endpoint_security".to_owned()],
-            }
+            serde_json::to_value(&found[0].record).unwrap(),
+            serde_json::json!({
+                "identifier": "com.example.agent",
+                "team": "ABCDE12345",
+                "state": "activated_enabled",
+                "categories": ["com.apple.system_extension.endpoint_security"],
+            })
         );
     }
 
