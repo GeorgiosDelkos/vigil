@@ -1661,9 +1661,13 @@ fn by_component<'a>(target: &str, findings: &[&'a ReportFinding]) -> Vec<Vec<&'a
 /// A group's name: the place's own (a Homebrew formula, which can hold several products), or
 /// the component's.
 fn group_name(component: &Component) -> String {
+    let product = match &component.lookup {
+        Lookup::Product(p) => Some(p.to_string()),
+        Lookup::Package(_) => None,
+    };
     component
         .found_in
-        .install_name()
+        .install_name(product.as_deref())
         .map_or_else(|| component_name(component), str::to_owned)
 }
 

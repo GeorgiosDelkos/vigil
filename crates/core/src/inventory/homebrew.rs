@@ -183,7 +183,15 @@ fn parse(json: &str, inventory: &mut Inventory) -> Option<CaskApps> {
                 .entry(name)
                 .or_insert_with(|| cask.token.clone());
         }
-        for identifier in quit_identifiers(&cask.artifacts) {
+        // Only a cask with no `app` artifact (a `pkg` installer) is known by what it quits:
+        // otherwise an older copy of its app kept a folder down, found first, would claim it.
+        let pkg_only = app_names(&cask.artifacts).is_empty();
+        let identifiers = if pkg_only {
+            quit_identifiers(&cask.artifacts)
+        } else {
+            Vec::new()
+        };
+        for identifier in identifiers {
             apps.by_identifier
                 .entry(identifier)
                 .or_insert_with(|| cask.token.clone());
@@ -407,7 +415,8 @@ mod tests {
             ]
         );
         assert_eq!(apps.token(Some("Docker.app"), None), Some("docker"));
-        assert_eq!(apps.token(None, Some("com.docker.docker")), Some("docker"));
+        // Docker's cask names its app, so what it quits does not name it.
+        assert_eq!(apps.token(None, Some("com.docker.docker")), None);
         let reader = apps.token(Some("Other.app"), Some("com.adobe.Reader"));
         assert_eq!(reader, Some("reader"));
         assert_eq!(apps.token(Some("Thorium.app"), Some("com.other")), None);

@@ -400,9 +400,13 @@ installed, with no app.
 - **Homebrew casks.** An app a cask installed gives only its Electron, under the cask
   (`Homebrew cask visual-studio-code`), since the cask is already in the inventory. It is
   known by its file name in an installed cask's `app` artifacts (the target name when one is
-  given), for an app directly in one of the two folders, where casks put theirs, or by a
-  bundle identifier the cask's `uninstall` quits, which is how an app a `pkg` installer put
-  in place (Acrobat Reader) is known. Each cask claims one app, the first found: another copy
+  given), for an app directly in one of the two folders, where casks put theirs, or, for a
+  cask with no `app` artifact, by a bundle identifier its `uninstall` quits, which is how an
+  app a `pkg` installer put in place (Acrobat Reader) is known. A cask that names its app is
+  not known by what it quits, so an older copy kept a folder down, found first, cannot claim
+  it; for a `pkg` cask, the first app found with the identifier does (accepted, as such a
+  copy is rare). An Electron finding is headed by its product, not the app's name, as it is at
+  Electron's version. Each cask claims one app, the first found: another copy
   (an older Chrome kept in a folder) is read as an app of its own, so its version is looked
   up. A name or identifier two casks give goes to the first listed. A `pkg` cask that quits nothing of the app
   (Zoom's quits nothing) is not known: its app is read as well and shows next to the cask,

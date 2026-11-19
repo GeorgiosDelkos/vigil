@@ -265,6 +265,9 @@ pub enum FoundIn {
     },
 }
 
+/// The NVD product of the Electron framework an app ships, looked up in every app that has one.
+pub(crate) const ELECTRON: &str = "electronjs:electron";
+
 /// Where an app outside Homebrew came from.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -278,7 +281,8 @@ pub enum AppSource {
 impl FoundIn {
     /// Whether this place is one installed thing, all of whose components one upgrade
     /// replaces: one Homebrew formula can map to several NVD products (curl and libcurl), all
-    /// at its version. A lockfile, a dependency graph, npm's global packages or macOS hold
+    /// at its version, and an app or a cask also holds the Electron it ships, at Electron's
+    /// version. A lockfile, a dependency graph, npm's global packages or macOS hold
     /// many things, each upgraded on its own.
     pub(crate) fn is_one_install(&self) -> bool {
         match self {
@@ -300,13 +304,18 @@ impl FoundIn {
         }
     }
 
-    /// The name this place gives what it installed, when that names it better than any one of
-    /// its products: a Homebrew formula's name (`curl`, for curl and libcurl) or a cask's token.
-    pub(crate) fn install_name(&self) -> Option<&str> {
+    /// The name this place gives its component of NVD product `product` (`None` for an OSV
+    /// package), when that names it better than the product: a Homebrew formula's name
+    /// (`curl`, for curl and libcurl), a cask's token, or an app's name (`Google Chrome`).
+    /// Never for the Electron an app or cask ships, which is at its own version: a heading
+    /// "Code 37.7.0" would read as the app at Electron's version.
+    pub(crate) fn install_name(&self, product: Option<&str>) -> Option<&str> {
+        if product == Some(ELECTRON) {
+            return None;
+        }
         match self {
             Self::HomebrewFormula { name } => Some(name),
             Self::HomebrewCask { token } => Some(token),
-            // An app and the Electron it ships are named by the app (`Google Chrome`).
             Self::Application { path, .. } => path.file_stem().and_then(|name| name.to_str()),
             Self::MacOs
             | Self::Rustup { .. }
@@ -996,8 +1005,8 @@ mod tests {
         let formula = FoundIn::HomebrewFormula {
             name: "openssl@3".to_owned(),
         };
-        assert_eq!(formula.install_name(), Some("openssl@3"));
-        assert_eq!(FoundIn::Python.install_name(), None);
+        assert_eq!(formula.install_name(Some("openssl")), Some("openssl@3"));
+        assert_eq!(FoundIn::Python.install_name(Some("python")), None);
     }
 
     #[test]
@@ -1090,7 +1099,15 @@ mod tests {
             path: "/Applications/Google Chrome.app".into(),
             source: AppSource::Direct,
         };
-        assert_eq!(chrome.install_name(), Some("Google Chrome"));
+        assert_eq!(
+            chrome.install_name(Some("google:chrome")),
+            Some("Google Chrome")
+        );
+        assert_eq!(chrome.install_name(Some(ELECTRON)), None);
+        let cask = FoundIn::HomebrewCask {
+            token: "visual-studio-code".into(),
+        };
+        assert_eq!(cask.install_name(Some(ELECTRON)), None);
         assert_eq!(
             serde_json::to_value(&chrome).unwrap(),
             serde_json::json!({

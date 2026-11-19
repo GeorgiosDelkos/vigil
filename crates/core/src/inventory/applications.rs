@@ -8,8 +8,8 @@
 //! is also looked up as Electron at the framework's version, whether or not the table names
 //! the app.
 //!
-//! An app a cask installed (by its file name, or by a bundle identifier the cask quits) gives
-//! only its Electron, as part of the cask: the cask itself is already in the inventory. When
+//! An app a cask installed (by its file name, or for a `pkg` cask by a bundle identifier the
+//! cask quits) gives only its Electron, as part of the cask: the cask itself is already in the inventory. When
 //! `brew` ran and failed, which apps casks installed is not known, so no app is read and each
 //! folder holding apps fails: their findings carry over instead of showing twice, once under
 //! the cask and once under the app. Accepted: a failed listing of `/Applications` fails only
@@ -26,6 +26,7 @@ use serde::Deserialize;
 
 use crate::feeds::Product;
 use crate::inventory::AppSource;
+use crate::inventory::ELECTRON;
 use crate::inventory::FoundIn;
 use crate::inventory::Inventory;
 use crate::inventory::InventoryError;
@@ -109,9 +110,6 @@ const APP_PRODUCTS: &[(&str, &[&str])] = &[
         &["zoom:meetings", "zoom:workplace", "zoom:zoom"],
     ),
 ];
-
-/// The NVD product of the Electron framework an app ships.
-const ELECTRON: &str = "electronjs:electron";
 
 /// Where an app ships Electron, and the `Info.plist` that gives its version.
 const ELECTRON_INFO: &str = "Contents/Frameworks/Electron Framework.framework/Resources/Info.plist";
@@ -515,8 +513,21 @@ mod tests {
             ("CFBundleShortVersionString", "120.0.1"),
         ];
         app(&root.join("Applications/Old/Google Chrome.app"), &keys);
+        // A copy that sorts first (`Backup/` before `Docker.app`) does not take the claim.
+        let keys = [
+            ("CFBundleIdentifier", "com.docker.docker"),
+            ("CFBundleShortVersionString", "4.0.0"),
+        ];
+        app(&root.join("Applications/Backup/Docker.app"), &keys);
+        let keys = [
+            ("CFBundleIdentifier", "com.docker.docker"),
+            ("CFBundleShortVersionString", "4.82.0"),
+        ];
+        app(&root.join("Applications/Docker.app"), &keys);
 
         let mut casks = CaskApps::default();
+        let docker_cask = ("Docker.app".to_owned(), "docker".to_owned());
+        casks.by_name.insert(docker_cask.0, docker_cask.1);
         let chrome_cask = ("Google Chrome.app".to_owned(), "google-chrome".to_owned());
         casks.by_name.insert(chrome_cask.0, chrome_cask.1);
         let bot_cask = ("com.example.bot".to_owned(), "bot".to_owned());
@@ -525,6 +536,7 @@ mod tests {
         assert_eq!(
             summary(&inventory, tmp.path()),
             [
+                "app root/Applications/Backup/Docker.app Direct docker:desktop 4.0.0",
                 "Homebrew cask bot electronjs:electron 43.8.9",
                 "app root/Applications/Old/Google Chrome.app Direct google:chrome 120.0.1",
                 "app home/Applications/Google Chrome.app Direct google:chrome 157.0.8103.79",

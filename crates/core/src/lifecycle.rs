@@ -1021,7 +1021,7 @@ impl SavedInstalled {
             key,
             name: place
                 .as_ref()
-                .and_then(FoundIn::install_name)
+                .and_then(|place| place.install_name(self.lookup["product"].as_str()))
                 .map_or_else(|| name.to_owned(), sweep::plain),
         }
     }
