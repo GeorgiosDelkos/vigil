@@ -57,6 +57,11 @@ case "$CLAUDE_FAKE_MODE:$n" in
     echo '{"findings": [], "issues": [{"subject": {"item": "'"$zshrc"'"},
       "severity": "high", "evidence": "line 2", "explanation": "x",
       "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
+  extension:*)
+    ext=$(grep -o '"path":"[^"]*\.systemextension"' mac/persistence.jsonl | cut -d'"' -f4)
+    echo '{"findings": [], "issues": [{"subject": {"item": "'"$ext"'"},
+      "severity": "high", "evidence": "e", "explanation": "x",
+      "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
   retry:1) echo '{"findings": [], "issues": [], "bogus": 1}' > findings.json ;;
   retry:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
@@ -727,6 +732,85 @@ fn an_app_in_open_at_login_is_read_and_its_issue_named_by_the_bundle() {
     assert_eq!(
         report["issues"][0]["subject"],
         serde_json::json!({"item": app.to_str().unwrap()}),
+        "{report}"
+    );
+}
+
+/// A bundle at `path` whose executable is a shell script, as an unsigned extension would be.
+fn bundle(path: &Path, executable: &str) {
+    let contents = path.join("Contents");
+    fs::create_dir_all(contents.join("MacOS")).expect("the bundle folder is made");
+    fs::write(
+        contents.join("Info.plist"),
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+             <key>CFBundleExecutable</key><string>{executable}</string></dict></plist>\n"
+        ),
+    )
+    .expect("Info.plist is written");
+    fs::write(contents.join("MacOS").join(executable), "#!/bin/sh\n")
+        .expect("the executable is written");
+}
+
+#[test]
+fn kernel_and_system_extensions_are_read_and_an_issue_named_by_the_app_copy() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let system = sandbox.path().join("system/Library");
+    let kext = system.join("Extensions/Driver.kext");
+    bundle(&kext, "Driver");
+    let origin = sandbox
+        .path()
+        .join("Applications/Guard.app/Contents/Library/SystemExtensions/g.systemextension");
+    let staged = system.join("SystemExtensions/0A1B/g.systemextension");
+    bundle(&staged, "g");
+    fs::write(
+        system.join("SystemExtensions/db.plist"),
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<plist version=\"1.0\"><dict>\
+             <key>extensions</key><array><dict>\
+             <key>categories</key><array>\
+             <string>com.apple.system_extension.network_extension</string></array>\
+             <key>identifier</key><string>com.example.guard</string>\
+             <key>originPath</key><string>{}</string>\
+             <key>stagedBundleURL</key><dict><key>relative</key><string>file://{}/</string></dict>\
+             <key>state</key><string>activated_enabled</string>\
+             <key>teamID</key><string>ABCDE12345</string>\
+             </dict></array></dict></plist>\n",
+            origin.display(),
+            staged.display()
+        ),
+    )
+    .unwrap();
+
+    let out = sandbox.sweep("extension");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let items =
+        fs::read_to_string(sandbox.sweep_dir().join("bundle/mac/persistence.jsonl")).unwrap();
+    let lines: Vec<serde_json::Value> = items
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let driver = lines
+        .iter()
+        .find(|l| l["kind"] == "kernel_extension")
+        .unwrap();
+    assert_eq!(driver["path"], kext.to_str().unwrap());
+    assert_eq!(driver["program"]["signature"]["status"], "unsigned");
+    let guard = lines
+        .iter()
+        .find(|l| l["kind"] == "system_extension")
+        .unwrap();
+    assert_eq!(guard["path"], origin.to_str().unwrap());
+    assert_eq!(
+        guard["program"]["path"],
+        staged.join("Contents/MacOS/g").to_str().unwrap()
+    );
+    assert_eq!(guard["system_extension"]["state"], "activated_enabled");
+
+    let report = sandbox.newest_report("mac");
+    assert_eq!(
+        report["issues"][0]["subject"],
+        serde_json::json!({"item": origin.to_str().unwrap()}),
         "{report}"
     );
 }

@@ -9,10 +9,11 @@
 //!   with the program it starts, the script an interpreter runs, and their code signatures,
 //!   then what Background Task Management records that no launch folder shows ([`background`]):
 //!   login items inside apps, the agents and daemons apps registered from their own bundle,
-//!   and the apps that open at login, then the shells' startup files, crontabs and other files
-//!   that run commands ([`startup`]). Programs that run as root say whether this user could
-//!   replace them ([`account`]). An issue names one by its path: the property list's, the app
-//!   bundle's, or the file's.
+//!   and the apps that open at login, then the kernel extensions in `/Library/Extensions` and
+//!   the system extensions macOS records ([`extensions`]), then the shells' startup files,
+//!   crontabs and other files that run commands ([`startup`]). Programs that run as root say
+//!   whether this user could replace them ([`account`]). An issue names one by its path: the
+//!   property list's, the app bundle's, the extension's, or the file's.
 //!
 //! Vigil reads signatures itself because a sweep's agent runs no commands. Every tool is called
 //! by its absolute path: these checks decide whether a program is trusted, and a `codesign`
@@ -27,10 +28,11 @@
 //! developer keeps the dismissal. The identity is part of every item issue's key, so changing
 //! its shape clears every item dismissal once.
 //!
-//! Not read yet: kernel and system extensions, and the other persistence locations. The
-//! records of Background Task Management need Full Disk Access; without it they are a note
-//! ([`InventoryError::FullDiskAccess`]), and the app asks for it ([`needs_full_disk_access`]).
-//! `/System/Library/Launch*` is left out because it is on the sealed system volume.
+//! Not read yet: the other persistence locations. The records of Background Task Management
+//! need Full Disk Access; without it they are a note ([`InventoryError::FullDiskAccess`]), and
+//! the app asks for it ([`needs_full_disk_access`]).
+//! `/System/Library/Launch*` and `/System/Library/Extensions` are left out because they are on
+//! the sealed system volume.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -58,6 +60,7 @@ use crate::paths;
 
 mod account;
 mod background;
+mod extensions;
 mod startup;
 
 /// What the host checks found, ready for the Mac's bundle.
@@ -88,11 +91,13 @@ const POSTURE: [(&str, &str, &[&str]); 4] = [
     ),
 ];
 
-/// The folders launchd reads jobs from, outside the sealed system volume, under
-/// [`system_root`]. The user's own `~/Library/LaunchAgents` is added at run time.
-const LAUNCH_FOLDERS: [(ItemKind, &str); 2] = [
+/// The folders launchd reads jobs from, and the one third-party kernel extensions are installed
+/// in, outside the sealed system volume, under [`system_root`]. The user's own
+/// `~/Library/LaunchAgents` is added at run time.
+const LAUNCH_FOLDERS: [(ItemKind, &str); 3] = [
     (ItemKind::LaunchDaemon, "Library/LaunchDaemons"),
     (ItemKind::LaunchAgent, "Library/LaunchAgents"),
+    (ItemKind::KernelExtension, "Library/Extensions"),
 ];
 
 /// The folder [`LAUNCH_FOLDERS`] are under: `/`, or in a debug build `VIGIL_TEST_LAUNCH_ROOT`
@@ -193,6 +198,11 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
         &root.join(background::FOLDER),
         cancel,
     ));
+    items.extend(system_extensions(
+        inventory,
+        &root.join(extensions::DATABASE),
+        cancel,
+    ));
     let account = match Account::current(cancel) {
         Ok(Some(account)) => Some(account),
         // `id` is part of macOS, so its absence is a failure, not a tool the user left out.
@@ -246,6 +256,49 @@ fn mark_replaceable(items: &mut [Item], account: &Account) {
             program.replaceable = program.path.is_absolute() && account.can_replace(&program.path);
         }
     }
+}
+
+/// Reads the system extensions in the database at `database`. Each is checked as a bundle: the
+/// copy macOS runs when the record names one, else the bundle in the app. The database's
+/// failures are of [`InventorySource::SystemExtensions`]; a check of one extension that could
+/// not run is of its [`InventorySource::LaunchItem`], as in [`launch_items`].
+fn system_extensions(inventory: &mut Inventory, database: &Path, cancel: &Cancel) -> Vec<Item> {
+    let found = match extensions::read(database) {
+        Ok(found) => found,
+        Err(e) => {
+            inventory.fail(InventorySource::SystemExtensions, e);
+            return Vec::new();
+        }
+    };
+    let mut items = Vec::new();
+    for extension in found {
+        if cancel.is_cancelled() {
+            let what = "reading system extensions".to_owned();
+            inventory.fail(
+                InventorySource::SystemExtensions,
+                InventoryError::Cancelled { what },
+            );
+            return items;
+        }
+        let bundle = extension.staged.as_ref().unwrap_or(&extension.origin);
+        let mut failures = Vec::new();
+        let mut item = bundle_item(ItemKind::SystemExtension, bundle, cancel, &mut failures);
+        item.path = extension.origin.to_string_lossy().into_owned();
+        item.label.clone_from(&extension.record.identifier);
+        item.system_extension = Some(extension.record);
+        for e in failures {
+            let path = item.path.clone();
+            inventory.fail(InventorySource::LaunchItem { path }, e);
+        }
+        items.push(item);
+    }
+    items
+}
+
+/// Whether an item at `path` can come from [`system_extensions`]: a bundle named
+/// `.systemextension`, as every system extension's is.
+pub(crate) fn may_be_system_extension(path: &Path) -> bool {
+    path.extension() == Some("systemextension".as_ref())
 }
 
 /// Whether macOS keeps this process from reading Background Task Management's records, so
@@ -338,6 +391,12 @@ enum ItemKind {
     LoginItem,
     /// An app the user or the app added to Open at Login.
     OpenAtLogin,
+    /// A kernel extension in `/Library/Extensions`, which the kernel loads once the user has
+    /// allowed it in System Settings.
+    KernelExtension,
+    /// A system extension an app installed (`OSSystemExtensionRequest`), which runs as root
+    /// outside the kernel while its `state` is `activated_enabled`.
+    SystemExtension,
 }
 
 impl ItemKind {
@@ -349,17 +408,21 @@ impl ItemKind {
             | Self::LaunchAgent
             | Self::UserLaunchAgent
             | Self::LoginItem
-            | Self::OpenAtLogin => false,
+            | Self::OpenAtLogin
+            | Self::KernelExtension
+            | Self::SystemExtension => false,
         }
     }
 }
 
-/// One launch item, login item or app that opens at login, as the agent reads it.
+/// One launch item, login item, app that opens at login, or kernel or system extension, as the
+/// agent reads it.
 #[derive(Debug, Serialize)]
 struct Item {
     /// The property list's path, or for a login item and an app that opens at login the app
-    /// bundle's, which an issue names. Text, with any byte that is not UTF-8 replaced, so a
-    /// planted file with such a name is still listed.
+    /// bundle's, for a kernel extension its bundle's, and for a system extension its bundle's
+    /// inside the app that installed it, which an issue names. Text, with any byte that is not
+    /// UTF-8 replaced, so a planted file with such a name is still listed.
     path: String,
     kind: ItemKind,
     /// Why the property list (or the bundle's `Info.plist`) could not be read, when it could
@@ -375,8 +438,9 @@ struct Item {
     label: Option<String>,
     /// The program launchd starts: from `Program` or else the first of `ProgramArguments`, or
     /// for an agent or daemon an app registered, its `BundleProgram` inside that app. For a
-    /// login item and an app that opens at login, the bundle's executable; the bundle itself,
-    /// `missing`, when it is not there.
+    /// login item, an app that opens at login and an extension, the bundle's executable (for a
+    /// system extension, of the copy macOS runs); the bundle itself, `missing`, when it is not
+    /// there.
     program: Option<Program>,
     /// `ProgramArguments`, the program's own name first. Kept whole, although an argument can
     /// hold a token: the command line is what the agent judges (`sh -c`, a download piped to a
@@ -388,7 +452,7 @@ struct Item {
     /// A bare name `env` finds on `PATH` is not resolved or checked.
     scripts: Vec<Program>,
     /// `RunAtLoad`; `true` for a login item and an app that opens at login, which start at
-    /// every login.
+    /// every login, and for an extension, which macOS loads at startup.
     run_at_load: bool,
     /// Whether `KeepAlive` is set: `true`, or conditions under which launchd restarts it.
     keep_alive: bool,
@@ -404,6 +468,9 @@ struct Item {
     /// Task Management's records. It runs only while both are on.
     #[serde(skip_serializing_if = "Option::is_none")]
     login_items: Option<background::Switches>,
+    /// What macOS records of a system extension.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system_extension: Option<extensions::Record>,
 }
 
 /// A file an item runs, with its signature.
@@ -435,6 +502,7 @@ impl Item {
             user_name: None,
             environment: BTreeMap::new(),
             login_items: None,
+            system_extension: None,
         }
     }
 
@@ -465,6 +533,9 @@ impl Item {
         if let Some(switches) = self.login_items {
             identity["login_items"] = json!(switches);
         }
+        if let Some(record) = &self.system_extension {
+            identity["system_extension"] = json!(record);
+        }
         identity.to_string()
     }
 }
@@ -485,7 +556,8 @@ struct Job {
     environment_variables: Option<BTreeMap<String, plist::Value>>,
 }
 
-/// Reads every item in `folders`. A folder that does not exist has none; one that cannot be
+/// Reads every item in `folders`: a property list in a launch folder, a `.kext` bundle in
+/// `/Library/Extensions`. A folder that does not exist has none; one that cannot be
 /// listed is recorded as a problem of its [`InventorySource::LaunchFolder`], a failure unless
 /// permission was denied (see [`InventoryError::is_failure`]). A signature check that could not
 /// run is a failure too, and its item is kept with the program `unreadable`, so the agent still
@@ -523,8 +595,23 @@ fn launch_items(
                 return items;
             }
             let mut failures = Vec::new();
-            items.push(read_item(*kind, &path, cancel, &mut failures));
-            // As `read_item` names the item.
+            let item = match kind {
+                // The kernel loads only bundles named `.kext`, so nothing else in the folder runs.
+                ItemKind::KernelExtension if path.extension() != Some("kext".as_ref()) => {
+                    continue;
+                }
+                ItemKind::KernelExtension => bundle_item(*kind, &path, cancel, &mut failures),
+                ItemKind::LaunchDaemon
+                | ItemKind::LaunchAgent
+                | ItemKind::UserLaunchAgent
+                | ItemKind::AppLaunchAgent
+                | ItemKind::AppLaunchDaemon
+                | ItemKind::LoginItem
+                | ItemKind::OpenAtLogin
+                | ItemKind::SystemExtension => read_item(*kind, &path, cancel, &mut failures),
+            };
+            items.push(item);
+            // As `read_item` and `bundle_item` name the item.
             let shown = path.to_string_lossy();
             for e in failures {
                 let path = shown.clone().into_owned();
@@ -600,8 +687,10 @@ fn background_items(inventory: &mut Inventory, folder: &Path, cancel: &Cancel) -
     items
 }
 
-/// A login item or an app that opens at login: the app at `bundle`, which runs its
-/// executable. A bundle that is not there is kept with the bundle as its `missing` program.
+/// A login item, an app that opens at login, or an extension: the bundle at `bundle`, which runs
+/// its executable. A bundle that is not there is kept with the bundle as its `missing` program.
+/// A kernel extension with no executable (one that only matches a driver to a device) is an
+/// item with that `error`, which the agent judges.
 fn bundle_item(
     kind: ItemKind,
     bundle: &Path,
@@ -632,10 +721,11 @@ fn bundle_item(
         user_name: None,
         environment: BTreeMap::new(),
         login_items: None,
+        system_extension: None,
     }
 }
 
-/// The file macOS runs for the app at `bundle`: `Contents/MacOS/` and its `Info.plist`'s
+/// The file macOS runs for the bundle at `bundle`: `Contents/MacOS/` and its `Info.plist`'s
 /// `CFBundleExecutable`. The bundle itself when it is not there, which [`checked`] calls
 /// `missing`.
 fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
@@ -647,7 +737,7 @@ fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
     }
     match fs::symlink_metadata(bundle) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(bundle.to_owned()),
-        Err(e) => return Err(format!("cannot read the app: {e}")),
+        Err(e) => return Err(format!("cannot read the bundle: {e}")),
         Ok(_) => {}
     }
     let info = bundle.join("Contents/Info.plist");
@@ -664,7 +754,7 @@ fn bundle_executable(bundle: &Path) -> Result<PathBuf, String> {
         .executable
         .ok_or("its Info.plist names no CFBundleExecutable")?;
     inside(bundle, &Path::new("Contents/MacOS").join(&executable)).ok_or_else(|| {
-        format!("its Info.plist names the executable {executable:?}, which is not in the app")
+        format!("its Info.plist names the executable {executable:?}, which is not in the bundle")
     })
 }
 
@@ -768,6 +858,7 @@ fn read_item(
         user_name: job.user_name,
         environment,
         login_items: None,
+        system_extension: None,
     }
 }
 
@@ -1689,6 +1780,119 @@ TeamIdentifier=not set
     }
 
     #[test]
+    fn a_kernel_extension_is_a_kext_bundle_with_its_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let kext = tmp.path().join("Driver.kext");
+        app(&kext, "Driver");
+        let codeless = tmp.path().join("Match.kext");
+        fs::create_dir_all(codeless.join("Contents")).unwrap();
+        plist(&codeless.join("Contents"), "Info.plist", "");
+        app(&tmp.path().join("Other.bundle"), "Other");
+        fs::write(tmp.path().join("notes.txt"), "").unwrap();
+
+        let mut inventory = Inventory::default();
+        let folders = [(ItemKind::KernelExtension, tmp.path().to_owned())];
+        let items = launch_items(&mut inventory, &folders, &Cancel::new());
+        assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
+
+        let paths: Vec<&str> = items.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, [kext.to_str().unwrap(), codeless.to_str().unwrap()]);
+        let program = items[0].program.as_ref().unwrap();
+        assert_eq!(program.path, kext.join("Contents/MacOS/Driver"));
+        assert!(matches!(program.signature, Signature::Unsigned { .. }));
+        assert_eq!(items[0].kind, ItemKind::KernelExtension);
+        assert_eq!(
+            items[1].error.as_deref(),
+            Some("its Info.plist names no CFBundleExecutable")
+        );
+    }
+
+    #[test]
+    fn a_system_extension_runs_its_copy_and_is_named_by_its_app() {
+        use extensions::tests::database;
+        use extensions::tests::record;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let origin = tmp
+            .path()
+            .join("A.app/Contents/Library/SystemExtensions/x.systemextension");
+        app(&origin, "x");
+        let staged = tmp.path().join("staged/x.systemextension");
+        app(&staged, "x");
+        let gone = tmp
+            .path()
+            .join("B.app/Contents/Library/SystemExtensions/y.systemextension");
+        let records = [
+            record(
+                origin.to_str().unwrap(),
+                &format!("file://{}/", staged.display()),
+                "activated_enabled",
+            ),
+            record(gone.to_str().unwrap(), "", "activated_waiting_for_user"),
+        ];
+        let db = tmp.path().join("db.plist");
+        fs::write(&db, database(&records)).unwrap();
+
+        let mut inventory = Inventory::default();
+        let items = system_extensions(&mut inventory, &db, &Cancel::new());
+        assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
+        assert_eq!(items.len(), 2);
+
+        let item = &items[0];
+        assert_eq!(item.path, origin.to_str().unwrap());
+        assert_eq!(item.kind, ItemKind::SystemExtension);
+        assert_eq!(item.label.as_deref(), Some("com.example.agent"));
+        let program = item.program.as_ref().unwrap();
+        assert_eq!(program.path, staged.join("Contents/MacOS/x"));
+        let line = serde_json::to_value(item).unwrap();
+        assert_eq!(
+            line["system_extension"],
+            json!({
+                "identifier": "com.example.agent",
+                "team": "ABCDE12345",
+                "state": "activated_enabled",
+                "categories": ["com.apple.system_extension.endpoint_security"],
+            })
+        );
+        // With no staged copy, the app's bundle is checked; here it is gone.
+        let program = items[1].program.as_ref().unwrap();
+        assert_eq!(program.path, gone);
+        assert_eq!(program.signature, Signature::Missing);
+
+        // Its state keys its issue: one the user has not allowed yet is another once allowed.
+        let mut allowed = system_extensions(&mut inventory, &db, &Cancel::new());
+        let waiting = allowed[1].identity();
+        allowed[1].system_extension.as_mut().unwrap().state = Some("activated_enabled".into());
+        assert_ne!(allowed[1].identity(), waiting);
+        assert!(
+            !items[0].identity().contains("login_items"),
+            "the extension's identity is its own"
+        );
+
+        // A database that does not parse marks the extensions unchecked.
+        fs::write(&db, "not a plist").unwrap();
+        let mut inventory = Inventory::default();
+        assert!(system_extensions(&mut inventory, &db, &Cancel::new()).is_empty());
+        assert!(
+            inventory
+                .failed
+                .contains(&InventorySource::SystemExtensions)
+        );
+
+        // A cancelled read stops before the next extension and counts as not checked.
+        fs::write(&db, database(&records)).unwrap();
+        let cancel = Cancel::new();
+        cancel.cancel();
+        let mut inventory = Inventory::default();
+        assert!(system_extensions(&mut inventory, &db, &cancel).is_empty());
+        assert!(
+            inventory
+                .failed
+                .contains(&InventorySource::SystemExtensions)
+        );
+    }
+
+    #[test]
     fn what_apps_registered_is_read_with_its_program_and_switches() {
         use background::tests::Archiver;
         use background::tests::Record;
@@ -1889,12 +2093,12 @@ TeamIdentifier=not set
             "Up.app",
             &plist_text("<key>CFBundleExecutable</key><string>../../x</string>"),
         );
-        assert!(error(&up).ends_with("\"../../x\", which is not in the app"));
+        assert!(error(&up).ends_with("\"../../x\", which is not in the bundle"));
         let absolute = info(
             "Abs.app",
             &plist_text("<key>CFBundleExecutable</key><string>/bin/ls</string>"),
         );
-        assert!(error(&absolute).contains("\"/bin/ls\", which is not in the app"));
+        assert!(error(&absolute).contains("\"/bin/ls\", which is not in the bundle"));
         let unnamed = info("None.app", &plist_text(""));
         assert_eq!(
             error(&unnamed),
@@ -1917,7 +2121,7 @@ TeamIdentifier=not set
         // A bundle path through a file is not "not there".
         let file = tmp.path().join("file");
         fs::write(&file, "").unwrap();
-        assert!(error(&file.join("B.app")).starts_with("cannot read the app"));
+        assert!(error(&file.join("B.app")).starts_with("cannot read the bundle"));
     }
 
     #[test]

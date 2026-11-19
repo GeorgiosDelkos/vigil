@@ -398,7 +398,8 @@ pub enum InventorySource {
         /// The setting's key.
         key: String,
     },
-    /// A folder of launch agents or daemons on this Mac that could not be listed.
+    /// A folder of launch agents or daemons, or `/Library/Extensions`, on this Mac that could
+    /// not be listed.
     LaunchFolder {
         /// The folder, decoded lossily as the items in it are.
         path: String,
@@ -415,6 +416,8 @@ pub enum InventorySource {
     /// app registered from its own bundle, apps that open at login), of which one file or more
     /// could not be read.
     BackgroundItems,
+    /// The database of system extensions on this Mac, which could not be read.
+    SystemExtensions,
     /// Which account the sweep runs as, from `id`: without it, no program that runs as root is
     /// marked replaceable, and this user's crontab is not read.
     Account,
@@ -469,6 +472,7 @@ impl InventorySource {
             | Self::LaunchFolder { .. }
             | Self::LaunchItem { .. }
             | Self::BackgroundItems
+            | Self::SystemExtensions
             | Self::Account
             | Self::Alerts { .. }
             | Self::Workflows
@@ -502,6 +506,10 @@ impl InventorySource {
             Self::BackgroundItems => matches!(
                 subject,
                 Subject::Item(item) if host::may_come_from_records(Path::new(item))
+            ),
+            Self::SystemExtensions => matches!(
+                subject,
+                Subject::Item(item) if host::may_be_system_extension(Path::new(item))
             ),
             Self::Alerts { name } => match subject {
                 Subject::Setting(key) => *key == github::alerts_key(name),
@@ -544,7 +552,7 @@ impl InventorySource {
             // A place is one lockfile or a folder tree of them.
             Self::Lockfile { .. } | Self::LockfileWalk { .. } => Some("places with lockfiles"),
             Self::Setting { .. } => Some("settings"),
-            Self::LaunchFolder { .. } => Some("launch folders"),
+            Self::LaunchFolder { .. } => Some("startup folders"),
             Self::LaunchItem { .. } => Some("startup items"),
             Self::Alerts { .. } => Some("kinds of alerts"),
             Self::Workflow { .. } => Some("workflow files"),
@@ -562,6 +570,7 @@ impl InventorySource {
             | Self::DependencyGraph
             | Self::Workflows
             | Self::BackgroundItems
+            | Self::SystemExtensions
             | Self::Account
             | Self::Unknown => None,
         }
@@ -588,8 +597,9 @@ impl std::fmt::Display for InventorySource {
             Self::DependencyGraph => f.write_str("the dependency graph"),
             Self::Setting { key } => write!(f, "the setting {key}"),
             Self::BackgroundItems => f.write_str("login items"),
+            Self::SystemExtensions => f.write_str("system extensions"),
             Self::Account => f.write_str("this user's account"),
-            Self::LaunchFolder { path } => write!(f, "launch folder {path}"),
+            Self::LaunchFolder { path } => write!(f, "startup folder {path}"),
             Self::LaunchItem { path } => write!(f, "startup item {path}"),
             Self::Alerts { name } => write!(f, "{name} alerts"),
             Self::Workflows => f.write_str("the list of workflows"),
@@ -1235,6 +1245,11 @@ mod tests {
                 "background_items",
             ),
             (InventorySource::Account, "this user's account", "account"),
+            (
+                InventorySource::SystemExtensions,
+                "system extensions",
+                "system_extensions",
+            ),
         ];
         for (source, text, kind) in names {
             assert_eq!(source.to_string(), text);
@@ -1242,6 +1257,18 @@ mod tests {
             assert_eq!(value, serde_json::json!({ "kind": kind }));
             assert_eq!(InventorySource::deserialize(&value).unwrap(), source);
         }
+    }
+
+    #[test]
+    fn a_failed_database_covers_only_system_extensions() {
+        let database = InventorySource::SystemExtensions;
+        let item = |path: &str| Subject::Item(path.to_owned());
+        let app = "/Applications/A.app/Contents/Library/SystemExtensions/x.systemextension";
+        assert!(database.covers_issue(&item(app)));
+        assert!(database.covers_issue(&item("/Library/SystemExtensions/U/x.systemextension")));
+        assert!(!database.covers_issue(&item("/Library/Extensions/x.kext")));
+        assert!(!database.covers_issue(&item("/Applications/A.app")));
+        assert!(!database.covers_issue(&Subject::File("x.systemextension".to_owned())));
     }
 
     #[test]
@@ -1344,7 +1371,7 @@ mod tests {
             (
                 folder,
                 serde_json::json!({"kind": "launch_folder", "path": "/Library/LaunchAgents"}),
-                "launch folder /Library/LaunchAgents",
+                "startup folder /Library/LaunchAgents",
             ),
             (
                 agent,
