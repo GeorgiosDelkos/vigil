@@ -433,8 +433,9 @@ struct Item {
     /// not; the fields below are then empty, except `stamp` and `login_items`.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    /// The size and modification time of a property list that could not be read, so that a
-    /// dismissed one shows again once it changes.
+    /// The size and modification time of a property list that could not be read, or of a
+    /// codeless kext's `Info.plist`, the only part of it read, so that a dismissed one shows
+    /// again once it changes.
     #[serde(skip_serializing_if = "Option::is_none")]
     stamp: Option<String>,
     /// The job's `Label`; for a login item and an app that opens at login, the name Background
@@ -442,9 +443,9 @@ struct Item {
     label: Option<String>,
     /// The program launchd starts: from `Program` or else the first of `ProgramArguments`, or
     /// for an agent or daemon an app registered, its `BundleProgram` inside that app. For a
-    /// login item, an app that opens at login and an extension, the bundle's executable (for a
-    /// system extension, of the copy macOS runs); the bundle itself, `missing`, when it is not
-    /// there.
+    /// login item, an app that opens at login and an extension, the bundle's executable (none
+    /// for a codeless kext; for a system extension, of the copy macOS runs); the bundle itself,
+    /// `missing`, when it is not there.
     program: Option<Program>,
     /// `ProgramArguments`, the program's own name first. Kept whole, although an argument can
     /// hold a token: the command line is what the agent judges (`sh -c`, a download piped to a
@@ -525,7 +526,8 @@ impl Item {
         };
         // A system extension's program is in the copy macOS staged under a new UUID on each
         // update, so its path is left out: the item's path and the signature's identity say
-        // what runs, and an update from the same team keeps the dismissal.
+        // what runs. An update signed by the same Developer ID or App Store team keeps the
+        // dismissal; any other signature is keyed by content (see `Signature::identity`).
         let program = self.program.as_ref().map(|p| match self.kind {
             ItemKind::SystemExtension => json!([p.signature.identity()]),
             ItemKind::LaunchDaemon
@@ -718,14 +720,14 @@ fn bundle_item(
     failures: &mut Vec<InventoryError>,
 ) -> Item {
     let shown = bundle.to_string_lossy().into_owned();
-    let unread = |error: String| {
+    let info_stamp = || {
         let info = bundle.join("Contents/Info.plist");
-        let stamp = fs::symlink_metadata(info).ok().map(|m| stamp(&m));
-        Item::unread(kind, shown.clone(), error, stamp)
+        fs::symlink_metadata(info).ok().map(|m| stamp(&m))
     };
-    let program = match bundle_executable(bundle) {
-        Ok(Some(program)) => Some(checked(program, cancel, failures)),
-        Ok(None) if kind == ItemKind::KernelExtension => None,
+    let unread = |error: String| Item::unread(kind, shown.clone(), error, info_stamp());
+    let (program, stamp) = match bundle_executable(bundle) {
+        Ok(Some(program)) => (Some(checked(program, cancel, failures)), None),
+        Ok(None) if kind == ItemKind::KernelExtension => (None, info_stamp()),
         Ok(None) => return unread("its Info.plist names no CFBundleExecutable".to_owned()),
         Err(error) => return unread(error),
     };
@@ -733,7 +735,7 @@ fn bundle_item(
         path: shown,
         kind,
         error: None,
-        stamp: None,
+        stamp,
         label: None,
         program,
         arguments: Vec::new(),
@@ -1831,6 +1833,12 @@ TeamIdentifier=not set
         // A codeless kext has no program, and is not a property list that failed to read.
         assert!(items[1].program.is_none() && items[1].error.is_none());
         assert!(items[1].run_at_load);
+        // Its key follows its Info.plist, the only part read, so a replaced one shows again.
+        let before = items[1].identity();
+        let longer = plist_text("<key>IOKitPersonalities</key><dict/>");
+        fs::write(codeless.join("Contents/Info.plist"), longer).unwrap();
+        let items = launch_items(&mut inventory, &folders, &Cancel::new());
+        assert_ne!(items[1].identity(), before);
     }
 
     #[test]
