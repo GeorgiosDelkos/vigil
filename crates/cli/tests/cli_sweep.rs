@@ -62,6 +62,11 @@ case "$CLAUDE_FAKE_MODE:$n" in
     echo '{"findings": [], "issues": [{"subject": {"item": "'"$ext"'"},
       "severity": "high", "evidence": "e", "explanation": "x",
       "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
+  browser:*)
+    ext=$(grep -o '"path":"[^"]*/Extensions/abc"' mac/persistence.jsonl | cut -d'"' -f4)
+    echo '{"findings": [], "issues": [{"subject": {"item": "'"$ext"'"},
+      "severity": "medium", "evidence": "e", "explanation": "x",
+      "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
   retry:1) echo '{"findings": [], "issues": [], "bogus": 1}' > findings.json ;;
   retry:*) echo '{"findings": [], "issues": []}' > findings.json ;;
   bad:*) echo 'not json' > findings.json ;;
@@ -811,6 +816,50 @@ fn kernel_and_system_extensions_are_read_and_an_issue_named_by_the_app_copy() {
     assert_eq!(
         report["issues"][0]["subject"],
         serde_json::json!({"item": origin.to_str().unwrap()}),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_browser_extension_is_read_and_an_issue_named_by_its_folder() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let profile = sandbox
+        .path()
+        .join("Library/Application Support/Google/Chrome/Default");
+    let files = profile.join("Extensions/abc/1.0_0");
+    fs::create_dir_all(&files).unwrap();
+    fs::write(
+        files.join("manifest.json"),
+        r#"{"name": "Grabber", "version": "1.0", "permissions": ["cookies"],
+            "host_permissions": ["<all_urls>"], "update_url": "https://e.x/u"}"#,
+    )
+    .unwrap();
+    fs::write(profile.join("Preferences"), "{}").unwrap();
+    fs::write(
+        profile.join("Secure Preferences"),
+        r#"{"extensions": {"settings": {"abc": {"location": 4, "path": "abc/1.0_0"}}}}"#,
+    )
+    .unwrap();
+
+    let out = sandbox.sweep("browser");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let items =
+        fs::read_to_string(sandbox.sweep_dir().join("bundle/mac/persistence.jsonl")).unwrap();
+    let line: serde_json::Value = items
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .find(|line: &serde_json::Value| line["kind"] == "browser_extension")
+        .unwrap();
+    let folder = profile.join("Extensions/abc");
+    assert_eq!(line["path"], folder.to_str().unwrap());
+    assert_eq!(line["source"], "unpacked");
+    assert_eq!(line["hosts"], serde_json::json!(["<all_urls>"]));
+    assert_eq!(line["update_url"], "https://e.x/u");
+
+    let report = sandbox.newest_report("mac");
+    assert_eq!(
+        report["issues"][0]["subject"],
+        serde_json::json!({"item": folder.to_str().unwrap()}),
         "{report}"
     );
 }

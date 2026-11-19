@@ -10,8 +10,9 @@
 //!   then what Background Task Management records that no launch folder shows ([`background`]):
 //!   login items inside apps, the agents and daemons apps registered from their own bundle,
 //!   and the apps that open at login, then the kernel extensions in `/Library/Extensions` and
-//!   the system extensions macOS records ([`extensions`]), then the shells' startup files,
-//!   crontabs and other files that run commands ([`startup`]). Programs that run as root say
+//!   the system extensions macOS records ([`extensions`]), then Safari's extensions, then the
+//!   shells' startup files, crontabs and other files that run commands ([`startup`]), then the
+//!   extensions of this user's other browsers ([`browsers`]). Programs that run as root say
 //!   whether this user could replace them ([`account`]). An issue names one by its path: the
 //!   property list's, the app bundle's, the extension's, or the file's.
 //!
@@ -55,11 +56,13 @@ use crate::inventory::command;
 use crate::inventory::command::Output;
 use crate::inventory::host::account::Account;
 use crate::inventory::host::background::Place;
+use crate::inventory::host::browsers::BrowserExtension;
 use crate::inventory::host::startup::StartupFile;
 use crate::paths;
 
 mod account;
 mod background;
+mod browsers;
 mod extensions;
 mod startup;
 
@@ -203,6 +206,7 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
         &root.join(extensions::DATABASE),
         cancel,
     ));
+    items.extend(safari_extensions(inventory, &root, cancel));
     let account = match Account::current(cancel) {
         Ok(Some(account)) => Some(account),
         // `id` is part of macOS, so its absence is a failure, not a tool the user left out.
@@ -224,7 +228,9 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
         mark_replaceable(&mut items, account);
     }
     let files = startup::collect(&root, home.as_deref(), account.as_ref());
-    Host::new(&settings, &items, &files)
+    let support = home.map(|home| home.join("Library/Application Support"));
+    let browsers = support.map_or_else(Vec::new, |support| browsers::collect(inventory, &support));
+    Host::new(&settings, &items, &files, &browsers)
 }
 
 /// Whether the item at `path` is one only the account lets the sweep read
@@ -297,6 +303,68 @@ fn system_extensions(inventory: &mut Inventory, database: &Path, cancel: &Cancel
     items
 }
 
+/// The `pluginkit` extension points of Safari's extensions: web extensions, the older Safari
+/// app extensions, and content blockers.
+const SAFARI_POINTS: [&str; 3] = [
+    "com.apple.Safari.web-extension",
+    "com.apple.Safari.extension",
+    "com.apple.Safari.content-blocker",
+];
+
+/// Reads Safari's extensions as `pluginkit` (under `root`) lists them for this user, each
+/// checked as a bundle. A `pluginkit` that is not there (a test's system root) lists none; one
+/// that fails is a failure of [`InventorySource::SafariExtensions`]. Whether Safari has each
+/// one turned on is in Safari's own container, which is not read.
+fn safari_extensions(inventory: &mut Inventory, root: &Path, cancel: &Cancel) -> Vec<Item> {
+    let tool = root.join("usr/bin/pluginkit");
+    let mut items: Vec<Item> = Vec::new();
+    for point in SAFARI_POINTS {
+        let listed = match command::run(&tool.to_string_lossy(), &["-mAv", "-p", point], cancel) {
+            Ok(Some(listed)) => listed,
+            Ok(None) => return items,
+            Err(e) => {
+                inventory.fail(InventorySource::SafariExtensions, e);
+                continue;
+            }
+        };
+        for (label, path) in pluginkit_lines(&listed) {
+            if items.iter().any(|item| Path::new(&item.path) == path) {
+                continue;
+            }
+            let mut failures = Vec::new();
+            let mut item = bundle_item(ItemKind::SafariExtension, path, cancel, &mut failures);
+            item.label = Some(label.to_owned());
+            for e in failures {
+                let path = item.path.clone();
+                inventory.fail(InventorySource::LaunchItem { path }, e);
+            }
+            items.push(item);
+        }
+    }
+    items
+}
+
+/// The extensions in `pluginkit -mAv`'s output, each as its identifier and its bundle. A line
+/// is a flag (`+` turned on, `-` turned off, or a space), the identifier with its version in
+/// parentheses, then the UUID, the time and the path, separated by tabs. Lines without an
+/// absolute `.appex` path (`(no matches)`) are skipped.
+fn pluginkit_lines(listed: &str) -> impl Iterator<Item = (&str, &Path)> {
+    listed.lines().filter_map(|line| {
+        let mut fields = line.split('\t');
+        let first = fields.next()?;
+        let path = Path::new(fields.next_back()?);
+        let bundle = path.is_absolute() && may_be_safari_extension(path);
+        let name = first.trim_start_matches(['+', '-', '!', '=', ' ']);
+        let label = name.rsplit_once('(').map_or(name, |(label, _)| label);
+        bundle.then_some((label, path))
+    })
+}
+
+/// Whether an item at `path` can come from [`safari_extensions`]: an app extension's bundle.
+pub(crate) fn may_be_safari_extension(path: &Path) -> bool {
+    path.extension() == Some("appex".as_ref())
+}
+
 /// Whether an item at `path` can come from [`system_extensions`]: a bundle named
 /// `.systemextension`, or `.dext` for a DriverKit driver, as every system extension's is.
 pub(crate) fn may_be_system_extension(path: &Path) -> bool {
@@ -321,13 +389,19 @@ pub(crate) fn may_come_from_records(path: &Path) -> bool {
 }
 
 impl Host {
-    fn new(settings: &BTreeMap<&str, String>, items: &[Item], files: &[StartupFile]) -> Self {
+    fn new(
+        settings: &BTreeMap<&str, String>,
+        items: &[Item],
+        files: &[StartupFile],
+        browsers: &[BrowserExtension],
+    ) -> Self {
         let settings_json =
             serde_json::to_string_pretty(settings).expect("a map of strings serializes");
         let mut lines = String::new();
         let items_shown = items.iter().map(serde_json::to_string);
         let files_shown = files.iter().map(serde_json::to_string);
-        for line in items_shown.chain(files_shown) {
+        let browsers_shown = browsers.iter().map(serde_json::to_string);
+        for line in items_shown.chain(files_shown).chain(browsers_shown) {
             let line =
                 line.expect("an item holds only strings, booleans, and lists and maps of them");
             lines.push_str(&line);
@@ -346,6 +420,11 @@ impl Host {
                     files
                         .iter()
                         .map(|file| (file.path.clone(), file.identity())),
+                )
+                .chain(
+                    browsers
+                        .iter()
+                        .map(|extension| (extension.path.clone(), extension.identity())),
                 )
                 .collect(),
         }
@@ -401,6 +480,9 @@ enum ItemKind {
     /// kernel (as root, or as `_driverkit` for a driver) while its `state` is
     /// `activated_enabled`.
     SystemExtension,
+    /// An app extension Safari runs (a web extension, an older Safari app extension or a
+    /// content blocker), as `pluginkit` lists it for this user.
+    SafariExtension,
 }
 
 impl ItemKind {
@@ -414,7 +496,8 @@ impl ItemKind {
             | Self::LoginItem
             | Self::OpenAtLogin
             | Self::KernelExtension
-            | Self::SystemExtension => false,
+            | Self::SystemExtension
+            | Self::SafariExtension => false,
         }
     }
 }
@@ -542,7 +625,8 @@ impl Item {
             | ItemKind::AppLaunchDaemon
             | ItemKind::LoginItem
             | ItemKind::OpenAtLogin
-            | ItemKind::KernelExtension => file(p),
+            | ItemKind::KernelExtension
+            | ItemKind::SafariExtension => file(p),
         });
         let mut identity = json!({
             "program": program,
@@ -637,7 +721,8 @@ fn launch_items(
                 | ItemKind::AppLaunchDaemon
                 | ItemKind::LoginItem
                 | ItemKind::OpenAtLogin
-                | ItemKind::SystemExtension => read_item(*kind, &path, cancel, &mut failures),
+                | ItemKind::SystemExtension
+                | ItemKind::SafariExtension => read_item(*kind, &path, cancel, &mut failures),
             };
             items.push(item);
             // As `read_item` and `bundle_item` name the item.
@@ -1875,6 +1960,66 @@ TeamIdentifier=not set
     }
 
     #[test]
+    fn safari_extensions_are_what_pluginkit_lists_checked_as_bundles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let appex = tmp.path().join("Blocker.app/Contents/PlugIns/Block.appex");
+        app(&appex, "Block");
+        let bin = tmp.path().join("usr/bin");
+        fs::create_dir_all(&bin).unwrap();
+        let tool = bin.join("pluginkit");
+        // Lists the extension for every extension point, as a web extension that is also a
+        // content blocker would be, with a line of another kind between.
+        let script = format!(
+            "#!/bin/sh\nprintf '+    com.e.block(1.0)\\tUUID\\t2026-01-01\\t{}\\n'\n\
+             echo '  (no matches)'\n",
+            appex.display()
+        );
+        fs::write(&tool, script).unwrap();
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut inventory = Inventory::default();
+        let items = safari_extensions(&mut inventory, tmp.path(), &Cancel::new());
+        assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
+        assert_eq!(items.len(), 1, "one item per bundle");
+        assert_eq!(items[0].path, appex.to_str().unwrap());
+        assert_eq!(items[0].kind, ItemKind::SafariExtension);
+        assert_eq!(items[0].label.as_deref(), Some("com.e.block"));
+        let program = items[0].program.as_ref().unwrap();
+        assert_eq!(program.path, appex.join("Contents/MacOS/Block"));
+
+        // A pluginkit that fails marks Safari's extensions unchecked.
+        fs::write(&tool, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut inventory = Inventory::default();
+        assert!(safari_extensions(&mut inventory, tmp.path(), &Cancel::new()).is_empty());
+        assert!(
+            inventory
+                .failed
+                .contains(&InventorySource::SafariExtensions)
+        );
+        // One that is not there lists none, and fails nothing.
+        let mut inventory = Inventory::default();
+        let none = safari_extensions(&mut inventory, &tmp.path().join("x"), &Cancel::new());
+        assert!(none.is_empty() && inventory.problems.is_empty());
+    }
+
+    #[test]
+    fn pluginkit_lines_give_the_identifier_and_bundle() {
+        let listed = "+    com.a.one(1.2)\tU\tT\t/A.app/Contents/PlugIns/One.appex\n\
+                      -    com.b.two(3)\tU\tT\t/B.app/Two.appex\n\
+                      \x20    com.c(1)\tU\tT\trelative/Three.appex\n\
+                      !    com.d(1)\tU\tT\t/D.app/Contents/MacOS/D\n\
+                      \x20 (no matches)\n";
+        let found: Vec<(&str, &Path)> = pluginkit_lines(listed).collect();
+        assert_eq!(
+            found,
+            [
+                ("com.a.one", Path::new("/A.app/Contents/PlugIns/One.appex")),
+                ("com.b.two", Path::new("/B.app/Two.appex")),
+            ]
+        );
+    }
+
+    #[test]
     fn a_system_extension_runs_its_copy_and_is_named_by_its_app() {
         use extensions::tests::database;
         use extensions::tests::record;
@@ -2393,13 +2538,23 @@ TeamIdentifier=not set
         let item = read(ItemKind::LaunchAgent, &path);
         let identity = item.identity();
         let settings = BTreeMap::from([("filevault", "FileVault is On.".to_owned())]);
-        let host = Host::new(&settings, &[item], &[]);
+        let support = tmp.path().join("support");
+        browsers::tests::chromium(
+            &support.join("Chromium/Default"),
+            &json!({"a": {"location": 1, "path": "a/1"}}),
+        );
+        let mut inventory = Inventory::default();
+        let browsers = browsers::collect(&mut inventory, &support);
+        let extension = browsers[0].path.clone();
+        let host = Host::new(&settings, &[item], &[], &browsers);
 
         assert_eq!(host.settings, ["filevault"]);
         assert_eq!(host.items[path.to_str().unwrap()], identity);
         let names: Vec<&str> = host.files.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["mac/settings.json", "mac/persistence.jsonl"]);
         assert!(host.files[0].1.contains("FileVault is On."));
-        assert_eq!(host.files[1].1.lines().count(), 1);
+        assert_eq!(host.files[1].1.lines().count(), 2);
+        assert!(host.files[1].1.contains(r#""kind":"browser_extension""#));
+        assert_eq!(host.items[&extension], browsers[0].identity());
     }
 }
