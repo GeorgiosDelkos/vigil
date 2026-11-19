@@ -555,13 +555,15 @@ Browser extensions (added 2026-11-19):
   address and the granted permissions and origins. What ships with the browser is left out:
   Chromium's locations 5 and 10, Firefox's `app-builtin`, `app-system-defaults` and
   `app-system-addons`, and Firefox add-ons that are not extensions.
-- An extension is named by its folder (`<profile>/Extensions/<id>`, the folder an unpacked
-  one was loaded from, or Firefox's `.xpi`). Its key is everything but its name and version,
-  so an update that asks for nothing new keeps a dismissal, and a new permission, host,
-  update address or state shows it again.
-- A record that cannot be read or parsed marks its `browser_profile` unchecked, which carries
-  the open issues of extensions in that folder; an unpacked extension loaded from elsewhere
-  is not carried. A record this user may not read is a note.
+- An extension is named inside its profile (`<profile>/Extensions/<id>`, or Firefox's
+  `<profile>/extensions/<id>.xpi`), an unpacked one too, whose folder is its `loaded_from`:
+  one folder loaded in two profiles is then two items, not one path with two keys. Its key is
+  everything but its name and version, so an update that asks for nothing new keeps a
+  dismissal, and a new permission, host, update address or state shows it again. A manifest
+  that cannot be read is named in the error without its folder, which holds the version.
+- A record that cannot be read or parsed, or a browser's folder that cannot be listed, marks
+  that `browser_profile` unchecked, which carries the open issues of every extension under it.
+  A record or folder this user may not read is a note.
 - Not read: Chromium's granted and optional permissions (the manifest's requested ones are
   shown), other users' browsers, Firefox forks (LibreWolf, Zen, Waterfox) and Chromium
   browsers outside the list.

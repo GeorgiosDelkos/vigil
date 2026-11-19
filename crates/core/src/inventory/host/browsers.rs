@@ -20,11 +20,15 @@
 //!
 //! Safari's extensions are app extensions, listed by `pluginkit` in [`super`].
 //!
-//! An extension is named by its folder: `<profile>/Extensions/<id>` for Chromium, whatever
-//! version is inside, the folder an unpacked one was loaded from, and Firefox's `.xpi`. Its
-//! key is what it may do and where it came from, not its version: an update that asks for
-//! nothing new keeps a dismissal (owner's decision, 2026-11-19).
+//! An extension is named inside its profile: `<profile>/Extensions/<id>` for Chromium,
+//! whatever version is inside, and `<profile>/extensions/<id>.xpi` for Firefox. So the same
+//! folder loaded in two profiles is two items, and a profile whose record cannot be read
+//! carries the issues of all its extensions. Where an unpacked extension, or a Firefox add-on
+//! kept elsewhere, was loaded from is its `loaded_from`. Its key is what it may do and where it
+//! came from, not its version: an update that asks for nothing new keeps a dismissal (owner's
+//! decision, 2026-11-19).
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -74,7 +78,7 @@ const MANIFEST_LIMIT: u64 = 1024 * 1024;
 /// One browser extension, as the agent reads it.
 #[derive(Debug, Serialize)]
 pub(super) struct BrowserExtension {
-    /// Its folder, which an issue names (see the module docs).
+    /// Its name inside its profile, which an issue names (see the module docs).
     pub(super) path: String,
     /// Always `browser_extension`, so the agent tells it from the other lines.
     kind: &'static str,
@@ -85,6 +89,10 @@ pub(super) struct BrowserExtension {
     /// Its name, with Chromium's `__MSG_x__` looked up in its default locale when it can be.
     name: Option<String>,
     version: Option<String>,
+    /// The folder or file it was loaded from, when that is not its name: an unpacked
+    /// extension's, or a Firefox add-on's kept outside the profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    loaded_from: Option<String>,
     /// Why its manifest could not be read; the fields from it are then empty.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -105,8 +113,9 @@ pub(super) struct BrowserExtension {
     update_url: Option<String>,
     /// The API permissions it asks for (Chromium's manifest) or was granted (Firefox).
     permissions: Vec<String>,
-    /// The sites it may read and change: host permissions, and for Chromium the pages its
-    /// content scripts run on.
+    /// The sites it may read and change: host permissions (for Manifest V2, the entries of
+    /// `permissions` that are host patterns), and for Chromium the pages its content scripts
+    /// run on.
     hosts: Vec<String>,
 }
 
@@ -116,6 +125,7 @@ impl BrowserExtension {
     pub(super) fn identity(&self) -> String {
         json!({
             "id": self.id,
+            "loaded_from": self.loaded_from,
             "error": self.error,
             "enabled": self.enabled,
             "source": self.source,
@@ -131,12 +141,22 @@ impl BrowserExtension {
 }
 
 /// Reads every extension the module docs list in the browsers under `support`
-/// (`~/Library/Application Support`). A profile whose record cannot be read is a failure of
-/// its [`InventorySource::BrowserProfile`], a note when permission was denied.
+/// (`~/Library/Application Support`). A profile whose record cannot be read, or a browser's
+/// folder that cannot be listed, is a failure of its [`InventorySource::BrowserProfile`], a
+/// note when permission was denied.
 pub(super) fn collect(inventory: &mut Inventory, support: &Path) -> Vec<BrowserExtension> {
     let mut extensions = Vec::new();
     for (browser, folder) in CHROMIUM_BROWSERS {
-        for profile in chromium_profiles(&support.join(folder)) {
+        let folder = support.join(folder);
+        let profiles = match chromium_profiles(&folder) {
+            Ok(profiles) => profiles,
+            Err(source) => {
+                let path = folder.clone();
+                fail(inventory, &folder, InventoryError::Io { path, source });
+                continue;
+            }
+        };
+        for profile in profiles {
             match chromium_profile(browser, &profile) {
                 Ok(found) => extensions.extend(found),
                 Err(e) => fail(inventory, &profile, e),
@@ -144,7 +164,12 @@ pub(super) fn collect(inventory: &mut Inventory, support: &Path) -> Vec<BrowserE
         }
     }
     let folder = support.join(FIREFOX_PROFILES);
-    for profile in subfolders(&folder) {
+    let profiles = subfolders(&folder).unwrap_or_else(|source| {
+        let path = folder.clone();
+        fail(inventory, &folder, InventoryError::Io { path, source });
+        Vec::new()
+    });
+    for profile in profiles {
         match firefox_profile(&profile) {
             Ok(found) => extensions.extend(found),
             Err(e) => fail(inventory, &profile, e),
@@ -153,33 +178,38 @@ pub(super) fn collect(inventory: &mut Inventory, support: &Path) -> Vec<BrowserE
     extensions
 }
 
-fn fail(inventory: &mut Inventory, profile: &Path, error: InventoryError) {
-    let path = profile.to_string_lossy().into_owned();
+fn fail(inventory: &mut Inventory, folder: &Path, error: InventoryError) {
+    let path = folder.to_string_lossy().into_owned();
     inventory.fail(InventorySource::BrowserProfile { path }, error);
 }
 
-/// The folders in `folder`, sorted; none when it cannot be listed. A browser that was never
-/// installed has no folder, and one this user cannot list holds nothing Vigil could read.
-fn subfolders(folder: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = fs::read_dir(folder) else {
-        return Vec::new();
+/// The folders in `folder`, sorted; none when it is not there, as for a browser that was never
+/// installed.
+fn subfolders(folder: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
-    let mut folders: Vec<PathBuf> = entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| entry.path())
-        .collect();
+    let mut folders = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            folders.push(entry.path());
+        }
+    }
     folders.sort();
-    folders
+    Ok(folders)
 }
 
 /// The profiles of a Chromium browser: its folder, when it holds a `Preferences` file
 /// (Opera's), then each folder in it that does.
-fn chromium_profiles(browser: &Path) -> Vec<PathBuf> {
-    std::iter::once(browser.to_owned())
-        .chain(subfolders(browser))
+fn chromium_profiles(browser: &Path) -> io::Result<Vec<PathBuf>> {
+    let profiles = std::iter::once(browser.to_owned())
+        .chain(subfolders(browser)?)
         .filter(|folder| folder.join("Preferences").is_file())
-        .collect()
+        .collect();
+    Ok(profiles)
 }
 
 /// Chromium's record of one extension, the parts read.
@@ -202,16 +232,16 @@ fn chromium_profile(
     browser: &'static str,
     profile: &Path,
 ) -> Result<Vec<BrowserExtension>, InventoryError> {
-    let mut settings: Vec<(String, Setting)> = Vec::new();
+    let mut settings: BTreeMap<String, Setting> = BTreeMap::new();
     for name in ["Secure Preferences", "Preferences"] {
-        let Some(text) = read_preferences(&profile.join(name))? else {
+        let Some(text) = read_record(&profile.join(name))? else {
             continue;
         };
-        let parse = |e: serde_json::Error| InventoryError::Parse {
+        let parse = |detail: String| InventoryError::Parse {
             what: profile.join(name).display().to_string(),
-            detail: e.to_string(),
+            detail,
         };
-        let all: Value = serde_json::from_str(&text).map_err(parse)?;
+        let all: Value = serde_json::from_str(&text).map_err(|e| parse(e.to_string()))?;
         let Some(found) = all
             .pointer("/extensions/settings")
             .and_then(Value::as_object)
@@ -219,16 +249,15 @@ fn chromium_profile(
             continue;
         };
         for (id, setting) in found {
-            let setting: Setting = serde_json::from_value(setting.clone()).map_err(parse)?;
+            let setting = Setting::deserialize(setting)
+                .map_err(|e| parse(format!("the extension {id}: {e}")))?;
             // A record without a location holds only settings for an extension that is not
             // installed (`{"incognito": true}`), and must not hide the other file's record.
-            if setting.location.is_none() || settings.iter().any(|(seen, _)| seen == id) {
-                continue;
+            if setting.location.is_some() {
+                settings.entry(id.clone()).or_insert(setting);
             }
-            settings.push((id.clone(), setting));
         }
     }
-    settings.sort_by(|a, b| a.0.cmp(&b.0));
 
     let profile_name = profile
         .file_name()
@@ -250,18 +279,11 @@ fn chromium_extension(
     id: String,
     setting: Setting,
 ) -> BrowserExtension {
-    // An unpacked extension's `path` is absolute; a packed one's is `<id>/<version>` under
-    // the profile's `Extensions`, and the item is the `<id>` folder, whatever version is in it.
-    let (path, files) = match setting.path.as_deref() {
-        Some(path) if Path::new(path).is_absolute() => {
-            (PathBuf::from(path), Some(PathBuf::from(path)))
-        }
-        Some(path) => {
-            let extensions = profile.join("Extensions");
-            (extensions.join(&id), Some(extensions.join(path)))
-        }
-        None => (profile.join("Extensions").join(&id), None),
-    };
+    // A packed extension's `path` is `<id>/<version>` under the profile's `Extensions`; an
+    // unpacked one's is absolute, which `join` keeps as it is.
+    let extensions = profile.join("Extensions");
+    let files = setting.path.as_deref().map(|path| extensions.join(path));
+    let loaded_from = setting.path.filter(|path| Path::new(path).is_absolute());
     let manifest = match &files {
         Some(files) => read_json(&files.join("manifest.json")),
         None => Err("its record names no folder".to_owned()),
@@ -277,7 +299,11 @@ fn chromium_extension(
         Some(Value::Number(mask)) => mask.as_u64() != Some(0),
         Some(_) | None => false,
     };
-    let mut hosts = strings(&manifest["host_permissions"]);
+    // Manifest V2 lists host patterns among its permissions.
+    let (mut hosts, permissions): (Vec<String>, Vec<String>) = strings(&manifest["permissions"])
+        .into_iter()
+        .partition(|permission| permission == "<all_urls>" || permission.contains("://"));
+    hosts.extend(strings(&manifest["host_permissions"]));
     if let Some(scripts) = manifest["content_scripts"].as_array() {
         hosts.extend(
             scripts
@@ -286,7 +312,7 @@ fn chromium_extension(
         );
     }
     BrowserExtension {
-        path: path.to_string_lossy().into_owned(),
+        path: extensions.join(&id).to_string_lossy().into_owned(),
         kind: "browser_extension",
         browser,
         profile: profile_name.to_owned(),
@@ -295,6 +321,7 @@ fn chromium_extension(
             .map(|name| localized(name, &manifest, files.as_deref())),
         version: manifest["version"].as_str().map(str::to_owned),
         id,
+        loaded_from,
         error,
         enabled: !disabled && setting.state != Some(0),
         source: location_name(setting.location).to_owned(),
@@ -302,7 +329,7 @@ fn chromium_extension(
         installed_from: None,
         signed: None,
         update_url: manifest["update_url"].as_str().map(str::to_owned),
-        permissions: strings(&manifest["permissions"]),
+        permissions,
         hosts: hosts
             .into_iter()
             .collect::<BTreeSet<_>>()
@@ -389,7 +416,7 @@ fn firefox_profile(profile: &Path) -> Result<Vec<BrowserExtension>, InventoryErr
         addons: Vec<Addon>,
     }
     let file = profile.join("extensions.json");
-    let Some(text) = read_preferences(&file)? else {
+    let Some(text) = read_record(&file)? else {
         return Ok(Vec::new());
     };
     let database: Database = serde_json::from_str(&text).map_err(|e| InventoryError::Parse {
@@ -413,10 +440,8 @@ fn firefox_profile(profile: &Path) -> Result<Vec<BrowserExtension>, InventoryErr
         })
         .filter_map(|addon| {
             let id = addon.id?;
-            let path = addon.path.map_or_else(
-                || profile.join("extensions").join(format!("{id}.xpi")),
-                PathBuf::from,
-            );
+            let path = profile.join("extensions").join(format!("{id}.xpi"));
+            let loaded_from = addon.path.filter(|kept| Path::new(kept) != path);
             let (permissions, hosts) = addon
                 .user_permissions
                 .map(|p| (p.permissions, p.origins))
@@ -427,6 +452,7 @@ fn firefox_profile(profile: &Path) -> Result<Vec<BrowserExtension>, InventoryErr
                 browser: "Firefox",
                 profile: profile_name.clone(),
                 id,
+                loaded_from,
                 name: addon.default_locale.and_then(|locale| locale.name),
                 version: addon.version,
                 error: None,
@@ -458,7 +484,7 @@ fn signed_name(state: Option<i64>) -> &'static str {
 }
 
 /// The text of a browser's record at `path`, or `None` when it is not there.
-fn read_preferences(path: &Path) -> Result<Option<String>, InventoryError> {
+fn read_record(path: &Path) -> Result<Option<String>, InventoryError> {
     let bytes = match paths::read_capped(path, PREFERENCES_LIMIT + 1) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -481,19 +507,21 @@ fn read_preferences(path: &Path) -> Result<Option<String>, InventoryError> {
         .map_err(|e| parse(e.to_string()))
 }
 
-/// The JSON in a manifest or messages file at `path`, or why it could not be read.
+/// The JSON in a manifest or messages file at `path`, or why it could not be read. The reason
+/// names the file but not its folder, which holds the version: it is part of an extension's
+/// key, which an update must not change.
 fn read_json(path: &Path) -> Result<Value, String> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
     let bytes = paths::read_capped(path, MANIFEST_LIMIT + 1)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        .map_err(|e| format!("cannot read {name}: {e}"))?;
     if bytes.len() as u64 > MANIFEST_LIMIT {
         return Err(format!(
-            "{} is more than the {MANIFEST_LIMIT} bytes read",
-            path.display()
+            "{name} is more than the {MANIFEST_LIMIT} bytes read"
         ));
     }
     // Chromium accepts a byte order mark at the start of a manifest.
     let bytes = bytes.strip_prefix("\u{feff}".as_bytes()).unwrap_or(&bytes);
-    serde_json::from_slice(bytes).map_err(|e| format!("{} does not parse: {e}", path.display()))
+    serde_json::from_slice(bytes).map_err(|e| format!("{name} does not parse: {e}"))
 }
 
 /// The strings in a JSON list; anything else in it (Chromium's permission objects) is left
@@ -548,7 +576,7 @@ pub(super) mod tests {
                 "name": "__MSG_appName__",
                 "default_locale": "en",
                 "version": "1.2",
-                "permissions": ["cookies", {"fileSystem": ["write"]}],
+                "permissions": ["cookies", {"fileSystem": ["write"]}, "http://old.e.x/*"],
                 "host_permissions": ["https://*/*"],
                 "content_scripts": [{"matches": ["<all_urls>", "https://*/*"]}],
                 "update_url": "https://e.x/update",
@@ -597,10 +625,12 @@ pub(super) mod tests {
                 "from_store": true,
                 "update_url": "https://e.x/update",
                 "permissions": ["cookies"],
-                "hosts": ["<all_urls>", "https://*/*"],
+                "hosts": ["<all_urls>", "http://old.e.x/*", "https://*/*"],
             })
         );
-        assert_eq!(found[1]["path"], json!(unpacked));
+        // An unpacked extension is named inside its profile too.
+        assert_eq!(found[1]["path"], json!(profile.join("Extensions/dev")));
+        assert_eq!(found[1]["loaded_from"], json!(unpacked));
         assert_eq!(found[1]["source"], "unpacked");
         assert_eq!(found[1]["enabled"], false);
         assert_eq!(found[1]["from_store"], Value::Null);
@@ -655,7 +685,12 @@ pub(super) mod tests {
     fn a_firefox_profile_gives_its_extensions_but_not_firefoxs_own() {
         let tmp = tempfile::tempdir().unwrap();
         let profile = tmp.path().join("Firefox/Profiles/x1.default-release");
-        let addon = |id: &str, kind: &str, location: &str| json!({"id": id, "type": kind, "location": location, "active": true});
+        let addon = |id: &str, kind: &str, location: &str| {
+            let mut addon = json!({"id": id, "type": kind});
+            addon["location"] = json!(location);
+            addon["active"] = json!(true);
+            addon
+        };
         let mut full = addon("full@e.x", "extension", "app-profile");
         full["version"] = json!("2.0");
         full["path"] = json!("/p/full.xpi");
@@ -682,7 +717,8 @@ pub(super) mod tests {
         assert_eq!(
             found[0],
             json!({
-                "path": "/p/full.xpi",
+                "path": profile.join("extensions/full@e.x.xpi"),
+                "loaded_from": "/p/full.xpi",
                 "kind": "browser_extension",
                 "browser": "Firefox",
                 "profile": "x1.default-release",
@@ -702,6 +738,7 @@ pub(super) mod tests {
             found[1]["path"],
             json!(profile.join("extensions/off@e.x.xpi"))
         );
+        assert_eq!(found[1]["loaded_from"], Value::Null);
         assert_eq!(found[1]["enabled"], false);
         assert_eq!(found[1]["signed"], "broken");
     }
@@ -722,16 +759,35 @@ pub(super) mod tests {
         let secure = locked.join("Secure Preferences");
         fs::set_permissions(&secure, fs::Permissions::from_mode(0o000)).unwrap();
 
+        // A browser whose folder cannot be listed fails as a whole.
+        let edge = tmp.path().join("Microsoft Edge");
+        fs::create_dir(&edge).unwrap();
+        fs::set_permissions(&edge, fs::Permissions::from_mode(0o000)).unwrap();
+
         let (found, inventory) = found(tmp.path());
         fs::set_permissions(&secure, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(&edge, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(found.len(), 1);
         let failed: Vec<&InventorySource> = inventory.failed.iter().collect();
         let source = |path: &Path| InventorySource::BrowserProfile {
             path: path.to_string_lossy().into_owned(),
         };
         assert_eq!(failed, [&source(&firefox), &source(&broken)]);
-        // A record this user may not read is a note, as everywhere in the inventory.
-        assert_eq!(inventory.problems.len(), 3, "{:?}", inventory.problems);
+        // A record or a folder this user may not read is a note, as everywhere in the
+        // inventory.
+        assert_eq!(inventory.problems.len(), 4, "{:?}", inventory.problems);
+        let noted = InventoryError::Io {
+            path: edge.clone(),
+            source: io::Error::from(io::ErrorKind::PermissionDenied),
+        };
+        assert!(
+            inventory
+                .problems
+                .iter()
+                .any(|e| e.to_string() == noted.to_string()),
+            "{:?}",
+            inventory.problems
+        );
     }
 
     #[test]
@@ -759,6 +815,36 @@ pub(super) mod tests {
         let moved = key(json!({"name": "A", "version": "1", "permissions": ["tabs"],
                                "update_url": "https://e.x/u"}));
         assert_ne!(first, moved);
+
+        // A manifest that cannot be read keys the same error across versions.
+        let unreadable = |version: &str| {
+            let path = format!("a/{version}");
+            chromium(&profile, &json!({"a": {"location": 1, "path": path}}));
+            let mut inventory = Inventory::default();
+            collect(&mut inventory, tmp.path())[0].identity()
+        };
+        assert_eq!(unreadable("7"), unreadable("8"));
+    }
+
+    #[test]
+    fn one_folder_loaded_in_two_profiles_is_two_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let unpacked = tmp.path().join("dev/ext");
+        write_json(&unpacked.join("manifest.json"), &json!({"name": "Dev"}));
+        let chrome = tmp.path().join("Google/Chrome/Default");
+        let brave = tmp.path().join("BraveSoftware/Brave-Browser/Default");
+        for profile in [&chrome, &brave] {
+            chromium(profile, &json!({"dev": {"location": 4, "path": unpacked}}));
+        }
+        let (found, _) = found(tmp.path());
+        let paths: Vec<&Value> = found.iter().map(|e| &e["path"]).collect();
+        assert_eq!(
+            paths,
+            [
+                &json!(chrome.join("Extensions/dev")),
+                &json!(brave.join("Extensions/dev")),
+            ]
+        );
     }
 
     #[test]
@@ -780,10 +866,10 @@ pub(super) mod tests {
 
         let limit = usize::try_from(PREFERENCES_LIMIT).unwrap();
         fs::write(&path, " ".repeat(limit)).unwrap();
-        assert!(read_preferences(&path).unwrap().is_some());
+        assert!(read_record(&path).unwrap().is_some());
         fs::write(&path, " ".repeat(limit + 1)).unwrap();
-        let error = read_preferences(&path).unwrap_err();
+        let error = read_record(&path).unwrap_err();
         assert!(error.to_string().contains("more than the"), "{error}");
-        assert_eq!(read_preferences(&tmp.path().join("none")).unwrap(), None);
+        assert_eq!(read_record(&tmp.path().join("none")).unwrap(), None);
     }
 }

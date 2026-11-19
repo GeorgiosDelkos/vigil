@@ -420,7 +420,8 @@ pub enum InventorySource {
     SystemExtensions,
     /// `pluginkit`'s list of Safari's extensions, which could not be read.
     SafariExtensions,
-    /// A browser profile on this Mac whose record of its extensions could not be read.
+    /// A browser profile on this Mac whose record of its extensions could not be read, or a
+    /// browser's folder of profiles that could not be listed.
     BrowserProfile {
         /// The profile's folder, decoded lossily as the extensions' paths are.
         path: String,
@@ -522,8 +523,8 @@ impl InventorySource {
                 subject,
                 Subject::Item(item) if host::may_be_safari_extension(Path::new(item))
             ),
-            // An unpacked extension loaded from outside the profile is not covered: its
-            // path does not say which profile loaded it.
+            // Every extension is named inside its profile, an unpacked one too, and a
+            // browser's folder that cannot be listed covers all of its profiles.
             Self::BrowserProfile { path } => matches!(
                 subject,
                 Subject::Item(item) if Path::new(item).starts_with(path)

@@ -92,8 +92,9 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 
   Last come the extensions of this user's Chromium-based browsers (Chrome, Brave, Edge,
   Vivaldi, Arc, Opera, ...) and Firefox, kind `browser_extension`, each with its `path` (its
-  folder, or Firefox's `.xpi`), `browser`, `profile`, `id`, `name`, `version`, `enabled`, and
-  where it came from: `source` (Chromium: `internal` installed by the user, `unpacked` loaded
+  name in the profile: `<profile>/Extensions/<id>`, or Firefox's `.xpi` there), `loaded_from`
+  for one loaded from another folder, `browser`, `profile`, `id`, `name`, `version`, `enabled`,
+  and where it came from: `source` (Chromium: `internal` installed by the user, `unpacked` loaded
   from a folder, `command_line` loaded with `--load-extension`, `external_policy` or
   `external_policy_download` forced by a policy, `external_pref` or `external_pref_download`
   added by another program; Firefox: `app-profile` installed by the user, `app-system-local`
@@ -236,8 +237,8 @@ Write `findings.json` in this folder, following `findings.schema.json`:
 
     For a `browser_extension`, report it when:
     - it was not installed by the user from the browser's store: `source` `unpacked` or
-      `command_line` (medium; low when its path is plainly the user's own project), a policy
-      source (medium unless the evidence shows the Mac is managed by an organization; a
+      `command_line` (medium; low when its `loaded_from` is plainly the user's own project), a
+      policy source (medium unless the evidence shows the Mac is managed by an organization; a
       malicious configuration profile can force extensions), `external_pref` or
       `external_pref_download` from a program other than a known one (Google's own Docs and
       Drive extensions are), or `from_store` false with `source` `internal`;

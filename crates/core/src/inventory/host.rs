@@ -322,9 +322,11 @@ fn safari_extensions(inventory: &mut Inventory, root: &Path, cancel: &Cancel) ->
         let listed = match command::run(&tool.to_string_lossy(), &["-mAv", "-p", point], cancel) {
             Ok(Some(listed)) => listed,
             Ok(None) => return items,
+            // A `pluginkit` that fails for one point fails for the others, and one failure
+            // covers every `.appex`.
             Err(e) => {
                 inventory.fail(InventorySource::SafariExtensions, e);
-                continue;
+                return items;
             }
         };
         for (label, path) in pluginkit_lines(&listed) {
