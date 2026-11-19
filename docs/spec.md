@@ -280,6 +280,7 @@ rest still count. A tool that is not installed is skipped, not an error.
 | Python | `python3 --version` | NVD product `python`; left out when another component has the same product and version (below) |
 | Node.js and Python versions kept by version managers | the version folders: nvm `versions/node/v*` under `$NVM_DIR`, else under both `$XDG_CONFIG_HOME/nvm` and `~/.nvm`, fnm `node-versions/v*` under `$FNM_DIR`, else under each of `$XDG_DATA_HOME/fnm` (`~/.local/share/fnm`), `~/.fnm`, `~/Library/Application Support/fnm`, Volta `$VOLTA_HOME/tools/image/node/*` (`~/.volta`), asdf `$ASDF_DATA_DIR/installs/{nodejs,python}/*` (`~/.asdf`), pyenv `$PYENV_ROOT/versions/*` (`~/.pyenv`) | NVD product `node.js` or `python` |
 | uv and pipx tools | `uv tool list`, `pipx list --json` | OSV `PyPI` |
+| Apps outside Homebrew | each app's `Contents/Info.plist` in `/Applications` and `~/Applications` (below) | NVD products, through a table of bundle identifiers; Electron as `electronjs:electron` |
 | Project lockfiles under `mac.project_dirs` | `Cargo.lock`, `package-lock.json` and `npm-shrinkwrap.json` (v2/v3), `uv.lock`, `poetry.lock` | OSV by ecosystem |
 
 The folder walk skips `node_modules`, `target`, `.git`, `vendor`, `.venv`, `dist`, `build` and
@@ -368,6 +369,56 @@ Known gaps, accepted for now:
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the `PATH` of the user's shell started as an interactive login shell (`$SHELL -ilc`),
   as the agent adapters do.
+
+### Apps outside Homebrew (added 2026-11-19)
+
+Owner's decisions, 2026-11-19: an app is looked up only through a table, Electron is looked up
+in every app that ships it, and Safari is read through its link. Until then no app was checked
+unless a Homebrew cask installed it, and on the Mac this was written on only one cask was
+installed, with no app.
+
+- **Where.** `*.app` directly in `/Applications` and `~/Applications`, and one plain folder
+  down (`Utilities`, `Adobe Photoshop 2025/`). A link is followed only at the top, which is how
+  `/Applications/Safari.app` reaches the copy in the system's Cryptex; two paths to one app
+  are read once, at the first. Hidden entries and apps inside apps (their helpers) are not
+  listed. `/System/Applications` is macOS's and is left to it.
+- **What.** From `Contents/Info.plist`: `CFBundleIdentifier`, and the version as
+  `CFBundleShortVersionString`, else `CFBundleVersion`. An app that holds
+  `Contents/_MASReceipt` came from the App Store (`source: app_store`), any other is
+  `direct`. A Chromium browser's shortcut to a web app (`CrAppModeShortcutID`, in
+  `~/Applications/Chrome Apps.localized`) runs the browser and is skipped. No command and no
+  app code runs.
+- **Products.** A table in `inventory/applications.rs` maps bundle identifiers to NVD
+  products, each identifier checked against the Homebrew cask that installs the app and each
+  product against NVD's CPE dictionary and CVEs. An app the table does not name is a note in
+  the report ("no NVD product is known for its bundle identifier ..."), not a lookup: an
+  app's name is rarely its product name, and a bare name guessed wrong brings in another
+  vendor's CVEs at an NVD request each (6.6 s without a key). An app that ships
+  `Contents/Frameworks/Electron Framework.framework` is also looked up as
+  `electronjs:electron` at the framework's `CFBundleVersion`, under the same app, whether or
+  not the table names it: only an update of the app replaces it.
+- **Homebrew casks.** An app a cask installed gives only its Electron, under the cask
+  (`Homebrew cask visual-studio-code`), since the cask is already in the inventory. It is
+  known by its file name in an installed cask's `app` artifacts (the target name when one is
+  given), or by a bundle identifier the cask's `uninstall` quits, which is how an app a `pkg`
+  installer put in place (Acrobat Reader) is known. A `pkg` cask that quits nothing of the app
+  (Zoom's quits nothing) is not known: its app is read as well and shows next to the cask,
+  accepted until a cask's package receipts are read. When `brew` ran and failed, which apps
+  casks installed is not known, so no app is read and each folder holding apps fails
+  (`app folder /Applications`): their findings carry over instead of showing twice, once as
+  the cask and once as the app. A Mac without Homebrew reads every app.
+- **Keys and failures.** A finding's place is `application:<path>`. A folder that cannot be
+  listed fails, and covers the apps under it, those one folder down included, but not the
+  Electron of a cask's app in it, whose findings then read as resolved for that sweep. An app
+  whose `Info.plist` cannot be read or names no identifier or version is a note ("the app ...
+  is not looked up"), as is an Electron framework without a version: their findings then read
+  as resolved, accepted since an installer leaves these files readable by every user.
+- **Fixes.** Steps only, no command: the App Store's Updates for `app_store`, the app's own
+  updater or the vendor's release for `direct`.
+
+Not read: apps elsewhere on disk, other users' `~/Applications`, and frameworks other than
+Electron that apps ship (Sparkle, Chromium Embedded Framework). Signatures, quarantine and
+notarization of apps are left to the dylib hijacking checks, which walk the same bundles.
 
 ### Mac host checks (decided 2026-11-16)
 

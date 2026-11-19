@@ -6,9 +6,13 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
 
 - `inventory.jsonl`: what is installed, one component per line. Each has an `id` (`c1`,
   `c2`, ...), a `lookup` (an OSV package or an NVD product), the installed `version`, and
-  `found_in` (where it was found: Homebrew, a lockfile path, a toolchain, or a version
+  `found_in` (where it was found: Homebrew, a lockfile path, a toolchain, a version
   manager's folder for one Node.js or Python version: `version_manager` with the `manager`
-  and the version's `path`).
+  and the version's `path`, or an app no Homebrew cask installed: `application` with the
+  app's `path` and its `source`, `app_store` or `direct`). An app's version is its
+  `CFBundleShortVersionString`. An `electronjs:electron` component found in an app or a
+  Homebrew cask is the Electron framework that app ships, at the framework's version, which
+  only an update of the app (or `brew upgrade --cask <token>`) replaces.
 - `advisories.jsonl`: advisories that name those components, one per line: `id`, `aliases`,
   `summary`, the source's `severity`, what is `affected` (OSV ranges and explicit versions, or
   NVD configurations), `known_exploited` (CISA KEV), the `components` it is a candidate
@@ -174,6 +178,12 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   (`nvm alias default 22.23.4`, `fnm default 22.23.4`, `asdf set -u nodejs 22.23.4`,
   `pyenv global 3.13.1`, `volta install node@22.23.4`). Switching the default alone is not a
   fix: the vulnerable version stays installed and one command away.
+- For an app (`found_in.kind` `application`), the fix is steps with `commands` empty: for
+  `app_store`, update it in the App Store's Updates; for `direct`, update it from its own
+  menu (most have "Check for Updates") or install the vendor's newer release, and remove it
+  if it is no longer used. An Electron finding is fixed by an app release built on a fixed
+  Electron, which the record cannot show: say so in `steps`, and set `no_fixed_release` only
+  as above, from the Electron record.
 - `issues` are risks no advisory names, in this Mac's protections and launch items:
   - A protection that is off: `{"setting": "<key of mac/settings.json>"}`. System Integrity
     Protection, Gatekeeper or FileVault off is high; the firewall off is low on a laptop that

@@ -1,15 +1,16 @@
 //! What is installed: the components a sweep looks up advisories for.
 //!
-//! Each source (macOS, Homebrew, toolchains, project lockfiles) is collected on its own. A
+//! Each source (macOS, Homebrew, toolchains, apps, project lockfiles) is collected on its own. A
 //! source that fails is reported in [`Inventory::problems`] and named in [`Inventory::failed`],
 //! and the others still count, so one broken tool never hides the rest. A tool that is not
 //! installed is listed in [`Inventory::not_installed`], so an inventory taken with a bare
 //! `PATH` (an app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`) shows what it did
 //! not check.
 //!
-//! Collecting only reads: it runs listing commands, lists version managers' folders and parses
-//! lockfiles, never project code.
+//! Collecting only reads: it runs listing commands, lists version managers' folders, reads
+//! apps' `Info.plist` files and parses lockfiles, never project or app code.
 
+mod applications;
 pub(crate) mod command;
 mod homebrew;
 pub(crate) mod host;
@@ -57,13 +58,13 @@ pub struct Inventory {
 }
 
 impl Inventory {
-    /// Collects this Mac's inventory: macOS, Homebrew, toolchains, and lockfiles under
-    /// `project_dirs`.
+    /// Collects this Mac's inventory: macOS, Homebrew, toolchains, the apps in `/Applications`
+    /// and `~/Applications`, and lockfiles under `project_dirs`.
     ///
     /// Runs read-only listing commands (`sw_vers`, `brew`, `rustup`, `cargo`, `npm`, `node`,
     /// `python3`, `uv`, `pipx`) found on `PATH`, each from `/` with a one-minute limit, lists
     /// the folders where version managers (nvm, fnm, volta, asdf, pyenv) keep Node.js and
-    /// Python versions, and walks `project_dirs`. Blocks until all of them finish; `brew info`
+    /// Python versions, reads each app's `Contents/Info.plist`, and walks `project_dirs`. Blocks until all of them finish; `brew info`
     /// alone can take several seconds, and the walk is limited to ten minutes.
     ///
     /// Once `cancel` is set, the running command or walk stops and nothing more is started:
@@ -71,7 +72,13 @@ impl Inventory {
     pub fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Self {
         let mut inventory = Self::default();
         toolchains::macos(&mut inventory, cancel);
-        homebrew::collect(&mut inventory, cancel);
+        let casks = homebrew::collect(&mut inventory, cancel);
+        // Reads a few folders on this thread, unbounded, as the version managers' are below.
+        if !cancel.is_cancelled() {
+            let home = std::env::home_dir();
+            let root = host::system_root();
+            applications::collect(&mut inventory, &root, home.as_deref(), casks.as_ref());
+        }
         toolchains::collect(&mut inventory, cancel);
         // Lists a few known folders on this thread, unbounded: a manager's folder on a mount
         // that does not answer (`NVM_DIR` on a dead share) would hang it, which is rare enough
@@ -247,6 +254,24 @@ pub enum FoundIn {
         /// The repository, `owner/name`.
         repo: String,
     },
+    /// An app in `/Applications` or `~/Applications` that no Homebrew cask installed, by its
+    /// path, and the Electron it ships.
+    Application {
+        /// The app's path, as found in the folder (`/Applications/Safari.app`, a link).
+        path: PathBuf,
+        /// Where it came from, which decides how it is updated.
+        source: AppSource,
+    },
+}
+
+/// Where an app outside Homebrew came from.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppSource {
+    /// The Mac App Store, which updates it: the app holds `Contents/_MASReceipt`.
+    AppStore,
+    /// Anywhere else: its own updater, an installer, or a download.
+    Direct,
 }
 
 impl FoundIn {
@@ -262,7 +287,8 @@ impl FoundIn {
             | Self::Node
             | Self::Python
             | Self::VersionManager { .. }
-            | Self::OsPackage { .. } => true,
+            | Self::OsPackage { .. }
+            | Self::Application { .. } => true,
             Self::MacOs
             | Self::CargoInstall
             | Self::NpmGlobal
@@ -279,6 +305,8 @@ impl FoundIn {
         match self {
             Self::HomebrewFormula { name } => Some(name),
             Self::HomebrewCask { token } => Some(token),
+            // An app and the Electron it ships are named by the app (`Google Chrome`).
+            Self::Application { path, .. } => path.file_stem().and_then(|name| name.to_str()),
             Self::MacOs
             | Self::Rustup { .. }
             | Self::CargoInstall
@@ -315,6 +343,7 @@ impl std::fmt::Display for FoundIn {
             Self::Lockfile { path } => write!(f, "lockfile {}", path.display()),
             Self::OsPackage { packages } => write!(f, "OS packages {}", packages.join(", ")),
             Self::DependencyGraph { repo } => write!(f, "the dependency graph of {repo}"),
+            Self::Application { path, .. } => write!(f, "app {}", path.display()),
         }
     }
 }
@@ -375,6 +404,12 @@ pub enum InventorySource {
     /// The version managers' folders, all of them: one that cannot be listed is rare enough
     /// that telling the managers apart is not worth a field.
     VersionManagers,
+    /// A folder of apps that could not be listed (`/Applications`, `~/Applications`, or a
+    /// folder in one), or that was not read because Homebrew's casks could not be listed.
+    ApplicationFolder {
+        /// The folder.
+        path: PathBuf,
+    },
     /// One lockfile that could not be read or parsed.
     Lockfile {
         /// The lockfile's path.
@@ -467,6 +502,11 @@ impl InventorySource {
             Self::UvTool => matches!(place, FoundIn::UvTool),
             Self::Pipx => matches!(place, FoundIn::Pipx),
             Self::VersionManagers => matches!(place, FoundIn::VersionManager { .. }),
+            // A folder in `/Applications` covers its own apps, and `/Applications` those of
+            // the folders in it too, as they were not listed either.
+            Self::ApplicationFolder { path: folder } => {
+                matches!(place, FoundIn::Application { path, .. } if path.starts_with(folder))
+            }
             Self::Lockfile { path } => {
                 matches!(place, FoundIn::Lockfile { path: found } if found == path)
             }
@@ -559,6 +599,7 @@ impl InventorySource {
             | Self::UvTool
             | Self::Pipx
             | Self::VersionManagers
+            | Self::ApplicationFolder { .. }
             | Self::Lockfile { .. }
             | Self::LockfileWalk { .. }
             | Self::OsPackages
@@ -580,6 +621,7 @@ impl InventorySource {
             Self::BrowserProfile { .. } => Some("browser profiles"),
             Self::Alerts { .. } => Some("kinds of alerts"),
             Self::Workflow { .. } => Some("workflow files"),
+            Self::ApplicationFolder { .. } => Some("app folders"),
             Self::MacOs
             | Self::Homebrew
             | Self::Rustup
@@ -616,6 +658,7 @@ impl std::fmt::Display for InventorySource {
             Self::UvTool => f.write_str("uv tools"),
             Self::Pipx => f.write_str("pipx"),
             Self::VersionManagers => f.write_str("version managers"),
+            Self::ApplicationFolder { path } => write!(f, "app folder {}", path.display()),
             Self::Lockfile { path } => write!(f, "lockfile {}", path.display()),
             Self::LockfileWalk { root } => write!(f, "lockfiles under {}", root.display()),
             Self::OsPackages => f.write_str("OS packages"),
@@ -698,6 +741,36 @@ pub enum InventoryError {
     NoProduct {
         /// The formula name or cask token.
         name: String,
+    },
+    /// An app outside Homebrew is not looked up: no NVD product is known for it, or its
+    /// `Info.plist` could not be read or names no identifier or version. The Electron it ships
+    /// may still be.
+    #[error("the app {} is not looked up: {reason}", app.display())]
+    AppNotLookedUp {
+        /// The app.
+        app: PathBuf,
+        /// Why.
+        reason: String,
+    },
+    /// The Electron framework an app ships is not looked up: its `Info.plist` could not be
+    /// read or names no version.
+    #[error("the Electron in {} is not looked up: {reason}", app.display())]
+    ElectronNotLookedUp {
+        /// The app.
+        app: PathBuf,
+        /// Why.
+        reason: String,
+    },
+    /// The apps in a folder were not read because Homebrew's casks could not be listed: an app
+    /// a cask installed would otherwise be counted twice.
+    #[error(
+        "the apps in {} are not checked: Homebrew's casks could not be listed, so which of them \
+         a cask installed is not known",
+        folder.display()
+    )]
+    NoCaskList {
+        /// The folder of apps.
+        folder: PathBuf,
     },
     /// The sweep was cancelled, so a command or the project folder walk was stopped or not
     /// started.
@@ -789,6 +862,7 @@ impl InventoryError {
             | Self::Parse { .. }
             | Self::Cancelled { .. }
             | Self::WalkTimedOut { .. }
+            | Self::NoCaskList { .. }
             // A project folder fails whatever the cause, permission included: the user chose
             // it, and losing access to it is a change (privacy access to `~/Documents` taken
             // away), not a lasting fact found on the way. As a note, every finding under it would
@@ -802,7 +876,12 @@ impl InventoryError {
             Self::Io { source, .. } => source.kind() != std::io::ErrorKind::PermissionDenied,
             // Each is about one item, and the next sweep reports it again: a project folder
             // holds as many entries then, a lockfile is as large, and one in iCloud stays there.
+            // An app's `Info.plist` that cannot be read is one too: its findings then read as
+            // resolved, accepted since an installer leaves an app's `Info.plist` readable by
+            // every user, so one that is not is a damaged app, not a passing failure.
             Self::NoProduct { .. }
+            | Self::AppNotLookedUp { .. }
+            | Self::ElectronNotLookedUp { .. }
             | Self::OtherRegistry { .. }
             | Self::NpmTree { .. }
             | Self::TooManyEntries { .. }
@@ -1174,6 +1253,20 @@ mod tests {
         );
         assert!(!walk.covers(&lockfile("/a/Cargo.lock")));
         assert!(!walk.covers(&formula));
+
+        let app = |path: &str| FoundIn::Application {
+            path: path.into(),
+            source: AppSource::Direct,
+        };
+        let folder = InventorySource::ApplicationFolder {
+            path: "/Applications".into(),
+        };
+        assert!(folder.covers(&app("/Applications/A.app")));
+        assert!(folder.covers(&app("/Applications/Utilities/B.app")));
+        assert!(!folder.covers(&app("/Applications2/A.app")));
+        assert!(!folder.covers(&app("/Users/me/Applications/A.app")));
+        assert!(!folder.covers(&formula));
+        assert!(!homebrew.covers(&app("/Applications/A.app")));
 
         let places = [
             (InventorySource::MacOs, FoundIn::MacOs),

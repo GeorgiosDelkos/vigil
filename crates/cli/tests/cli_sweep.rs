@@ -244,10 +244,10 @@ impl Sandbox {
             .arg("--data-dir")
             .arg(self.path().join("data"))
             .env("HOME", self.path())
-            // The machine's launch items are not this test's: checking each one's signature
-            // made every sweep seconds slower on CI (crates/core/src/inventory/host.rs,
-            // `system_root`). A folder of its own, which stays empty: under the home, its
-            // Library/LaunchAgents would be the user's too, and each agent read twice.
+            // The machine's launch items and apps are not this test's: checking each item's
+            // signature made every sweep seconds slower on CI (crates/core/src/inventory/host.rs,
+            // `system_root`), and its apps would be components. A folder of its own: under the
+            // home, its Library/LaunchAgents would be the user's too, and each agent read twice.
             .env("VIGIL_TEST_LAUNCH_ROOT", self.path().join("system"))
             .env("PATH", self.bin())
             .env("SHELL", self.path().join("login-shell"))
@@ -442,6 +442,9 @@ fn a_failed_inventory_source_is_saved_and_shown_as_not_checked() {
     .unwrap();
     sandbox.script("bin/brew", "#!/bin/sh\necho 'brew is broken' >&2\nexit 1\n");
     sandbox.script("bin/npm", "#!/bin/sh\necho 'npm is broken' >&2\nexit 2\n");
+    // Without brew's casks, which of these apps a cask installed is not known.
+    let apps = sandbox.path().join("system/Applications");
+    fs::create_dir_all(apps.join("Any.app")).unwrap();
 
     let out = sandbox.sweep("ok");
     assert!(out.status.success(), "{}", text(&out.stderr));
@@ -452,6 +455,7 @@ fn a_failed_inventory_source_is_saved_and_shown_as_not_checked() {
         serde_json::json!([
             {"kind": "homebrew"},
             {"kind": "npm_global"},
+            {"kind": "application_folder", "path": apps},
             {"kind": "lockfile", "path": lockfile},
         ])
     );
@@ -460,7 +464,8 @@ fn a_failed_inventory_source_is_saved_and_shown_as_not_checked() {
     let stdout = text(&out.stdout);
     assert!(
         stdout.contains(&format!(
-            "not fully checked: Homebrew, npm global packages, lockfile {}",
+            "not fully checked: Homebrew, npm global packages, app folder {}, lockfile {}",
+            apps.display(),
             lockfile.display()
         )),
         "{stdout}"
@@ -860,6 +865,59 @@ fn a_browser_extension_is_read_and_an_issue_named_by_its_folder() {
     assert_eq!(
         report["issues"][0]["subject"],
         serde_json::json!({"item": folder.to_str().unwrap()}),
+        "{report}"
+    );
+}
+
+#[test]
+fn apps_outside_homebrew_and_the_electron_they_ship_are_components() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let info = |path: &Path, keys: &str| {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text =
+            format!("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>{keys}</dict></plist>");
+        fs::write(path, text).unwrap();
+    };
+    let chrome = sandbox.path().join("system/Applications/Google Chrome.app");
+    info(
+        &chrome.join("Contents/Info.plist"),
+        "<key>CFBundleIdentifier</key><string>com.google.Chrome</string>\
+         <key>CFBundleShortVersionString</key><string>157.0.8103.79</string>",
+    );
+    let bot = sandbox.path().join("Applications/Bot.app");
+    info(
+        &bot.join("Contents/Info.plist"),
+        "<key>CFBundleIdentifier</key><string>com.example.bot</string>",
+    );
+    info(
+        &bot.join("Contents/Frameworks/Electron Framework.framework/Resources/Info.plist"),
+        "<key>CFBundleVersion</key><string>43.8.9</string>",
+    );
+
+    let out = sandbox.sweep("ok");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let inventory = fs::read_to_string(sandbox.sweep_dir().join("bundle/inventory.jsonl")).unwrap();
+    let apps: Vec<serde_json::Value> = inventory
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|line: &serde_json::Value| line["found_in"]["kind"] == "application")
+        .collect();
+    assert_eq!(apps.len(), 2, "{inventory}");
+    assert_eq!(apps[0]["lookup"]["product"], "google:chrome", "{inventory}");
+    assert_eq!(apps[0]["version"], "157.0.8103.79");
+    assert_eq!(apps[0]["found_in"]["path"], chrome.to_str().unwrap());
+    assert_eq!(apps[0]["found_in"]["source"], "direct");
+    assert_eq!(
+        apps[1]["lookup"]["product"], "electronjs:electron",
+        "{inventory}"
+    );
+    assert_eq!(apps[1]["version"], "43.8.9");
+    assert_eq!(apps[1]["found_in"]["path"], bot.to_str().unwrap());
+
+    let report = sandbox.newest_report("mac");
+    let problems = report["problems"].to_string();
+    assert!(
+        problems.contains("no NVD product is known for its bundle identifier com.example.bot"),
         "{report}"
     );
 }

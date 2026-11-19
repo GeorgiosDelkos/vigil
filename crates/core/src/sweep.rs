@@ -1104,6 +1104,7 @@ fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey
                 FoundIn::Lockfile { path } => path_key("lockfile", path),
                 FoundIn::OsPackage { .. } => "os_package".to_owned(),
                 FoundIn::DependencyGraph { repo } => format!("dependency_graph:{repo}"),
+                FoundIn::Application { path, .. } => path_key("application", path),
             };
             [(*advisory).to_owned(), lookup, found_in]
         })
