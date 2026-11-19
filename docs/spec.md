@@ -384,7 +384,7 @@ the app reads code signatures itself (`inventory/host.rs`) and writes two bundle
 | File | What it holds | An issue names it as |
 |---|---|---|
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
-| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then each `.kext` in `/Library/Extensions` and each system extension `/Library/SystemExtensions/db.plist` records, with what it records. Then shell startup files, crontabs and `periodic` scripts as their lines, assignment values hidden | `{"item": "<path of the property list, app bundle, extension or file>"}` |
+| `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then each `.kext` in `/Library/Extensions` and each system extension `/Library/SystemExtensions/db.plist` records, with what it records. Then Safari's extensions (`pluginkit`). Then shell startup files, crontabs and `periodic` scripts as their lines, secrets hidden. Then the extensions of Chromium browsers and Firefox, with their permissions and hosts | `{"item": "<path of the property list, app bundle, extension or file>"}` |
 
 - A debug build reads the two system folders under `VIGIL_TEST_LAUNCH_ROOT` when it is set,
   so the CLI's end-to-end tests check no launch item of the machine they run on (each sweep
@@ -534,6 +534,45 @@ Kernel and system extensions (added 2026-11-19):
   the kexts directly in it.
 - Neither is marked `replaceable`: the kernel and `sysextd` load only root-owned copies.
 
+Browser extensions (added 2026-11-19):
+
+- Safari's extensions are app extensions: each bundle `pluginkit -mAv -p` lists for Safari's
+  three extension points (`com.apple.Safari.web-extension`, `.extension`,
+  `.content-blocker`) is a `safari_extension` item, checked as a bundle, named by its
+  `.appex`. Whether Safari has it turned on is in Safari's container, which needs Full Disk
+  Access and is not read. A `pluginkit` that fails marks `safari_extensions` unchecked, which
+  carries the open issues of `.appex` items.
+- The other browsers' extensions are `browser_extension` lines (`inventory/host/browsers.rs`),
+  after the startup files. Chromium's browsers (Chrome, Beta, Canary, Chromium, Brave, Edge,
+  Vivaldi, Arc, Opera) keep a profile in each folder with a `Preferences` file (Opera in the
+  browser's own folder); its `extensions.settings`, from `Secure Preferences` first, gives
+  each extension's `location`, state and folder, and the `manifest.json` there its name
+  (`__MSG_` names looked up in the default locale), permissions, host permissions, content
+  script matches and update URL; the copy stored in the record stands in when the file cannot
+  be read. A record without a `location` holds settings only (`{"incognito": true}`) and is
+  skipped, so it cannot hide the other file's record. Firefox's profiles in
+  `Firefox/Profiles` give `extensions.json`: location, `active`, `signedState`, the download
+  address and the granted permissions and origins. What ships with the browser is left out:
+  Chromium's locations 5 and 10, Firefox's `app-builtin`, `app-system-defaults` and
+  `app-system-addons`, and Firefox add-ons that are not extensions.
+- An extension is named inside its profile (`<profile>/Extensions/<id>`, or Firefox's
+  `<profile>/extensions/<id>.xpi`), an unpacked one too, whose folder is its `loaded_from`:
+  one folder loaded in two profiles is then two items, not one path with two keys. Its key is
+  everything but its name and version, so an update that asks for nothing new keeps a
+  dismissal, and a new permission, host, update address or state shows it again. A manifest
+  that cannot be read is named in the error without its folder, which holds the version.
+- A record that cannot be read or parsed, or a browser's folder that cannot be listed, marks
+  that `browser_profile` unchecked, which carries the open issues of every extension under it.
+  A record or folder this user may not read is a note.
+- Not read: Chromium's granted and optional permissions (the manifest's requested ones are
+  shown), other users' browsers, Firefox profiles that `profiles.ini` places outside
+  `Profiles`, Firefox forks (LibreWolf, Zen, Waterfox) and Chromium browsers outside the list.
+  Safari's own on and off switch per extension, in its container, is not read, so a
+  `safari_extension` has `run_at_load` false: Safari runs it, not login.
+- Opera's profile is its browser folder, which holds its other profiles, so a failure there
+  also carries the issues of extensions in a profile inside it that was read. Accepted: it
+  keeps an issue open one sweep longer, never drops one.
+
 Accepted gaps, in the order planned:
 
 - A dismissed launch item shows again when one check of it fails: its key follows what it
@@ -556,7 +595,7 @@ Accepted gaps, in the order planned:
 - Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
   programs without library validation. Until then a changed file inside a program's bundle,
   such as a framework it loads, is not seen, since signatures skip the bundle's resources.
-- Keyboard event taps and browser extensions.
+- Keyboard event taps.
 
 ### GitHub repositories (decided 2026-11-06)
 

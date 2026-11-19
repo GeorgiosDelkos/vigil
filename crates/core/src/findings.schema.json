@@ -56,7 +56,7 @@
         "required": ["subject", "severity", "evidence", "explanation", "fix"],
         "properties": {
           "subject": {
-            "description": "A key of github/settings.json or mac/settings.json, a path in the bundle such as github/workflows/ci.yml, or the path of a startup item (a launch item, login item, app, kernel or system extension, shell startup file, crontab or periodic script) in mac/persistence.jsonl.",
+            "description": "A key of github/settings.json or mac/settings.json, a path in the bundle such as github/workflows/ci.yml, or the path of a startup item (a launch item, login item, app, kernel, system, Safari or browser extension, shell startup file, crontab or periodic script) in mac/persistence.jsonl.",
             "oneOf": [
               {
                 "type": "object",

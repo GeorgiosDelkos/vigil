@@ -418,6 +418,15 @@ pub enum InventorySource {
     BackgroundItems,
     /// The database of system extensions on this Mac, which could not be read.
     SystemExtensions,
+    /// `pluginkit`'s list of Safari's extensions, which could not be read.
+    SafariExtensions,
+    /// A browser profile on this Mac whose record of its extensions could not be read, or a
+    /// browser's folder of profiles that could not be listed.
+    BrowserProfile {
+        /// The profile's folder, or the browser's folder of profiles, decoded lossily as the
+        /// extensions' paths are.
+        path: String,
+    },
     /// Which account the sweep runs as, from `id`: without it, no program that runs as root is
     /// marked replaceable, and this user's crontab is not read.
     Account,
@@ -473,6 +482,8 @@ impl InventorySource {
             | Self::LaunchItem { .. }
             | Self::BackgroundItems
             | Self::SystemExtensions
+            | Self::SafariExtensions
+            | Self::BrowserProfile { .. }
             | Self::Account
             | Self::Alerts { .. }
             | Self::Workflows
@@ -507,6 +518,17 @@ impl InventorySource {
                 subject,
                 Subject::Item(item) if host::may_come_from_records(Path::new(item))
                     && !host::may_be_system_extension(Path::new(item))
+                    && !host::may_be_safari_extension(Path::new(item))
+            ),
+            Self::SafariExtensions => matches!(
+                subject,
+                Subject::Item(item) if host::may_be_safari_extension(Path::new(item))
+            ),
+            // Every extension is named inside its profile, an unpacked one too, and a
+            // browser's folder that cannot be listed covers all of its profiles.
+            Self::BrowserProfile { path } => matches!(
+                subject,
+                Subject::Item(item) if Path::new(item).starts_with(path)
             ),
             Self::SystemExtensions => matches!(
                 subject,
@@ -555,6 +577,7 @@ impl InventorySource {
             Self::Setting { .. } => Some("settings"),
             Self::LaunchFolder { .. } => Some("startup folders"),
             Self::LaunchItem { .. } => Some("startup items"),
+            Self::BrowserProfile { .. } => Some("browser profiles"),
             Self::Alerts { .. } => Some("kinds of alerts"),
             Self::Workflow { .. } => Some("workflow files"),
             Self::MacOs
@@ -572,6 +595,7 @@ impl InventorySource {
             | Self::Workflows
             | Self::BackgroundItems
             | Self::SystemExtensions
+            | Self::SafariExtensions
             | Self::Account
             | Self::Unknown => None,
         }
@@ -599,6 +623,8 @@ impl std::fmt::Display for InventorySource {
             Self::Setting { key } => write!(f, "the setting {key}"),
             Self::BackgroundItems => f.write_str("login items"),
             Self::SystemExtensions => f.write_str("system extensions"),
+            Self::SafariExtensions => f.write_str("Safari extensions"),
+            Self::BrowserProfile { path } => write!(f, "browser profile {path}"),
             Self::Account => f.write_str("this user's account"),
             Self::LaunchFolder { path } => write!(f, "startup folder {path}"),
             Self::LaunchItem { path } => write!(f, "startup item {path}"),
@@ -1251,6 +1277,11 @@ mod tests {
                 "system extensions",
                 "system_extensions",
             ),
+            (
+                InventorySource::SafariExtensions,
+                "Safari extensions",
+                "safari_extensions",
+            ),
         ];
         for (source, text, kind) in names {
             assert_eq!(source.to_string(), text);
@@ -1271,6 +1302,30 @@ mod tests {
         assert!(!database.covers_issue(&item("/Library/Extensions/x.kext")));
         assert!(!database.covers_issue(&item("/Applications/A.app")));
         assert!(!database.covers_issue(&Subject::File("x.systemextension".to_owned())));
+    }
+
+    #[test]
+    fn failed_browser_sources_cover_only_their_extensions() {
+        let item = |path: &str| Subject::Item(path.to_owned());
+        let safari = InventorySource::SafariExtensions;
+        let appex = "/Applications/B.app/Contents/PlugIns/Block.appex";
+        assert!(safari.covers_issue(&item(appex)));
+        assert!(!safari.covers_issue(&item("/Applications/B.app")));
+        assert!(
+            !InventorySource::BackgroundItems.covers_issue(&item(appex)),
+            "an app extension is listed by pluginkit, not the login item records"
+        );
+
+        let profile = "/Users/me/Library/Application Support/Google/Chrome/Default";
+        let chrome = InventorySource::BrowserProfile {
+            path: profile.to_owned(),
+        };
+        assert!(chrome.covers_issue(&item(&format!("{profile}/Extensions/abc"))));
+        assert!(!chrome.covers_issue(&item(&format!("{profile} 2/Extensions/abc"))));
+        assert!(!chrome.covers_issue(&item("/Users/me/dev/unpacked")));
+        assert!(!chrome.covers_issue(&Subject::File(format!("{profile}/Extensions/abc"))));
+        assert_eq!(chrome.to_string(), format!("browser profile {profile}"));
+        assert_eq!(chrome.counted_as(), Some("browser profiles"));
     }
 
     #[test]

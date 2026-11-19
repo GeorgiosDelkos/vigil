@@ -31,7 +31,8 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   at login; `open_at_login` is an app in the Open at Login list; `kernel_extension` is a
   `.kext` in `/Library/Extensions`, code the kernel loads once the user allows it;
   `system_extension` is one an app installed, which runs as root, named by its bundle inside
-  that app), its
+  that app; `safari_extension` is an app extension Safari runs, named by its `.appex` bundle,
+  whose `label` is its identifier; whether Safari has it turned on is not known), its
   `label`, the `program` launchd starts and its `arguments`, the `scripts` an interpreter runs
   (its first argument that is a file path, unless inline code such as `-c` comes first, and,
   through `env`, an interpreter given by its full path and that interpreter's script),
@@ -88,6 +89,21 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   A file in `/etc` and a `periodic_script` have `replaceable: true` when this user could
   replace them. Judge these files from their lines here: do not open them yourself, since
   they hold values Vigil hid on purpose, and never quote a value in `evidence`.
+
+  Last come the extensions of this user's Chromium-based browsers (Chrome, Brave, Edge,
+  Vivaldi, Arc, Opera, ...) and Firefox, kind `browser_extension`, each with its `path` (its
+  name in the profile: `<profile>/Extensions/<id>`, or Firefox's `.xpi` there), `loaded_from`
+  for one loaded from another folder, `browser`, `profile`, `id`, `name`, `version`, `enabled`,
+  and where it came from: `source` (Chromium: `internal` installed by the user, `unpacked` loaded
+  from a folder, `command_line` loaded with `--load-extension`, `external_policy` or
+  `external_policy_download` forced by a policy, `external_pref` or `external_pref_download`
+  added by another program; Firefox: `app-profile` installed by the user, `app-system-local`
+  and `app-system-share` added by another program, `app-temporary` loaded for debugging),
+  Chromium's `from_store`, Firefox's `installed_from` (the download's address) and `signed`
+  (whether Mozilla signed it: `signed`, `missing`, `broken`, ...), and `update_url`.
+  `permissions` are the browser APIs it asks for (Chromium's manifest) or was granted
+  (Firefox); `hosts` are the sites it may read and change. An `error` says its manifest could
+  not be read. Extensions that ship with the browser are left out.
 
 ## Version matches
 
@@ -215,6 +231,37 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     password and restart; for a `system_extension`, turn it off in System Settings > General >
     Login Items & Extensions, or move the app that installed it to the Trash, which removes the
     extension), so the user decides.
+
+    For a `safari_extension`, judge its `program`'s signature as for any item; an app
+    extension that is not signed by a developer the evidence links to its app is medium.
+
+    For a `browser_extension`, report it when:
+    - it was not installed by the user from the browser's store: `source` `unpacked` or
+      `command_line` (medium; low when its `loaded_from` is plainly the user's own project), a
+      policy source (medium unless the evidence shows the Mac is managed by an organization; a
+      malicious configuration profile can force extensions), `external_pref` or
+      `external_pref_download` from a program other than a known one (Google's own Docs and
+      Drive extensions are), or `from_store` false with `source` `internal`;
+    - it names an `update_url` that is not its browser's store (Chrome's and Brave's
+      `https://clients2.google.com/service/update2/crx`, Edge's
+      `https://edge.microsoft.com/extensionwebstorebase/v1/crx`, Opera's
+      `extension-updates.opera.com`, Firefox's `addons.mozilla.org`): whoever runs that
+      address decides its next version. A Firefox add-on from the store usually has none, and
+      none is not a finding; for Firefox, `installed_from` outside `addons.mozilla.org` is;
+    - Firefox's `source` is `app-system-local`, `app-system-share` or `app-temporary`, or its
+      `signed` is not `signed`, `system` or `privileged`;
+    - it may read and change every site (`hosts` holding `<all_urls>`, `*://*/*`,
+      `https://*/*` or `http://*/*`) and asks for `cookies`, `webRequest`,
+      `webRequestBlocking`, `debugger`, `nativeMessaging`, `proxy`, `scripting`,
+      `management` or `clipboardRead`, and its name and id are not a widely used extension's
+      (low: it can read every page and session; a wallet or a password manager needs much
+      of this, so say what it is rather than raising it).
+
+    Severity: as above, then lower it one step when `enabled` is false. Leave out a widely
+    used extension installed from the store with no other reason. The fix is manual: remove
+    it on the browser's extensions page (`chrome://extensions`, `brave://extensions`,
+    `edge://extensions`, `about:addons`); for a policy source, check System Settings >
+    General > Device Management for a profile the user did not install.
 
     For a `shell_startup`, `crontab`, `periodic_script` or `path_list` file, report it when a
     line:
