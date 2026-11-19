@@ -1021,7 +1021,7 @@ impl SavedInstalled {
             key,
             name: place
                 .as_ref()
-                .and_then(FoundIn::install_name)
+                .and_then(|place| place.install_name(self.lookup["product"].as_str()))
                 .map_or_else(|| name.to_owned(), sweep::plain),
         }
     }
@@ -1893,6 +1893,10 @@ mod tests {
                     "installed": {"lookup": curl(), "version": "1"}}),
                 json!({"key": FindingKey(15), "severity": "high",
                     "installed": {"lookup": curl(), "version": "1"}}),
+                // The Electron a cask's app ships is at its own version: named by the finding's
+                // own name, not the cask's.
+                finding(16, "Electron", json!({"product": "electronjs:electron"}),
+                    "37.7.0", json!({"kind": "homebrew_cask", "token": "visual-studio-code"})),
             ],
             "issues": [{"key": FindingKey(11), "severity": "low"}],
         })
@@ -1937,6 +1941,8 @@ mod tests {
             "an unknown place"
         );
         assert_eq!(component(11), Some(None), "an issue has none");
+        let (_, electron) = component(16).flatten().unwrap();
+        assert_eq!(electron, "Electron", "not the cask's name");
         let bare = component(12).flatten().unwrap().0;
         assert_ne!(
             component(13).flatten().map(|c| c.0),
@@ -1970,6 +1976,7 @@ mod tests {
                 ("", 1),
                 ("", 1),
                 ("", 1),
+                ("Electron", 1),
                 ("", 1)
             ],
             "the dismissed version is gone"

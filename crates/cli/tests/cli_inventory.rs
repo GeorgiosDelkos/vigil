@@ -44,6 +44,8 @@ impl Sandbox {
             .arg(&data)
             .arg("inventory")
             .env("HOME", self.path())
+            // This machine's `/Applications` is not this test's: its apps would be components.
+            .env("VIGIL_TEST_LAUNCH_ROOT", self.path().join("system"))
             .env("PATH", self.bin())
             .env_remove("NVM_DIR")
             .env_remove("FNM_DIR")

@@ -6,6 +6,9 @@
 //! for it. The sweep checks each product with no CVEs against NVD's CPE dictionary and reports
 //! the ones it does not know (spec, step 4).
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use serde::Deserialize;
 
 use crate::cancel::Cancel;
@@ -15,6 +18,7 @@ use crate::inventory::Inventory;
 use crate::inventory::InventoryError;
 use crate::inventory::InventorySource;
 use crate::inventory::Lookup;
+use crate::inventory::command;
 
 /// Formula names whose NVD products differ, as (name without `@version`, NVD products), sorted
 /// by name for the binary search. A formula has several products when NVD files the software
@@ -98,21 +102,52 @@ const CASK_ALIASES: &[(&str, &[&str])] = &[
     ("visual-studio-code", &["microsoft:visual_studio_code"]),
 ];
 
-pub(super) fn collect(inventory: &mut Inventory, cancel: &Cancel) {
+/// Adds the installed formulae and casks, and returns the apps the casks put in place: none
+/// when Homebrew is not installed, and `None` when `brew` failed, so which apps casks installed
+/// is not known.
+pub(super) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Option<CaskApps> {
     let args = ["info", "--json=v2", "--installed"];
-    if let Some(output) = inventory.run(InventorySource::Homebrew, "brew", &args, cancel) {
-        parse(&output, inventory);
+    match command::run("brew", &args, cancel) {
+        Ok(Some(output)) => parse(&output, inventory),
+        Ok(None) => {
+            inventory.missing("brew");
+            Some(CaskApps::default())
+        }
+        Err(e) => {
+            inventory.fail(InventorySource::Homebrew, e);
+            None
+        }
     }
 }
 
-/// Adds every installed formula version and cask from `brew info --json=v2` output.
-fn parse(json: &str, inventory: &mut Inventory) {
+/// The apps installed casks put in place, each with its cask's token.
+#[derive(Debug, Default)]
+pub(super) struct CaskApps {
+    /// By the app's file name (`Docker.app`), from the casks' `app` artifacts.
+    pub(super) by_name: BTreeMap<String, String>,
+    /// By the bundle identifiers a cask with no `app` artifact (a `pkg` installer) quits before
+    /// it uninstalls (`com.adobe.Reader`). A cask that names its app is known only by that name.
+    pub(super) by_identifier: BTreeMap<String, String>,
+}
+
+impl CaskApps {
+    /// The token of the cask that installed the app with this file name or bundle identifier.
+    pub(super) fn token(&self, name: Option<&str>, identifier: Option<&str>) -> Option<&str> {
+        let by_name = name.and_then(|name| self.by_name.get(name));
+        let by_identifier = || self.by_identifier.get(identifier?);
+        by_name.or_else(by_identifier).map(String::as_str)
+    }
+}
+
+/// Adds every installed formula version and cask from `brew info --json=v2` output, and
+/// returns the apps the casks put in place; `None` when the output does not parse.
+fn parse(json: &str, inventory: &mut Inventory) -> Option<CaskApps> {
     let info: Info = match serde_json::from_str(json) {
         Ok(info) => info,
         Err(e) => {
             let error = InventoryError::parse("brew info --json=v2", &e);
             inventory.fail(InventorySource::Homebrew, error);
-            return;
+            return None;
         }
     };
 
@@ -133,12 +168,34 @@ fn parse(json: &str, inventory: &mut Inventory) {
             }
         }
     }
+    let mut apps = CaskApps::default();
     // A cask's version can be `latest` or carry a build after a comma (`1.2,345`); it is
     // passed on as Homebrew gives it, and the agent reads it with that in mind.
     for cask in info.casks {
         let Some(version) = cask.installed else {
             continue;
         };
+        let names = app_names(&cask.artifacts);
+        // Only a cask with no `app` artifact (a `pkg` installer) is known by what it quits:
+        // otherwise an older copy of its app kept a folder down, found first, would claim it.
+        let identifiers = if names.is_empty() {
+            quit_identifiers(&cask.artifacts)
+        } else {
+            Vec::new()
+        };
+        // The first cask listed keeps a name or identifier two of them give, so the result
+        // does not depend on which is read last. Homebrew refuses to install a cask's app over
+        // another's unless forced, so two names rarely meet.
+        for name in names {
+            apps.by_name
+                .entry(name)
+                .or_insert_with(|| cask.token.clone());
+        }
+        for identifier in identifiers {
+            apps.by_identifier
+                .entry(identifier)
+                .or_insert_with(|| cask.token.clone());
+        }
         let Some(products) = products(&cask.token, CASK_ALIASES) else {
             inventory
                 .problems
@@ -152,6 +209,7 @@ fn parse(json: &str, inventory: &mut Inventory) {
             inventory.add(Lookup::Product(product), &version, found_in);
         }
     }
+    Some(apps)
 }
 
 /// Returns the NVD products for a Homebrew name: its aliases, or else the name itself without
@@ -205,6 +263,54 @@ struct Installed {
 struct Cask {
     token: String,
     installed: Option<String>,
+    /// What the cask puts in place, one kind per object (`{"app": ["Docker.app"]}`). Read as
+    /// values: the other kinds' shapes vary, and only `app` is read.
+    #[serde(default)]
+    artifacts: Vec<serde_json::Value>,
+}
+
+/// The file names of the apps a cask's `artifacts` put in place. An `app` artifact lists the
+/// app in the download, followed by `{"target": ...}` when it is installed under another name
+/// (`["Thorium.app", {"target": "Thorium Browser.app"}]`).
+fn app_names(artifacts: &[serde_json::Value]) -> Vec<String> {
+    let mut names = Vec::new();
+    let apps = artifacts.iter().filter_map(|a| a.get("app")?.as_array());
+    for app in apps.flatten() {
+        match (app.as_str(), app.get("target").and_then(|t| t.as_str())) {
+            (Some(source), _) => names.push(source),
+            (None, Some(target)) => {
+                names.pop();
+                names.push(target);
+            }
+            (None, None) => {}
+        }
+    }
+    names
+        .into_iter()
+        .filter_map(|name| Some(Path::new(name).file_name()?.to_str()?.to_owned()))
+        .collect()
+}
+
+/// The bundle identifiers a cask's `uninstall` artifact quits, each given as a string or a
+/// list (`{"uninstall": [{"quit": ["com.adobe.Reader", "com.adobe.AdobeRdrCEF"]}]}`). Some
+/// name helpers, which no app in `/Applications` has as its identifier.
+fn quit_identifiers(artifacts: &[serde_json::Value]) -> Vec<String> {
+    let stanzas = artifacts
+        .iter()
+        .filter_map(|a| a.get("uninstall")?.as_array());
+    let quits = stanzas.flatten().filter_map(|stanza| stanza.get("quit"));
+    let mut identifiers = Vec::new();
+    for quit in quits {
+        match quit {
+            serde_json::Value::String(id) => identifiers.push(id.clone()),
+            serde_json::Value::Array(ids) => {
+                let ids = ids.iter().filter_map(serde_json::Value::as_str);
+                identifiers.extend(ids.map(str::to_owned));
+            }
+            _ => {}
+        }
+    }
+    identifiers
 }
 
 #[cfg(test)]
@@ -265,6 +371,59 @@ mod tests {
             ]
         );
         assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
+    }
+
+    #[test]
+    fn casks_name_the_apps_they_put_in_place() {
+        let mut inventory = Inventory::default();
+        let apps = parse(
+            r#"{"casks": [
+                {"token": "docker", "installed": "4.82.0", "artifacts": [
+                    {"uninstall": [{"quit": "com.docker.docker"}]},
+                    {"app": ["Docker.app"]}
+                ]},
+                {"token": "reader", "installed": "25", "artifacts": [
+                    {"uninstall": [{"quit": ["com.adobe.Reader", "com.adobe.Helper"]},
+                                   {"pkgutil": "com.adobe.acrobat"}]},
+                    {"pkg": ["AcroRdr.pkg"]}
+                ]},
+                {"token": "thorium", "installed": "1", "artifacts": [
+                    {"app": ["Thorium.app", {"target": "Thorium Browser.app"}, "Extra.app"]},
+                    {"app": ["Tools/Inner.app", {"target": "~/Applications/Moved.app"}]}
+                ]},
+                {"token": "docker-copy", "installed": "1", "artifacts": [
+                    {"uninstall": [{"quit": "com.docker.docker"}]},
+                    {"app": ["Docker.app"]}
+                ]},
+                {"token": "listed-only", "installed": null, "artifacts": [{"app": ["L.app"]}]}
+            ]}"#,
+            &mut inventory,
+        );
+        let apps = apps.unwrap();
+        let names: Vec<_> = apps
+            .by_name
+            .iter()
+            .map(|(n, t)| format!("{n} {t}"))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "Docker.app docker",
+                "Extra.app thorium",
+                "Moved.app thorium",
+                "Thorium Browser.app thorium",
+            ]
+        );
+        assert_eq!(apps.token(Some("Docker.app"), None), Some("docker"));
+        // Docker's cask names its app, so what it quits does not name it.
+        assert_eq!(apps.token(None, Some("com.docker.docker")), None);
+        let reader = apps.token(Some("Other.app"), Some("com.adobe.Reader"));
+        assert_eq!(reader, Some("reader"));
+        assert_eq!(apps.token(Some("Thorium.app"), Some("com.other")), None);
+
+        let mut inventory = Inventory::default();
+        assert!(parse("{", &mut inventory).is_none());
+        assert!(inventory.failed.contains(&InventorySource::Homebrew));
     }
 
     #[test]

@@ -25,7 +25,7 @@ and the user can approve a fix the agent then performs.
 | Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV). Since 2026-11-10 the same rule covers OSV: Vigil compares versions itself (see "Version pre-match") and drops every advisory whose components are all out of range; the agent judges applicability. KEV entries no longer skip it (owner's decision, 2026-11-10): a known-exploited advisory that is provably out of range for every component is dropped too, which took one Mac's bundle from 271 advisories to 168 |
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
 | Agent permissions | Sweeps restricted: read anything but credential paths, write only `findings.json`, no shell (Codex: inside its sandbox), and no network path out (decided 2026-11-05, network and credentials 2026-11-12). Fixes get full access, only after the user confirms (decided 2026-11-05) |
-| Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
+| Mac inventory | App collects: macOS + Homebrew, global toolchains, apps outside Homebrew, lockfiles in declared folders |
 | Mac host checks | Toward Objective-See's KnockKnock and Dylib Hijack Scanner (decided 2026-11-16): the app reads security settings and persistence items and their code signatures, the agent reports risky ones as issues with a `setting` or `item` subject; Vigil may ask for Full Disk Access for the locations that need it (see "Mac host checks") |
 | GitHub | Explicit repo list added on demand; deps, Dependabot/code/secret alerts, Actions workflows, account/org settings; auth via `gh` login |
 | Servers | App runs a fixed read-only script over SSH, agent reads the result (changed 2026-11-06, see "Servers"); declared as `~/.ssh/config` alias or host/user/port/key fields |
@@ -57,7 +57,7 @@ Core modules (one concept each):
 - `config`: `config.toml` load/validate (`serde`, `deny_unknown_fields`).
 - `paths`: data dir layout.
 - `feeds::{osv, nvd, kev, ghsa}`: sync with cursor per source; `feeds::index` name index.
-- `inventory::{homebrew, toolchains, version_managers, lockfiles}`: Mac collectors producing `Vec<Component>`;
+- `inventory::{homebrew, applications, toolchains, version_managers, lockfiles}`: Mac collectors producing `Vec<Component>`;
   `github` collects a repository (step 5).
 - `agent`: `AgentKind` enum, detection, command construction, run with output capture.
 - `sweep`: orchestrates targets sequentially, emits progress events.
@@ -280,6 +280,7 @@ rest still count. A tool that is not installed is skipped, not an error.
 | Python | `python3 --version` | NVD product `python`; left out when another component has the same product and version (below) |
 | Node.js and Python versions kept by version managers | the version folders: nvm `versions/node/v*` under `$NVM_DIR`, else under both `$XDG_CONFIG_HOME/nvm` and `~/.nvm`, fnm `node-versions/v*` under `$FNM_DIR`, else under each of `$XDG_DATA_HOME/fnm` (`~/.local/share/fnm`), `~/.fnm`, `~/Library/Application Support/fnm`, Volta `$VOLTA_HOME/tools/image/node/*` (`~/.volta`), asdf `$ASDF_DATA_DIR/installs/{nodejs,python}/*` (`~/.asdf`), pyenv `$PYENV_ROOT/versions/*` (`~/.pyenv`) | NVD product `node.js` or `python` |
 | uv and pipx tools | `uv tool list`, `pipx list --json` | OSV `PyPI` |
+| Apps outside Homebrew | each app's `Contents/Info.plist` in `/Applications` and `~/Applications` (below) | NVD products, through a table of bundle identifiers; Electron as `electronjs:electron` |
 | Project lockfiles under `mac.project_dirs` | `Cargo.lock`, `package-lock.json` and `npm-shrinkwrap.json` (v2/v3), `uv.lock`, `poetry.lock` | OSV by ecosystem |
 
 The folder walk skips `node_modules`, `target`, `.git`, `vendor`, `.venv`, `dist`, `build` and
@@ -368,6 +369,70 @@ Known gaps, accepted for now:
 - An app started by launchd gets `/usr/bin:/bin:/usr/sbin:/sbin`; step 9 runs the inventory
   with the `PATH` of the user's shell started as an interactive login shell (`$SHELL -ilc`),
   as the agent adapters do.
+
+### Apps outside Homebrew (added 2026-11-19)
+
+Owner's decisions, 2026-11-19: an app is looked up only through a table, Electron is looked up
+in every app that ships it, and Safari is read through its link. Until then no app was checked
+unless a Homebrew cask installed it, and on the Mac this was written on only one cask was
+installed, with no app.
+
+- **Where.** `*.app` directly in `/Applications` and `~/Applications`, and one plain folder
+  down (`Utilities`, `Adobe Photoshop 2025/`). A link is followed only at the top, which is how
+  `/Applications/Safari.app` reaches the copy in the system's Cryptex; two paths to one app
+  are read once, at the first. Hidden entries and apps inside apps (their helpers) are not
+  listed. `/System/Applications` is macOS's and is left to it.
+- **What.** From `Contents/Info.plist`: `CFBundleIdentifier`, and the version as
+  `CFBundleShortVersionString`, else `CFBundleVersion`. An app that holds
+  `Contents/_MASReceipt` came from the App Store (`source: app_store`), any other is
+  `direct`. A Chromium browser's shortcut to a web app (`CrAppModeShortcutID`, in
+  `~/Applications/Chrome Apps.localized`) runs the browser and is skipped. No command and no
+  app code runs.
+- **Products.** A table in `inventory/applications.rs` maps bundle identifiers to NVD
+  products, each identifier checked against the Homebrew cask that installs the app and each
+  product against NVD's CPE dictionary and CVEs. An app the table does not name is a note in
+  the report ("no NVD product is known for its bundle identifier ..."), not a lookup: an
+  app's name is rarely its product name, and a bare name guessed wrong brings in another
+  vendor's CVEs at an NVD request each (6.6 s without a key). An app that ships
+  `Contents/Frameworks/Electron Framework.framework` is also looked up as
+  `electronjs:electron` at the framework's `CFBundleVersion`, under the same app, whether or
+  not the table names it: only an update of the app replaces it.
+- **Homebrew casks.** An app a cask installed gives only its Electron, under the cask
+  (`Homebrew cask visual-studio-code`), since the cask is already in the inventory. It is
+  known by its file name in an installed cask's `app` artifacts (the target name when one is
+  given), for an app directly in one of the two folders, where casks put theirs, or, for a
+  cask with no `app` artifact, by a bundle identifier its `uninstall` quits, which is how an
+  app a `pkg` installer put in place (Acrobat Reader) is known. A cask that names its app is
+  not known by what it quits, so an older copy kept a folder down, found first, cannot claim
+  it; for a `pkg` cask, the first app found with the identifier does (accepted, as such a
+  copy is rare). An Electron finding is headed by its product, not the app's name, as it is at
+  Electron's version. Each cask claims one app, the first found: another copy
+  (an older Chrome kept in a folder) is read as an app of its own, so its version is looked
+  up. A name or identifier two casks give goes to the first listed. A `pkg` cask that quits nothing of the app
+  (Zoom's quits nothing) is not known: its app is read as well and shows next to the cask,
+  accepted until a cask's package receipts are read. When `brew` ran and failed, which apps
+  casks installed is not known, so no app is read and each folder holding apps fails
+  (`app folder /Applications`): their findings carry over instead of showing twice, once as
+  the cask and once as the app. A Mac without Homebrew reads every app.
+- **Keys and failures.** A finding's place is `application:<path>`. A folder that cannot be
+  listed fails, and covers the apps under it, those one folder down included, but not the
+  Electron of a cask's app in it, whose findings then read as resolved for that sweep. A
+  folder this user may not list is a note, not a failure, as for every other collector
+  (`InventoryError::Io`): that lasts, and counting it would keep the Mac from ever being
+  clear. An app
+  whose `Info.plist` cannot be read or names no identifier or version is a note ("the app ...
+  is not looked up"), as is an Electron framework without a version: their findings then read
+  as resolved, accepted since an installer leaves these files readable by every user.
+- **Fixes.** Steps only, no command: the App Store's Updates for `app_store`, the app's own
+  updater or the vendor's release for `direct`. The Electron of a cask's app is fixed with
+  `brew upgrade --cask <token>`, as the cask is.
+- **Versions.** An empty version string is none. A version stored as a number rather than
+  the string Apple's Information Property List reference defines makes the `Info.plist` not
+  parse, and the app is a note.
+
+Not read: apps elsewhere on disk, other users' `~/Applications`, and frameworks other than
+Electron that apps ship (Sparkle, Chromium Embedded Framework). Signatures, quarantine and
+notarization of apps are left to the dylib hijacking checks, which walk the same bundles.
 
 ### Mac host checks (decided 2026-11-16)
 
@@ -591,7 +656,8 @@ Accepted gaps, in the order planned:
 - Replaceability reads mode bits and owners, not ACLs, and only for what runs as root.
 - Root's and other users' crontabs (`/usr/lib/cron/tabs`, root's alone) are not read, nor are
   zsh's files under a `ZDOTDIR`.
-- Applications in `/Applications` outside Homebrew, for both CVE matching and the dylib scan.
+- The dylib scan of the apps in `/Applications`; their CVE matching is in "Apps outside
+  Homebrew".
 - Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
   programs without library validation. Until then a changed file inside a program's bundle,
   such as a framework it loads, is not seen, since signatures skip the bundle's resources.

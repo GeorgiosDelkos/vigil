@@ -103,15 +103,16 @@ const LAUNCH_FOLDERS: [(ItemKind, &str); 3] = [
     (ItemKind::KernelExtension, "Library/Extensions"),
 ];
 
-/// The folder [`LAUNCH_FOLDERS`] are under: `/`, or in a debug build `VIGIL_TEST_LAUNCH_ROOT`
-/// when set.
+/// The folder [`LAUNCH_FOLDERS`] and `/Applications` are under: `/`, or in a debug build
+/// `VIGIL_TEST_LAUNCH_ROOT` when set.
 ///
 /// The CLI's end-to-end tests set it, with `HOME`, to their sandbox: each of their many sweeps
 /// otherwise runs `codesign` on every launch item of the machine, which took a GitHub runner
-/// over 3 s per sweep and the mutation job past its time limit (PR #69). Release builds ignore
+/// over 3 s per sweep and the mutation job past its time limit (PR #69), and would find this
+/// machine's apps among the components they check. Release builds ignore
 /// it, so a shipped Vigil cannot be pointed away from the real folders. The real folders are
 /// read by `this_macs_settings_and_items_are_read`.
-fn system_root() -> PathBuf {
+pub(crate) fn system_root() -> PathBuf {
     #[cfg(debug_assertions)]
     if let Some(root) = std::env::var_os("VIGIL_TEST_LAUNCH_ROOT") {
         return PathBuf::from(root);

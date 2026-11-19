@@ -1104,6 +1104,7 @@ fn finding_keys(target: &str, findings: &[(&str, &Component)]) -> Vec<FindingKey
                 FoundIn::Lockfile { path } => path_key("lockfile", path),
                 FoundIn::OsPackage { .. } => "os_package".to_owned(),
                 FoundIn::DependencyGraph { repo } => format!("dependency_graph:{repo}"),
+                FoundIn::Application { path, .. } => path_key("application", path),
             };
             [(*advisory).to_owned(), lookup, found_in]
         })
@@ -1660,9 +1661,13 @@ fn by_component<'a>(target: &str, findings: &[&'a ReportFinding]) -> Vec<Vec<&'a
 /// A group's name: the place's own (a Homebrew formula, which can hold several products), or
 /// the component's.
 fn group_name(component: &Component) -> String {
+    let product = match &component.lookup {
+        Lookup::Product(p) => Some(p.to_string()),
+        Lookup::Package(_) => None,
+    };
     component
         .found_in
-        .install_name()
+        .install_name(product.as_deref())
         .map_or_else(|| component_name(component), str::to_owned)
 }
 
@@ -1917,7 +1922,26 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::inventory::AppSource;
+    use crate::inventory::ELECTRON;
     use crate::inventory::VersionManager;
+
+    #[test]
+    fn an_apps_electron_is_headed_by_its_product_not_the_app() {
+        let component = |product: &str| Component {
+            lookup: Lookup::Product(product.parse().unwrap()),
+            version: "37.7.0".to_owned(),
+            found_in: FoundIn::Application {
+                path: "/Applications/Code.app".into(),
+                source: AppSource::Direct,
+            },
+        };
+        assert_eq!(
+            group_name(&component("microsoft:visual_studio_code")),
+            "Code"
+        );
+        assert_eq!(group_name(&component(ELECTRON)), ELECTRON);
+    }
 
     #[test]
     fn the_retry_prompt_says_whether_the_file_was_missing_or_refused() {
