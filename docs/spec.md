@@ -25,7 +25,7 @@ and the user can approve a fix the agent then performs.
 | Pre-filter | App keeps advisories whose package name is in the inventory, plus OS/kernel and all KEV entries. An NVD CVE not in KEV is also dropped when its CPE matches show it cannot affect the installed version, or name the product only as the platform another product runs on; a CVE for software outside the inventory then no longer reaches the agent through macOS (decided 2026-11-08: one Mac's bundle went from 10304 advisories to 267, 104 of them in KEV). Since 2026-11-10 the same rule covers OSV: Vigil compares versions itself (see "Version pre-match") and drops every advisory whose components are all out of range; the agent judges applicability. KEV entries no longer skip it (owner's decision, 2026-11-10): a known-exploited advisory that is provably out of range for every component is dropped too, which took one Mac's bundle from 271 advisories to 168 |
 | Agents | Auto-detect claude, grok, codex, gemini, opencode; user picks one default |
 | Agent permissions | Sweeps restricted: read anything but credential paths, write only `findings.json`, no shell (Codex: inside its sandbox), and no network path out (decided 2026-11-05, network and credentials 2026-11-12). Fixes get full access, only after the user confirms (decided 2026-11-05) |
-| Mac inventory | App collects: macOS + Homebrew, global toolchains, lockfiles in declared folders |
+| Mac inventory | App collects: macOS + Homebrew, global toolchains, apps outside Homebrew, lockfiles in declared folders |
 | Mac host checks | Toward Objective-See's KnockKnock and Dylib Hijack Scanner (decided 2026-11-16): the app reads security settings and persistence items and their code signatures, the agent reports risky ones as issues with a `setting` or `item` subject; Vigil may ask for Full Disk Access for the locations that need it (see "Mac host checks") |
 | GitHub | Explicit repo list added on demand; deps, Dependabot/code/secret alerts, Actions workflows, account/org settings; auth via `gh` login |
 | Servers | App runs a fixed read-only script over SSH, agent reads the result (changed 2026-11-06, see "Servers"); declared as `~/.ssh/config` alias or host/user/port/key fields |
@@ -57,7 +57,7 @@ Core modules (one concept each):
 - `config`: `config.toml` load/validate (`serde`, `deny_unknown_fields`).
 - `paths`: data dir layout.
 - `feeds::{osv, nvd, kev, ghsa}`: sync with cursor per source; `feeds::index` name index.
-- `inventory::{homebrew, toolchains, version_managers, lockfiles}`: Mac collectors producing `Vec<Component>`;
+- `inventory::{homebrew, applications, toolchains, version_managers, lockfiles}`: Mac collectors producing `Vec<Component>`;
   `github` collects a repository (step 5).
 - `agent`: `AgentKind` enum, detection, command construction, run with output capture.
 - `sweep`: orchestrates targets sequentially, emits progress events.
@@ -400,8 +400,11 @@ installed, with no app.
 - **Homebrew casks.** An app a cask installed gives only its Electron, under the cask
   (`Homebrew cask visual-studio-code`), since the cask is already in the inventory. It is
   known by its file name in an installed cask's `app` artifacts (the target name when one is
-  given), or by a bundle identifier the cask's `uninstall` quits, which is how an app a `pkg`
-  installer put in place (Acrobat Reader) is known. A `pkg` cask that quits nothing of the app
+  given), for an app directly in one of the two folders, where casks put theirs, or by a
+  bundle identifier the cask's `uninstall` quits, which is how an app a `pkg` installer put
+  in place (Acrobat Reader) is known. Each cask claims one app, the first found: another copy
+  (an older Chrome kept in a folder) is read as an app of its own, so its version is looked
+  up. A name or identifier two casks give goes to the first listed. A `pkg` cask that quits nothing of the app
   (Zoom's quits nothing) is not known: its app is read as well and shows next to the cask,
   accepted until a cask's package receipts are read. When `brew` ran and failed, which apps
   casks installed is not known, so no app is read and each folder holding apps fails
@@ -409,12 +412,19 @@ installed, with no app.
   the cask and once as the app. A Mac without Homebrew reads every app.
 - **Keys and failures.** A finding's place is `application:<path>`. A folder that cannot be
   listed fails, and covers the apps under it, those one folder down included, but not the
-  Electron of a cask's app in it, whose findings then read as resolved for that sweep. An app
+  Electron of a cask's app in it, whose findings then read as resolved for that sweep. A
+  folder this user may not list is a note, not a failure, as for every other collector
+  (`InventoryError::Io`): that lasts, and counting it would keep the Mac from ever being
+  clear. An app
   whose `Info.plist` cannot be read or names no identifier or version is a note ("the app ...
   is not looked up"), as is an Electron framework without a version: their findings then read
   as resolved, accepted since an installer leaves these files readable by every user.
 - **Fixes.** Steps only, no command: the App Store's Updates for `app_store`, the app's own
-  updater or the vendor's release for `direct`.
+  updater or the vendor's release for `direct`. The Electron of a cask's app is fixed with
+  `brew upgrade --cask <token>`, as the cask is.
+- **Versions.** An empty version string is none. A version stored as a number rather than
+  the string Apple's Information Property List reference defines makes the `Info.plist` not
+  parse, and the app is a note.
 
 Not read: apps elsewhere on disk, other users' `~/Applications`, and frameworks other than
 Electron that apps ship (Sparkle, Chromium Embedded Framework). Signatures, quarantine and
@@ -642,7 +652,8 @@ Accepted gaps, in the order planned:
 - Replaceability reads mode bits and owners, not ACLs, and only for what runs as root.
 - Root's and other users' crontabs (`/usr/lib/cron/tabs`, root's alone) are not read, nor are
   zsh's files under a `ZDOTDIR`.
-- Applications in `/Applications` outside Homebrew, for both CVE matching and the dylib scan.
+- The dylib scan of the apps in `/Applications`; their CVE matching is in "Apps outside
+  Homebrew".
 - Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
   programs without library validation. Until then a changed file inside a program's bundle,
   such as a framework it loads, is not seen, since signatures skip the bundle's resources.

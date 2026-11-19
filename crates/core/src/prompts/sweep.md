@@ -10,9 +10,10 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   manager's folder for one Node.js or Python version: `version_manager` with the `manager`
   and the version's `path`, or an app no Homebrew cask installed: `application` with the
   app's `path` and its `source`, `app_store` or `direct`). An app's version is its
-  `CFBundleShortVersionString`. An `electronjs:electron` component found in an app or a
-  Homebrew cask is the Electron framework that app ships, at the framework's version, which
-  only an update of the app (or `brew upgrade --cask <token>`) replaces.
+  `CFBundleShortVersionString`, else its build version `CFBundleVersion`. An
+  `electronjs:electron` component found in an app or a Homebrew cask is the Electron
+  framework that app ships, at the framework's version, which only an update of the app
+  replaces.
 - `advisories.jsonl`: advisories that name those components, one per line: `id`, `aliases`,
   `summary`, the source's `severity`, what is `affected` (OSV ranges and explicit versions, or
   NVD configurations), `known_exploited` (CISA KEV), the `components` it is a candidate
@@ -183,7 +184,9 @@ Write `findings.json` in this folder, following `findings.schema.json`:
   menu (most have "Check for Updates") or install the vendor's newer release, and remove it
   if it is no longer used. An Electron finding is fixed by an app release built on a fixed
   Electron, which the record cannot show: say so in `steps`, and set `no_fixed_release` only
-  as above, from the Electron record.
+  as above, from the Electron record. For an Electron finding of a Homebrew cask
+  (`found_in.kind` `homebrew_cask`), the command is `brew upgrade --cask <token>`, as for the
+  cask's own findings.
 - `issues` are risks no advisory names, in this Mac's protections and launch items:
   - A protection that is off: `{"setting": "<key of mac/settings.json>"}`. System Integrity
     Protection, Gatekeeper or FileVault off is high; the firewall off is low on a laptop that

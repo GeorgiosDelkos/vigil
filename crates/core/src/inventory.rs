@@ -64,8 +64,9 @@ impl Inventory {
     /// Runs read-only listing commands (`sw_vers`, `brew`, `rustup`, `cargo`, `npm`, `node`,
     /// `python3`, `uv`, `pipx`) found on `PATH`, each from `/` with a one-minute limit, lists
     /// the folders where version managers (nvm, fnm, volta, asdf, pyenv) keep Node.js and
-    /// Python versions, reads each app's `Contents/Info.plist`, and walks `project_dirs`. Blocks until all of them finish; `brew info`
-    /// alone can take several seconds, and the walk is limited to ten minutes.
+    /// Python versions, reads each app's `Contents/Info.plist`, and walks `project_dirs`.
+    /// Blocks until all of them finish; `brew info` alone can take several seconds, and the
+    /// walk is limited to ten minutes.
     ///
     /// Once `cancel` is set, the running command or walk stops and nothing more is started:
     /// the result is then incomplete, with [`InventoryError::Cancelled`] in its problems.
@@ -966,6 +967,13 @@ mod tests {
                 },
                 false,
             ),
+            (
+                FoundIn::Application {
+                    path: PathBuf::from("/Applications/Code.app"),
+                    source: AppSource::AppStore,
+                },
+                true,
+            ),
         ];
         for (place, one) in places {
             let value = serde_json::to_value(&place).unwrap();
@@ -1067,10 +1075,30 @@ mod tests {
                 FoundIn::DependencyGraph { repo: "o/r".into() },
                 "the dependency graph of o/r",
             ),
+            (
+                FoundIn::Application {
+                    path: "/Applications/Google Chrome.app".into(),
+                    source: AppSource::Direct,
+                },
+                "app /Applications/Google Chrome.app",
+            ),
         ];
         for (found_in, text) in cases {
             assert_eq!(found_in.to_string(), text);
         }
+        let chrome = FoundIn::Application {
+            path: "/Applications/Google Chrome.app".into(),
+            source: AppSource::Direct,
+        };
+        assert_eq!(chrome.install_name(), Some("Google Chrome"));
+        assert_eq!(
+            serde_json::to_value(&chrome).unwrap(),
+            serde_json::json!({
+                "kind": "application",
+                "path": "/Applications/Google Chrome.app",
+                "source": "direct",
+            })
+        );
     }
 
     #[test]
@@ -1265,7 +1293,7 @@ mod tests {
         assert!(folder.covers(&app("/Applications/Utilities/B.app")));
         assert!(!folder.covers(&app("/Applications2/A.app")));
         assert!(!folder.covers(&app("/Users/me/Applications/A.app")));
-        assert!(!folder.covers(&formula));
+        assert!(!folder.covers(&formula) && !folder.covers(&cask));
         assert!(!homebrew.covers(&app("/Applications/A.app")));
 
         let places = [
@@ -1324,6 +1352,15 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&walk).unwrap(),
             serde_json::json!({"kind": "lockfile_walk", "root": "/Users/me/code"})
+        );
+        let apps = InventorySource::ApplicationFolder {
+            path: "/Applications".into(),
+        };
+        assert_eq!(apps.to_string(), "app folder /Applications");
+        assert_eq!(apps.counted_as(), Some("app folders"));
+        assert_eq!(
+            serde_json::to_value(&apps).unwrap(),
+            serde_json::json!({"kind": "application_folder", "path": "/Applications"})
         );
         let names = [
             (InventorySource::MacOs, "macOS", "mac_os"),

@@ -135,6 +135,7 @@ pub(super) fn collect(
         home.map(|h| h.join("Applications")),
     ];
     let mut seen = BTreeSet::new();
+    let mut claimed = BTreeSet::new();
     for folder in folders.into_iter().flatten() {
         let apps = apps_in(inventory, &folder);
         // A folder with no apps fails nothing: no finding of an app can be in it.
@@ -152,7 +153,9 @@ pub(super) fn collect(
             // one app, read at the first path.
             let real = fs::canonicalize(&app).unwrap_or_else(|_| app.clone());
             if seen.insert(real) {
-                add(inventory, &app, casks);
+                let info = read_info(&app.join("Contents/Info.plist"));
+                let cask = cask_of(casks, &folder, &app, info.as_ref().ok(), &mut claimed);
+                add(inventory, &app, info, cask);
             }
         }
     }
@@ -210,11 +213,29 @@ fn is_link(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|m| m.is_symlink())
 }
 
-/// Adds the app at `app` and the Electron it ships, or notes why one is not looked up. An app
-/// a cask installed adds only its Electron, as part of the cask: the cask itself is already in
-/// the inventory.
-fn add(inventory: &mut Inventory, app: &Path, casks: &CaskApps) {
-    let info = read_info(&app.join("Contents/Info.plist"));
+/// The token of the cask that installed the app at `app` in `folder`, whose `Info.plist` is
+/// `info`. A cask puts its app directly in a folder, known by its file name, or through a
+/// `pkg` installer anywhere, known by its identifier; each cask claims one app, the first
+/// found. Another copy (an older one kept a folder down) is an app of its own, looked up as
+/// one, so its version is not hidden behind the cask's.
+fn cask_of<'c>(
+    casks: &'c CaskApps,
+    folder: &Path,
+    app: &Path,
+    info: Option<&Info>,
+    claimed: &mut BTreeSet<&'c str>,
+) -> Option<&'c str> {
+    let in_folder = app.parent() == Some(folder);
+    let name = in_folder.then(|| app.file_name()?.to_str()).flatten();
+    let identifier = info.and_then(|info| info.identifier.as_deref());
+    let token = casks.token(name, identifier)?;
+    claimed.insert(token).then_some(token)
+}
+
+/// Adds the app at `app`, whose `Info.plist` is `info`, and the Electron it ships, or notes
+/// why one is not looked up. An app `cask` installed adds only its Electron, as part of the
+/// cask: the cask itself is already in the inventory.
+fn add(inventory: &mut Inventory, app: &Path, info: Result<Info, String>, cask: Option<&str>) {
     // A browser's shortcut to a web app (Chrome's `~/Applications/Chrome Apps.localized`) runs
     // the browser, which is checked on its own.
     if info
@@ -223,15 +244,6 @@ fn add(inventory: &mut Inventory, app: &Path, casks: &CaskApps) {
     {
         return;
     }
-    let name = app
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let identifier = info
-        .as_ref()
-        .ok()
-        .and_then(|info| info.identifier.as_deref());
-    let cask = casks.token(name, identifier);
     let found_in = match cask {
         Some(token) => FoundIn::HomebrewCask {
             token: token.to_owned(),
@@ -284,7 +296,7 @@ fn add(inventory: &mut Inventory, app: &Path, casks: &CaskApps) {
         inventory.problems.push(not_looked_up(reason));
         return;
     };
-    let Some(version) = info.short_version.or(info.version) else {
+    let Some(version) = nonempty(info.short_version).or(nonempty(info.version)) else {
         let reason = "its Info.plist names no version".to_owned();
         inventory.problems.push(not_looked_up(reason));
         return;
@@ -299,13 +311,22 @@ fn add(inventory: &mut Inventory, app: &Path, casks: &CaskApps) {
 /// error when its `Info.plist` cannot be read or names no version.
 fn electron_version(app: &Path) -> Result<Option<String>, String> {
     let path = app.join(ELECTRON_INFO);
-    if !path.exists() {
-        return Ok(None);
+    // Only a file that is not there means no Electron: one that cannot be reached for another
+    // reason (no permission) is noted, so its findings do not resolve unexplained.
+    match fs::metadata(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        Ok(_) => {}
     }
-    match read_info(&path)?.version {
+    match nonempty(read_info(&path)?.version) {
         Some(version) => Ok(Some(version)),
         None => Err(format!("{} names no CFBundleVersion", path.display())),
     }
+}
+
+/// `value` unless it is empty: an empty version names none, and would match no range.
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.is_empty())
 }
 
 /// The keys read from an `Info.plist`.
@@ -340,6 +361,7 @@ fn read_info(path: &Path) -> Result<Info, String> {
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::fs::symlink;
 
     use super::*;
@@ -438,7 +460,9 @@ mod tests {
         ];
         app(&keynote, &keys);
         fs::create_dir_all(keynote.join("Contents/_MASReceipt")).unwrap();
-        symlink(&safari, apps.join("iWork/Safari.app")).unwrap();
+        let elsewhere = tmp.path().join("elsewhere/Google Chrome.app");
+        chrome(&elsewhere);
+        symlink(&elsewhere, apps.join("iWork/Google Chrome.app")).unwrap();
         // Two folders down and hidden folders are not read.
         chrome(&apps.join("Vendor/Old/Google Chrome.app"));
         chrome(&apps.join(".hidden/Google Chrome.app"));
@@ -484,7 +508,13 @@ mod tests {
         let bot = root.join("Applications/Bot.app");
         app(&bot, &[("CFBundleIdentifier", "com.example.bot")]);
         electron(&bot, "43.8.9");
+        // Each cask claims one app: these copies are apps of their own.
         chrome(&home.join("Applications/Google Chrome.app"));
+        let keys = [
+            ("CFBundleIdentifier", "com.google.Chrome"),
+            ("CFBundleShortVersionString", "120.0.1"),
+        ];
+        app(&root.join("Applications/Old/Google Chrome.app"), &keys);
 
         let mut casks = CaskApps::default();
         let chrome_cask = ("Google Chrome.app".to_owned(), "google-chrome".to_owned());
@@ -494,7 +524,11 @@ mod tests {
         let inventory = collected_with(&root, &home, &casks);
         assert_eq!(
             summary(&inventory, tmp.path()),
-            ["Homebrew cask bot electronjs:electron 43.8.9"]
+            [
+                "Homebrew cask bot electronjs:electron 43.8.9",
+                "app root/Applications/Old/Google Chrome.app Direct google:chrome 120.0.1",
+                "app home/Applications/Google Chrome.app Direct google:chrome 157.0.8103.79",
+            ]
         );
         assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
 
@@ -543,6 +577,13 @@ mod tests {
             ("CFBundleVersion", "157.0.1"),
         ];
         app(&apps.join("Build.app"), &keys);
+        // An empty version is none.
+        let keys = [
+            ("CFBundleIdentifier", "com.google.Chrome"),
+            ("CFBundleShortVersionString", ""),
+            ("CFBundleVersion", "157.0.2"),
+        ];
+        app(&apps.join("Blank.app"), &keys);
         app(
             &apps.join("Unversioned.app"),
             &[("CFBundleIdentifier", "com.google.Chrome")],
@@ -573,6 +614,7 @@ mod tests {
         assert_eq!(
             summary(&inventory, tmp.path()),
             [
+                "app root/Applications/Blank.app Direct google:chrome 157.0.2",
                 "app root/Applications/Bot.app Direct electronjs:electron 43.8.9",
                 "app root/Applications/Broken.app Direct google:chrome 157.0.8103.79",
                 "app root/Applications/Build.app Direct google:chrome 157.0.1",
@@ -616,6 +658,51 @@ mod tests {
     }
 
     #[test]
+    fn an_electron_that_cannot_be_reached_is_a_note_not_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (root, home) = (tmp.path().join("root"), tmp.path().join("home"));
+        let code = root.join("Applications/Code.app");
+        chrome(&code);
+        electron(&code, "37.7.0");
+        let framework = code.join("Contents/Frameworks/Electron Framework.framework");
+        fs::set_permissions(&framework, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let inventory = collected(&root, &home);
+        fs::set_permissions(&framework, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let problems = problems(&inventory, tmp.path());
+        let [problem] = &problems[..] else {
+            panic!("{problems:#?}");
+        };
+        assert!(
+            problem.starts_with("the Electron in root/Applications/Code.app is not looked up: ")
+                && problem.contains("Permission denied"),
+            "{problem}"
+        );
+    }
+
+    #[test]
+    fn an_info_plist_is_read_up_to_its_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plist = |len: u64| {
+            let head = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+                        <key>CFBundleVersion</key><string>1</string></dict></plist>";
+            let pad = usize::try_from(len).unwrap() - head.len();
+            let path = tmp.path().join(format!("{len}.plist"));
+            fs::write(&path, format!("{head}{}", " ".repeat(pad))).unwrap();
+            path
+        };
+
+        let info = read_info(&plist(INFO_LIMIT)).unwrap();
+        assert_eq!(info.version.as_deref(), Some("1"));
+        let error = read_info(&plist(INFO_LIMIT + 1)).unwrap_err();
+        assert!(
+            error.ends_with(&format!("is more than the {INFO_LIMIT} bytes read")),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_folder_that_cannot_be_listed_fails_and_a_missing_one_holds_no_apps() {
         let tmp = tempfile::tempdir().unwrap();
         let (root, home) = (tmp.path().join("root"), tmp.path().join("home"));
@@ -636,7 +723,8 @@ mod tests {
 
     #[test]
     fn the_table_is_sorted_and_holds_valid_products() {
-        assert!(APP_PRODUCTS.is_sorted_by_key(|(id, _)| id));
+        // Strictly, so no identifier is listed twice and the binary search finds the one.
+        assert!(APP_PRODUCTS.windows(2).all(|w| w[0].0 < w[1].0));
         for (id, products) in APP_PRODUCTS {
             for product in *products {
                 assert!(product.parse::<Product>().is_ok(), "{id}: {product}");

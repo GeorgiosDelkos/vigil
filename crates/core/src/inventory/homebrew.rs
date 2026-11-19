@@ -132,12 +132,10 @@ pub(super) struct CaskApps {
 
 impl CaskApps {
     /// The token of the cask that installed the app with this file name or bundle identifier.
-    pub(super) fn token(&self, name: &str, identifier: Option<&str>) -> Option<&str> {
+    pub(super) fn token(&self, name: Option<&str>, identifier: Option<&str>) -> Option<&str> {
+        let by_name = name.and_then(|name| self.by_name.get(name));
         let by_identifier = || self.by_identifier.get(identifier?);
-        self.by_name
-            .get(name)
-            .or_else(by_identifier)
-            .map(String::as_str)
+        by_name.or_else(by_identifier).map(String::as_str)
     }
 }
 
@@ -177,11 +175,18 @@ fn parse(json: &str, inventory: &mut Inventory) -> Option<CaskApps> {
         let Some(version) = cask.installed else {
             continue;
         };
+        // The first cask listed keeps a name or identifier two of them give, so the result
+        // does not depend on which is read last. Homebrew refuses to install a cask's app over
+        // another's unless forced, so two names rarely meet.
         for name in app_names(&cask.artifacts) {
-            apps.by_name.insert(name, cask.token.clone());
+            apps.by_name
+                .entry(name)
+                .or_insert_with(|| cask.token.clone());
         }
         for identifier in quit_identifiers(&cask.artifacts) {
-            apps.by_identifier.insert(identifier, cask.token.clone());
+            apps.by_identifier
+                .entry(identifier)
+                .or_insert_with(|| cask.token.clone());
         }
         let Some(products) = products(&cask.token, CASK_ALIASES) else {
             inventory
@@ -378,6 +383,10 @@ mod tests {
                     {"app": ["Thorium.app", {"target": "Thorium Browser.app"}, "Extra.app"]},
                     {"app": ["Tools/Inner.app", {"target": "~/Applications/Moved.app"}]}
                 ]},
+                {"token": "docker-copy", "installed": "1", "artifacts": [
+                    {"uninstall": [{"quit": "com.docker.docker"}]},
+                    {"app": ["Docker.app"]}
+                ]},
                 {"token": "listed-only", "installed": null, "artifacts": [{"app": ["L.app"]}]}
             ]}"#,
             &mut inventory,
@@ -397,16 +406,11 @@ mod tests {
                 "Thorium Browser.app thorium",
             ]
         );
-        assert_eq!(apps.token("Docker.app", None), Some("docker"));
-        assert_eq!(
-            apps.token("Other.app", Some("com.docker.docker")),
-            Some("docker")
-        );
-        assert_eq!(
-            apps.token("Other.app", Some("com.adobe.Reader")),
-            Some("reader")
-        );
-        assert_eq!(apps.token("Thorium.app", Some("com.other")), None);
+        assert_eq!(apps.token(Some("Docker.app"), None), Some("docker"));
+        assert_eq!(apps.token(None, Some("com.docker.docker")), Some("docker"));
+        let reader = apps.token(Some("Other.app"), Some("com.adobe.Reader"));
+        assert_eq!(reader, Some("reader"));
+        assert_eq!(apps.token(Some("Thorium.app"), Some("com.other")), None);
 
         let mut inventory = Inventory::default();
         assert!(parse("{", &mut inventory).is_none());
