@@ -319,7 +319,8 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Verdict, Vec<String>
             problems.push(format!(
                 "{at}.subject: {} is not in this bundle (settings are the keys of \
                  github/settings.json or mac/settings.json, files are bundle paths such as \
-                 github/workflows/ci.yml, items are the paths in mac/persistence.jsonl)",
+                 github/workflows/ci.yml, items are the paths in mac/persistence.jsonl and \
+                 mac/dylibs.jsonl)",
                 plain_subject(&issue.subject)
             ));
         }
@@ -732,11 +733,12 @@ mod tests {
             [
                 "issues[0].subject: setting \"made_up\" is not in this bundle (settings are the \
                  keys of github/settings.json or mac/settings.json, files are bundle paths such \
-                 as github/workflows/ci.yml, items are the paths in mac/persistence.jsonl)",
+                 as github/workflows/ci.yml, items are the paths in mac/persistence.jsonl and \
+                 mac/dylibs.jsonl)",
                 "issues[1].subject: file \"../etc/passwd\" is not in this bundle (settings are \
                  the keys of github/settings.json or mac/settings.json, files are bundle paths \
                  such as github/workflows/ci.yml, items are the paths in \
-                 mac/persistence.jsonl)",
+                 mac/persistence.jsonl and mac/dylibs.jsonl)",
                 "issues[1].explanation has control or invisible characters",
             ]
         );
@@ -774,7 +776,7 @@ mod tests {
                 "issues[1].subject: startup item \"/Library/LaunchDaemons/y.plist\" is not in this \
                  bundle (settings are the keys of github/settings.json or mac/settings.json, \
                  files are bundle paths such as github/workflows/ci.yml, items are the paths in \
-                 mac/persistence.jsonl)",
+                 mac/persistence.jsonl and mac/dylibs.jsonl)",
             ]
         );
 

@@ -412,7 +412,7 @@ installed, with no app.
   (Zoom's quits nothing) is not known: its app is read as well and shows next to the cask,
   accepted until a cask's package receipts are read. When `brew` ran and failed, which apps
   casks installed is not known, so no app is read and each folder holding apps fails
-  (`app folder /Applications`): their findings carry over instead of showing twice, once as
+  (`cask_apps`, shown "app versions in /Applications"): their findings carry over instead of showing twice, once as
   the cask and once as the app. A Mac without Homebrew reads every app.
 - **Keys and failures.** A finding's place is `application:<path>`. A folder that cannot be
   listed fails, and covers the apps under it, those one folder down included, but not the
@@ -656,12 +656,69 @@ Accepted gaps, in the order planned:
 - Replaceability reads mode bits and owners, not ACLs, and only for what runs as root.
 - Root's and other users' crontabs (`/usr/lib/cron/tabs`, root's alone) are not read, nor are
   zsh's files under a `ZDOTDIR`.
-- The dylib scan of the apps in `/Applications`; their CVE matching is in "Apps outside
-  Homebrew".
-- Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
-  programs without library validation. Until then a changed file inside a program's bundle,
-  such as a framework it loads, is not seen, since signatures skip the bundle's resources.
+- A changed file inside a program's bundle, such as a framework it loads, is not seen, since
+  signatures skip the bundle's resources. The dylib check (below) finds where a library could
+  be planted, not a library already replaced.
 - Keyboard event taps.
+
+Dylib hijacking (added 2026-11-19, phase 6 of the KnockKnock and Dylib Hijack Scanner review;
+the owner asked for it to be designed and built without a further stop):
+
+- **What is read.** What each startup item runs (`program` in `mac/persistence.jsonl`, and the
+  `scripts` an interpreter or `env` runs, since `env /path/tool` loads `tool`; a kernel
+  extension is left out, as the kernel loads it, not the loader), and the main executable of
+  each app the inventory listed in `/Applications` and `~/Applications` (its `Info.plist`'s
+  `CFBundleExecutable`). Each file is read once. It is named by its real path, so its issue
+  keeps its key whichever item names it first, except that an app's executable is named by
+  its path in the app: an app linked into `/Applications` is then still under that folder, and
+  a listing failure there carries its issue. A relative program path
+  is not read. Vigil reads each one's Mach-O header, load commands and code signature itself
+  (`inventory/host/macho.rs`), the arm64 and x86_64 architectures of a universal file (Rosetta
+  runs the second; i386 and ppc never load), within fixed limits; no tool runs, since `otool`
+  ships only with Apple's developer tools.
+- **What is listed**, in `mac/dylibs.jsonl`: a program with a place where a planted library
+  would load, when this user could create a file there (`Account::can_replace`, as for a
+  program run as root) and the program does not enforce library validation. Validation is
+  enforced for a signature flagged `library-validation`, the hardened runtime without
+  `com.apple.security.cs.disable-library-validation`, or a platform binary; with it, the
+  loader refuses a library not signed by Apple or the program's own team. The entitlement is
+  read from both the XML and the DER blob `codesign` writes; either one turning validation off
+  counts, so a program whose two forms disagree is listed. Anyone who signs a
+  file can set the code directory's platform byte, and the kernel honors it only for Apple's
+  own code, so the claim counts only for a program on the sealed system volume, and a code
+  directory too short to hold the byte is malformed. `runs_as_root` holds for a launch daemon
+  that names no other user and for a system extension (a driver, `.dext`, runs as
+  `_driverkit`). The places are a weak load
+  (`LC_LOAD_WEAK_DYLIB`) of a library that is not there (`weak_missing`: every place it looks),
+  and an `@rpath/` load found only in a later `LC_RPATH` folder (`earlier_rpath`: the earlier
+  folders). `@executable_path` and `@loader_path`, bare or with a path after them, are the
+  program's folder, since only main executables are read; a path after them is joined as text,
+  so `@executable_path//lib` stays under the folder. The shared cache holds Apple's
+  libraries off disk, and Vigil cannot ask the loader what it holds (`unsafe` is forbidden):
+  on the sealed volume (`/System` but `/System/Volumes`, `/usr` but `/usr/local`, `/bin`,
+  `/sbin`), a library linked by absolute path counts as found, and so does the Swift runtime
+  (`libswift*.dylib`) through `/usr/lib/swift`, the rpath Apple's toolchain puts first. Any
+  other place there is empty and nobody else can plant in it, so the search goes on. A place
+  that cannot be checked counts as found, so no plant is guessed behind it.
+- **Issues.** One per program, `{"item": "<program path>"}`, keyed by that path and the places
+  and `runs_as_root` (`Hijackable::identity`), so an update that changes neither keeps a
+  dismissal. The prompt rates one run as root high, one run as the user medium (a planted
+  library borrows the app's privacy access and starts with it), and one whose places are all
+  inside an app bundle in `/Applications`, which App Management guards, low.
+- **Failures.** A program that cannot be read fails `load_commands`, which carries its issue;
+  one this user may not read (root's `/Library/PrivilegedHelperTools`, another user's files)
+  or that does not hold together is a note. Without the account (`id` failed) nothing is
+  listed and every program's `load_commands` is unchecked, which carries its issue. A folder
+  of apps that could not be listed (`application_folder`) carries the issues of the apps'
+  executables under it (`<app>/Contents/MacOS/<name>`) and nothing else, since an app's login
+  items are read from their own records; one whose apps' versions were not read because `brew` failed (`cask_apps`) does
+  not, since its executables were still read.
+- **Not read:** the libraries those programs load in turn, an app's other executables
+  (helpers, plug-ins, XPC services), loads relative to the working directory, the loader's
+  fallback folders for a library not found, `DYLD_` variables (a startup item's are already
+  shown), and ACLs, as for replaceability. `..` in a
+  place is resolved by name. On the Mac this was built on (15 apps, every startup program),
+  nothing was listed.
 
 ### GitHub repositories (decided 2026-11-06)
 
