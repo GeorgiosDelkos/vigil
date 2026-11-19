@@ -135,7 +135,11 @@ pub(super) fn collect(
     let mut seen = BTreeSet::new();
     let mut claimed = BTreeSet::new();
     for folder in folders.into_iter().flatten() {
-        let apps = apps_in(inventory, &folder);
+        // Two paths to one app (a link in `~/Applications` to one in `/Applications`) are one
+        // app, read at the first path.
+        let mut apps = apps_in(inventory, &folder);
+        apps.retain(|app| seen.insert(fs::canonicalize(app).unwrap_or_else(|_| app.clone())));
+        inventory.apps.extend(apps.iter().cloned());
         // A folder with no apps fails nothing: no finding of an app can be in it.
         let Some(casks) = casks else {
             if !apps.is_empty() {
@@ -147,14 +151,9 @@ pub(super) fn collect(
             continue;
         };
         for app in apps {
-            // Two paths to one app (a link in `~/Applications` to one in `/Applications`) are
-            // one app, read at the first path.
-            let real = fs::canonicalize(&app).unwrap_or_else(|_| app.clone());
-            if seen.insert(real) {
-                let info = read_info(&app.join("Contents/Info.plist"));
-                let cask = cask_of(casks, &folder, &app, info.as_ref().ok(), &mut claimed);
-                add(inventory, &app, info, cask);
-            }
+            let info = read_info(&app.join("Contents/Info.plist"));
+            let cask = cask_of(casks, &folder, &app, info.as_ref().ok(), &mut claimed);
+            add(inventory, &app, info, cask);
         }
     }
 }

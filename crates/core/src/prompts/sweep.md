@@ -109,6 +109,16 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   `permissions` are the browser APIs it asks for (Chromium's manifest) or was granted
   (Firefox); `hosts` are the sites it may read and change. An `error` says its manifest could
   not be read. Extensions that ship with the browser are left out.
+- `mac/dylibs.jsonl`: programs a planted library could take over (dylib hijacking), one per
+  line. Vigil read the program each startup item runs and the main executable of each app in
+  `/Applications` and `~/Applications`, and lists one only when it does not enforce library
+  validation (the loader would load a library someone else signed) and this user could create
+  a file where it would load one. Each has its `path`, `used_by` (the startup items, by their
+  path in `mac/persistence.jsonl`, and apps that run it), `runs_as_root`, and `plants`: each
+  with the install name it `load`s, whether the load is `weak`, the `path` where a planted
+  library would load, and `why`: `weak_missing` (a weak load of a library that is not there:
+  the program starts without it and loads one put there) or `earlier_rpath` (an `@rpath/`
+  library found only in a later rpath folder: one put in this earlier folder loads instead).
 
 ## Version matches
 
@@ -302,6 +312,15 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     Severity: high for one that runs as root, a `replaceable` one, or a download run in every
     shell; medium otherwise. Name the lines in `evidence` by their number (the first is 1).
     Fix steps say which lines to remove or change in which file; `commands` stays empty.
+  - A program in `mac/dylibs.jsonl`: `{"item": "<its path>"}`, one issue per program. A
+    planted library runs with the program's rights: as root when `runs_as_root` (high), and
+    otherwise with the privacy access the user gave the app (camera, files, screen recording),
+    so malware running as the user borrows it and starts each time the program does (medium).
+    Low when every `path` is inside an app bundle in `/Applications`, where macOS's App
+    Management protection stops other apps from changing the bundle, and the program is not
+    run as root. The fix steps name the developer to report it to (the program
+    should enforce library validation or not load from that place) and, until a fixed
+    release, removing the program or the startup item that runs it if it is not needed.
   - Never an issue for a file of the bundle on this Mac: use `setting` or `item`. Every
     issue on this Mac has `commands` empty.
 

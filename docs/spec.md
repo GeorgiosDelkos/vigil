@@ -656,12 +656,46 @@ Accepted gaps, in the order planned:
 - Replaceability reads mode bits and owners, not ACLs, and only for what runs as root.
 - Root's and other users' crontabs (`/usr/lib/cron/tabs`, root's alone) are not read, nor are
   zsh's files under a `ZDOTDIR`.
-- The dylib scan of the apps in `/Applications`; their CVE matching is in "Apps outside
-  Homebrew".
-- Dylib hijacking: weak and `@rpath` loads that resolve to a missing or user-writable path, in
-  programs without library validation. Until then a changed file inside a program's bundle,
-  such as a framework it loads, is not seen, since signatures skip the bundle's resources.
+- A changed file inside a program's bundle, such as a framework it loads, is not seen, since
+  signatures skip the bundle's resources. The dylib check (below) finds where a library could
+  be planted, not a library already replaced.
 - Keyboard event taps.
+
+Dylib hijacking (added 2026-11-19, phase 6 of the KnockKnock and Dylib Hijack Scanner review;
+the owner asked for it to be designed and built without a further stop):
+
+- **What is read.** The program each startup item runs (`program` in `mac/persistence.jsonl`)
+  and the main executable of each app the inventory listed in `/Applications` and
+  `~/Applications` (its `Info.plist`'s `CFBundleExecutable`), each once by its real path.
+  Vigil reads each one's Mach-O header, load commands and code signature itself
+  (`inventory/host/macho.rs`), every architecture of a universal file, within fixed limits; no
+  tool runs, since `otool` ships only with Apple's developer tools.
+- **What is listed**, in `mac/dylibs.jsonl`: a program with a place where a planted library
+  would load, when this user could create a file there (`Account::can_replace`, as for a
+  program run as root) and the program does not enforce library validation. Validation is
+  enforced for a platform binary, a signature flagged `library-validation`, or the hardened
+  runtime without `com.apple.security.cs.disable-library-validation`; with it, the loader
+  refuses a library not signed by Apple or the program's own team. The places are a weak load
+  (`LC_LOAD_WEAK_DYLIB`) of a library that is not there (`weak_missing`: every place it looks),
+  and an `@rpath/` load found only in a later `LC_RPATH` folder (`earlier_rpath`: the earlier
+  folders). `@executable_path` and `@loader_path` are the program's folder, since only main
+  executables are read. A library under `/System` or `/usr` (but `/usr/local`) counts as found:
+  it is in the shared cache, not on disk, and the sealed volume cannot be written.
+- **Issues.** One per program, `{"item": "<program path>"}`, keyed by that path and the places
+  and `runs_as_root` (`Hijackable::identity`), so an update that changes neither keeps a
+  dismissal. The prompt rates one run as root high, one run as the user medium (a planted
+  library borrows the app's privacy access and starts with it), and one whose places are all
+  inside an app bundle in `/Applications`, which App Management guards, low.
+- **Failures.** A program that cannot be read fails `load_commands`, which carries its issue;
+  one this user may not read (root's `/Library/PrivilegedHelperTools`, another user's files)
+  or that does not hold together is a note. Without the account (`id` failed) nothing is
+  listed, and the issues read as resolved for that sweep, as for `replaceable`. A folder of
+  apps that was not listed carries the issues of the programs under it.
+- **Not read:** the libraries those programs load in turn, an app's other executables
+  (helpers, plug-ins, XPC services), loads relative to the working directory, `DYLD_`
+  variables (a startup item's are already shown), and ACLs, as for replaceability. `..` in a
+  place is resolved by name. On the Mac this was built on (15 apps, every startup program),
+  nothing was listed.
 
 ### GitHub repositories (decided 2026-11-06)
 

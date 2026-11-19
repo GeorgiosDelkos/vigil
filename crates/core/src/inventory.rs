@@ -55,6 +55,9 @@ pub struct Inventory {
     pub failed: BTreeSet<InventorySource>,
     /// Listing tools that are not on `PATH`, so their part was not checked.
     pub not_installed: Vec<&'static str>,
+    /// The apps found in `/Applications` and `~/Applications`, each once, whether or not a
+    /// cask installed it, for the host checks to read their executables.
+    pub apps: Vec<PathBuf>,
 }
 
 impl Inventory {
@@ -465,6 +468,11 @@ pub enum InventorySource {
     SystemExtensions,
     /// `pluginkit`'s list of Safari's extensions, which could not be read.
     SafariExtensions,
+    /// A program on this Mac whose load commands could not be read for the dylib check.
+    LoadCommands {
+        /// The program, as the item or app that runs it names it, decoded lossily.
+        path: String,
+    },
     /// A browser profile on this Mac whose record of its extensions could not be read, or a
     /// browser's folder of profiles that could not be listed.
     BrowserProfile {
@@ -530,6 +538,7 @@ impl InventorySource {
             Self::Setting { .. }
             | Self::LaunchFolder { .. }
             | Self::LaunchItem { .. }
+            | Self::LoadCommands { .. }
             | Self::BackgroundItems
             | Self::SystemExtensions
             | Self::SafariExtensions
@@ -558,7 +567,16 @@ impl InventorySource {
                 subject,
                 Subject::Item(item) if Path::new(item).parent() == Some(Path::new(path))
             ),
-            Self::LaunchItem { path } => matches!(subject, Subject::Item(item) if item == path),
+            // An item, or a program the dylib check read, by its path.
+            Self::LaunchItem { path } | Self::LoadCommands { path } => {
+                matches!(subject, Subject::Item(item) if item == path)
+            }
+            // An app's executable is under it, so a folder that was not listed carries the
+            // dylib issues of the apps in it.
+            Self::ApplicationFolder { path } => matches!(
+                subject,
+                Subject::Item(item) if Path::new(item).starts_with(path)
+            ),
             // Every item these records give is an app bundle, a file inside one, or a record
             // that could not be placed; no launch folder item is, unless a folder on its path
             // or its own name ends in `.app` (see `host::may_come_from_records`). A file that
@@ -609,7 +627,6 @@ impl InventorySource {
             | Self::UvTool
             | Self::Pipx
             | Self::VersionManagers
-            | Self::ApplicationFolder { .. }
             | Self::Lockfile { .. }
             | Self::LockfileWalk { .. }
             | Self::OsPackages
@@ -628,6 +645,7 @@ impl InventorySource {
             Self::Setting { .. } => Some("settings"),
             Self::LaunchFolder { .. } => Some("startup folders"),
             Self::LaunchItem { .. } => Some("startup items"),
+            Self::LoadCommands { .. } => Some("programs"),
             Self::BrowserProfile { .. } => Some("browser profiles"),
             Self::Alerts { .. } => Some("kinds of alerts"),
             Self::Workflow { .. } => Some("workflow files"),
@@ -678,6 +696,7 @@ impl std::fmt::Display for InventorySource {
             Self::SystemExtensions => f.write_str("system extensions"),
             Self::SafariExtensions => f.write_str("Safari extensions"),
             Self::BrowserProfile { path } => write!(f, "browser profile {path}"),
+            Self::LoadCommands { path } => write!(f, "the load commands of {path}"),
             Self::Account => f.write_str("this user's account"),
             Self::LaunchFolder { path } => write!(f, "startup folder {path}"),
             Self::LaunchItem { path } => write!(f, "startup item {path}"),
@@ -781,6 +800,15 @@ pub enum InventoryError {
     NoCaskList {
         /// The folder of apps.
         folder: PathBuf,
+    },
+    /// A program the dylib check could not read, or one that is Mach-O but does not hold
+    /// together, so which libraries it loads is not known.
+    #[error("the libraries {} loads are not checked: {detail}", path.display())]
+    MachO {
+        /// The program.
+        path: PathBuf,
+        /// What did not hold together.
+        detail: String,
     },
     /// The sweep was cancelled, so a command or the project folder walk was stopped or not
     /// started.
@@ -890,6 +918,9 @@ impl InventoryError {
             // resolved, accepted since an installer leaves an app's `Info.plist` readable by
             // every user, so one that is not is a damaged app, not a passing failure.
             Self::NoProduct { .. }
+            // A malformed program stays so until it changes, and the loader refuses it too; one
+            // this user may not read stays so too.
+            | Self::MachO { .. }
             | Self::AppNotLookedUp { .. }
             | Self::ElectronNotLookedUp { .. }
             | Self::OtherRegistry { .. }
@@ -1483,6 +1514,30 @@ mod tests {
         assert!(!account.covers_issue(&item("/Library/LaunchDaemons/a.plist")));
         assert!(!account.covers_issue(&item("/Library/LaunchAgents/a.plist")));
         assert!(!account.covers_issue(&Subject::Setting("etc".to_owned())));
+    }
+
+    #[test]
+    fn a_program_or_app_folder_that_was_not_read_covers_its_dylib_issues() {
+        let item = |path: &str| Subject::Item(path.into());
+        let program = "/Applications/A.app/Contents/MacOS/A";
+        let commands = InventorySource::LoadCommands {
+            path: program.into(),
+        };
+        assert!(commands.covers_issue(&item(program)));
+        assert!(!commands.covers_issue(&item("/Applications/B.app/Contents/MacOS/B")));
+        assert!(!commands.covers(&FoundIn::MacOs));
+        assert_eq!(
+            commands.to_string(),
+            format!("the load commands of {program}")
+        );
+        assert_eq!(commands.counted_as(), Some("programs"));
+
+        let folder = InventorySource::ApplicationFolder {
+            path: "/Applications".into(),
+        };
+        assert!(folder.covers_issue(&item(program)));
+        assert!(!folder.covers_issue(&item("/Applications2/A.app/Contents/MacOS/A")));
+        assert!(!folder.covers_issue(&Subject::Setting("gatekeeper".into())));
     }
 
     #[test]

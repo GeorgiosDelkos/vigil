@@ -1,7 +1,7 @@
 //! This Mac's protections and the programs it starts on its own, for the agent to judge beside
 //! the inventory.
 //!
-//! Two bundle files, under `mac/`:
+//! Three bundle files, under `mac/`:
 //!
 //! - `mac/settings.json`: System Integrity Protection, Gatekeeper, `FileVault` and the
 //!   application firewall, each as the line its tool prints. An issue names one by its key.
@@ -15,6 +15,8 @@
 //!   extensions of this user's other browsers ([`browsers`]). Programs that run as root say
 //!   whether this user could replace them ([`account`]). An issue names one by its path: the
 //!   property list's, the app bundle's, the extension's, or the file's.
+//! - `mac/dylibs.jsonl`: the programs those items run, and the apps' executables, that would
+//!   load a library this user could plant ([`dylibs`]). An issue names one by its path.
 //!
 //! Vigil reads signatures itself because a sweep's agent runs no commands. Every tool is called
 //! by its absolute path: these checks decide whether a program is trusted, and a `codesign`
@@ -63,7 +65,9 @@ use crate::paths;
 mod account;
 mod background;
 mod browsers;
+mod dylibs;
 mod extensions;
+mod macho;
 mod startup;
 
 /// What the host checks found, ready for the Mac's bundle.
@@ -231,7 +235,38 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
     let files = startup::collect(&root, home.as_deref(), account.as_ref());
     let support = home.map(|home| home.join("Library/Application Support"));
     let browsers = support.map_or_else(Vec::new, |support| browsers::collect(inventory, &support));
-    Host::new(&settings, &items, &files, &browsers)
+    // Without the account, where this user could plant a library is not known, so nothing is
+    // listed; their issues read as resolved for that sweep, as for `needs_account`.
+    let hijackable = match &account {
+        Some(account) if !cancel.is_cancelled() => {
+            let programs = dylib_programs(&items, &inventory.apps);
+            dylibs::scan(inventory, programs, account)
+        }
+        Some(_) | None => Vec::new(),
+    };
+    Host::new(&settings, &items, &files, &browsers, &hijackable)
+}
+
+/// The programs the dylib check reads: what each startup item runs, then the main executable of
+/// each app the inventory found.
+fn dylib_programs(items: &[Item], apps: &[PathBuf]) -> Vec<dylibs::Program> {
+    let item_programs = items.iter().filter_map(|item| {
+        Some(dylibs::Program {
+            path: item.program.as_ref()?.path.clone(),
+            used_by: item.path.clone(),
+            as_root: item.runs_as_root(),
+        })
+    });
+    let app_programs = apps.iter().filter_map(|app| match bundle_executable(app) {
+        Ok(Bundled::Program(path)) => Some(dylibs::Program {
+            path,
+            used_by: app.to_string_lossy().into_owned(),
+            as_root: false,
+        }),
+        // An app whose executable cannot be named runs nothing to read.
+        Ok(Bundled::Codeless(_)) | Err(_) => None,
+    });
+    item_programs.chain(app_programs).collect()
 }
 
 /// Whether the item at `path` is one only the account lets the sweep read
@@ -251,11 +286,7 @@ pub(crate) fn needs_account(path: &str) -> bool {
 /// kernel and `sysextd` load only root-owned copies.
 fn mark_replaceable(items: &mut [Item], account: &Account) {
     for item in items {
-        let daemon = matches!(
-            item.kind,
-            ItemKind::LaunchDaemon | ItemKind::AppLaunchDaemon
-        );
-        if !daemon || item.user_name.as_deref().is_some_and(|user| user != "root") {
+        if !item.runs_as_root() {
             continue;
         }
         // A relative path is one launchd does not resolve the way Vigil could (its signature
@@ -399,6 +430,7 @@ impl Host {
         items: &[Item],
         files: &[StartupFile],
         browsers: &[BrowserExtension],
+        hijackable: &[dylibs::Hijackable],
     ) -> Self {
         let settings_json =
             serde_json::to_string_pretty(settings).expect("a map of strings serializes");
@@ -412,10 +444,17 @@ impl Host {
             lines.push_str(&line);
             lines.push('\n');
         }
+        let mut dylib_lines = String::new();
+        for program in hijackable {
+            let line = serde_json::to_string(program).expect("strings, booleans and lists");
+            dylib_lines.push_str(&line);
+            dylib_lines.push('\n');
+        }
         Self {
             files: vec![
                 ("mac/settings.json".to_owned(), settings_json),
                 ("mac/persistence.jsonl".to_owned(), lines),
+                ("mac/dylibs.jsonl".to_owned(), dylib_lines),
             ],
             settings: settings.keys().map(|key| (*key).to_owned()).collect(),
             items: items
@@ -430,6 +469,11 @@ impl Host {
                     browsers
                         .iter()
                         .map(|extension| (extension.path.clone(), extension.identity())),
+                )
+                .chain(
+                    hijackable
+                        .iter()
+                        .map(|program| (program.path.clone(), program.identity())),
                 )
                 .collect(),
         }
@@ -583,6 +627,15 @@ struct Program {
 }
 
 impl Item {
+    /// Whether launchd runs it as root: a daemon that names no other user.
+    fn runs_as_root(&self) -> bool {
+        let daemon = matches!(
+            self.kind,
+            ItemKind::LaunchDaemon | ItemKind::AppLaunchDaemon
+        );
+        daemon && self.user_name.as_deref().is_none_or(|user| user == "root")
+    }
+
     /// An item whose property list could not be read.
     fn unread(kind: ItemKind, path: String, error: String, stamp: Option<String>) -> Self {
         Self {
@@ -2534,7 +2587,7 @@ TeamIdentifier=not set
             .any(|e| matches!(e, InventoryError::FullDiskAccess { .. }));
         assert_eq!(noted, needs_full_disk_access());
         assert_eq!(host.settings.len(), POSTURE.len());
-        assert_eq!(host.files.len(), 2);
+        assert_eq!(host.files.len(), 3);
         assert!(host.files[0].1.contains("system_integrity_protection"));
     }
 
@@ -2553,12 +2606,20 @@ TeamIdentifier=not set
         let mut inventory = Inventory::default();
         let browsers = browsers::collect(&mut inventory, &support);
         let extension = browsers[0].path.clone();
-        let host = Host::new(&settings, &[item], &[], &browsers);
+        let host = Host::new(&settings, &[item], &[], &browsers, &[]);
 
         assert_eq!(host.settings, ["filevault"]);
         assert_eq!(host.items[path.to_str().unwrap()], identity);
         let names: Vec<&str> = host.files.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["mac/settings.json", "mac/persistence.jsonl"]);
+        assert_eq!(
+            names,
+            [
+                "mac/settings.json",
+                "mac/persistence.jsonl",
+                "mac/dylibs.jsonl"
+            ]
+        );
+        assert_eq!(host.files[2].1, "", "no program to list");
         assert!(host.files[0].1.contains("FileVault is On."));
         assert_eq!(host.files[1].1.lines().count(), 2);
         assert!(host.files[1].1.contains(r#""kind":"browser_extension""#));

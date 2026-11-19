@@ -62,6 +62,11 @@ case "$CLAUDE_FAKE_MODE:$n" in
     echo '{"findings": [], "issues": [{"subject": {"item": "'"$ext"'"},
       "severity": "high", "evidence": "e", "explanation": "x",
       "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
+  dylib:*)
+    program=$(grep -o '"path":"[^"]*/MacOS/Hijack"' mac/dylibs.jsonl | head -n 1 | cut -d'"' -f4)
+    echo '{"findings": [], "issues": [{"subject": {"item": "'"$program"'"},
+      "severity": "medium", "evidence": "e", "explanation": "x",
+      "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
   browser:*)
     ext=$(grep -o '"path":"[^"]*/Extensions/abc"' mac/persistence.jsonl | cut -d'"' -f4)
     echo '{"findings": [], "issues": [{"subject": {"item": "'"$ext"'"},
@@ -918,6 +923,58 @@ fn apps_outside_homebrew_and_the_electron_they_ship_are_components() {
     let problems = report["problems"].to_string();
     assert!(
         problems.contains("no NVD product is known for its bundle identifier com.example.bot"),
+        "{report}"
+    );
+}
+
+#[test]
+fn an_app_that_would_load_a_planted_library_is_an_issue() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let root = fs::canonicalize(sandbox.path()).unwrap();
+    let cc = |args: &[&str]| {
+        let out = Command::new("/usr/bin/cc")
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out.stderr));
+    };
+    // An app whose executable weakly loads a library that is then removed, from a folder this
+    // user can write: a planted one would load.
+    let gone = root.join("gone/libx.dylib");
+    let gone = gone.to_str().unwrap();
+    fs::create_dir_all(root.join("gone")).unwrap();
+    fs::write(root.join("x.c"), "int x(void) { return 1; }\n").unwrap();
+    fs::write(root.join("main.c"), "int main(void) { return 0; }\n").unwrap();
+    cc(&["-dynamiclib", "x.c", "-o", gone, "-install_name", gone]);
+    // The app as the sweep finds it, under the sandbox as named (not with its links resolved).
+    let app = sandbox.path().join("system/Applications/Hijack.app");
+    let macos = app.join("Contents/MacOS");
+    fs::create_dir_all(&macos).unwrap();
+    let program = macos.join("Hijack");
+    let weak = format!("-Wl,-weak_library,{gone}");
+    cc(&["main.c", "-o", program.to_str().unwrap(), &weak]);
+    fs::remove_file(gone).unwrap();
+    fs::write(
+        app.join("Contents/Info.plist"),
+        "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+         <key>CFBundleExecutable</key><string>Hijack</string></dict></plist>",
+    )
+    .unwrap();
+
+    let out = sandbox.sweep("dylib");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let lines = fs::read_to_string(sandbox.sweep_dir().join("bundle/mac/dylibs.jsonl")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+    assert_eq!(line["path"], program.to_str().unwrap(), "{lines}");
+    assert_eq!(line["used_by"], serde_json::json!([app.to_str().unwrap()]));
+    assert_eq!(line["plants"][0]["path"], gone);
+    assert_eq!(line["plants"][0]["why"], "weak_missing");
+
+    let report = sandbox.newest_report("mac");
+    assert_eq!(
+        report["issues"][0]["subject"],
+        serde_json::json!({"item": program.to_str().unwrap()}),
         "{report}"
     );
 }
