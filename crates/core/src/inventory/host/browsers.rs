@@ -300,8 +300,9 @@ fn chromium_extension(
         Some(Value::Number(mask)) => mask.as_u64() != Some(0),
         Some(_) | None => false,
     };
-    // Manifest V2 lists host patterns among its permissions. Manifest V3 ignores them there;
-    // they are moved for every version anyway, so a host is never missed.
+    // Manifest V2 lists host patterns among its permissions. They are moved for every version,
+    // so no host is missed; accepted downside: a newer manifest that lists one there may show
+    // a host the browser does not grant.
     let (mut hosts, permissions): (Vec<String>, Vec<String>) = strings(&manifest["permissions"])
         .into_iter()
         .partition(|permission| permission == "<all_urls>" || permission.contains("://"));
@@ -766,8 +767,8 @@ pub(super) mod tests {
         let secure = locked.join("Secure Preferences");
         fs::set_permissions(&secure, fs::Permissions::from_mode(0o000)).unwrap();
 
-        // A browser whose folder cannot be listed fails as a whole.
-        // A browser's folder that is not a folder cannot be listed: it fails as a whole.
+        // A browser's folder that is not a folder cannot be listed, so it fails as a whole; one
+        // this user may not list is only a note.
         let vivaldi = tmp.path().join("Vivaldi");
         fs::write(&vivaldi, "").unwrap();
         let edge = tmp.path().join("Microsoft Edge");
