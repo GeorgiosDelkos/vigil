@@ -629,6 +629,24 @@ mod tests {
     }
 
     #[test]
+    fn load_commands_and_entitlements_of_tens_of_kilobytes_are_read() {
+        let long = "x".repeat(32 * 1024);
+        let images = read_bytes(&thin(&[with_string(LC_RPATH, &long)])).unwrap();
+        assert_eq!(images[0].rpaths, std::slice::from_ref(&long));
+
+        let xml = format!(
+            "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+             <key>padding</key><string>{long}</string>\
+             <key>{DISABLE_LIBRARY_VALIDATION}</key><true/></dict></plist>"
+        );
+        let disabled = superblob(&[
+            (CSSLOT_CODEDIRECTORY, directory(CS_RUNTIME, 0)),
+            (CSSLOT_ENTITLEMENTS, entitlements(&xml)),
+        ]);
+        assert_eq!(validation_of(&disabled), (false, false));
+    }
+
+    #[test]
     fn a_broken_signature_says_what_is_wrong() {
         let detail = |signature: Vec<u8>| malformed_detail(&signed(Vec::new(), &signature));
         let mut wrong_magic = superblob(&[(CSSLOT_CODEDIRECTORY, directory(0, 0))]);

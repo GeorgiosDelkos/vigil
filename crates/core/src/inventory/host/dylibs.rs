@@ -583,6 +583,10 @@ mod tests {
         let bare = image("@rpath/Foo.framework/Foo", false, &rpaths);
         let own = dir.join("MacOS/Foo.framework/Foo");
         assert_eq!(found(&bare), [own.display().to_string()]);
+        // Only the Swift runtime is in the cache through `/usr/lib/swift`, not any library.
+        let other = image("@rpath/libother.dylib", true, &swift_first);
+        let other_here = dir.join("Frameworks/libother.dylib");
+        assert_eq!(found(&other), [other_here.display().to_string()]);
         // A place off the sealed volume that this user cannot create is left out.
         let locked = [
             "/Library/vigil-test-absent",
@@ -591,6 +595,9 @@ mod tests {
         let gone = image("@rpath/Gone.framework/Gone", true, &locked);
         let gone_here = dir.join("Frameworks/Gone.framework/Gone");
         assert_eq!(found(&gone), [gone_here.display().to_string()]);
+        // A strong load not found stops the program from starting, so nothing is planted.
+        let strong = image("@rpath/Gone.framework/Gone", false, &locked);
+        assert_eq!(found(&strong), Vec::<String>::new());
         // A weak load with no rpath looks nowhere.
         let nowhere = image("@rpath/Foo.framework/Foo", true, &[]);
         assert_eq!(found(&nowhere), Vec::<String>::new());
