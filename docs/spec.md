@@ -666,9 +666,12 @@ the owner asked for it to be designed and built without a further stop):
 
 - **What is read.** What each startup item runs (`program` in `mac/persistence.jsonl`, and the
   `scripts` an interpreter or `env` runs, since `env /path/tool` loads `tool`; a kernel
-  extension is left out, as the kernel loads it, not the loader), and the main executable of each app the inventory listed in `/Applications` and
-  `~/Applications` (its `Info.plist`'s `CFBundleExecutable`), each once, named by its real
-  path, so its issue keeps its key whichever item names it first. A relative program path
+  extension is left out, as the kernel loads it, not the loader), and the main executable of
+  each app the inventory listed in `/Applications` and `~/Applications` (its `Info.plist`'s
+  `CFBundleExecutable`). Each file is read once. It is named by its real path, so its issue
+  keeps its key whichever item names it first, except that an app's executable is named by
+  its path in the app: an app linked into `/Applications` is then still under that folder, and
+  a listing failure there carries its issue. A relative program path
   is not read. Vigil reads each one's Mach-O header, load commands and code signature itself
   (`inventory/host/macho.rs`), the arm64 and x86_64 architectures of a universal file (Rosetta
   runs the second; i386 and ppc never load), within fixed limits; no tool runs, since `otool`

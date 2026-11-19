@@ -966,9 +966,11 @@ fn an_app_that_would_load_a_planted_library_is_an_issue() {
     assert!(out.status.success(), "{}", text(&out.stderr));
     let lines = fs::read_to_string(sandbox.sweep_dir().join("bundle/mac/dylibs.jsonl")).unwrap();
     let line: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
-    // Named by its real path, which the sandbox's `/var` link resolves to `/private/var`.
-    let real = fs::canonicalize(&program).unwrap();
-    assert_eq!(line["path"], real.to_str().unwrap(), "{lines}");
+    // An app's executable is named by its path in the app, not the real one the sandbox's
+    // `/var` link resolves to `/private/var`, so its folder's listing failure carries it.
+    let named = program.to_str().unwrap();
+    assert_ne!(fs::canonicalize(&program).unwrap().to_str().unwrap(), named);
+    assert_eq!(line["path"], named, "{lines}");
     assert_eq!(line["used_by"], serde_json::json!([app.to_str().unwrap()]));
     assert_eq!(line["plants"][0]["path"], gone);
     assert_eq!(line["plants"][0]["why"], "weak_missing");
@@ -976,7 +978,7 @@ fn an_app_that_would_load_a_planted_library_is_an_issue() {
     let report = sandbox.newest_report("mac");
     assert_eq!(
         report["issues"][0]["subject"],
-        serde_json::json!({"item": real.to_str().unwrap()}),
+        serde_json::json!({"item": named}),
         "{report}"
     );
 }

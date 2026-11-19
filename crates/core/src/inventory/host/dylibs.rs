@@ -15,10 +15,12 @@
 //! the loader refuse a library not signed by Apple or the program's own team. Each architecture
 //! of a universal program counts, since Rosetta runs the Intel one.
 //!
-//! Read: the program each startup item runs and the main executable of each app in
-//! `/Applications` and `~/Applications`. Not read: the libraries those load in turn, other
-//! executables inside an app (helpers, plug-ins), and loads relative to the working directory,
-//! which depend on how the program is started.
+//! Read: the program each startup item runs, the files an interpreter or `env` it runs is given
+//! (a Mach-O tool there is what the loader loads), and the main executable of each app in
+//! `/Applications` and `~/Applications`. Not read: kernel extensions, which the kernel loads
+//! rather than the loader; the libraries those programs load in turn; other executables inside
+//! an app (helpers, plug-ins); and loads relative to the working directory, which depend on how
+//! the program is started.
 //!
 //! Libraries in the system's shared cache are not files on disk, and Vigil cannot ask the
 //! loader what the cache holds (`unsafe` is forbidden in this workspace). An absolute install
@@ -52,13 +54,18 @@ pub(super) struct Program {
     pub(super) used_by: String,
     /// Whether that item runs it as root.
     pub(super) as_root: bool,
+    /// Whether it is an app's main executable (`<app>/Contents/MacOS/<name>`), named by that
+    /// path rather than its real one: an app in `/Applications` may be a link to one elsewhere,
+    /// and only the path in the folder lets a listing failure there carry its issue
+    /// ([`InventorySource::ApplicationFolder`]).
+    pub(super) in_app: bool,
 }
 
 /// A program a planted library could take over, one line of `mac/dylibs.jsonl`.
 #[derive(Debug, Serialize)]
 pub(super) struct Hijackable {
-    /// The program's real path, its links followed. An issue names it by this path. Text, as
-    /// an item's path is.
+    /// The program's name ([`Read::name`]), which its issue names it by. Text, as an item's
+    /// path is.
     pub(super) path: String,
     /// What runs it: startup items and apps, by path.
     used_by: Vec<String>,
@@ -100,17 +107,16 @@ enum Why {
 }
 
 /// The programs in `programs` a planted library could take over. A program several items or
-/// apps run is read once, and named by its real path, so the issue keeps its key whichever
-/// item names it first. A program that is not there or is not Mach-O (a script) is left out:
-/// the item already says so. One that cannot be read fails its
-/// [`InventorySource::LoadCommands`].
+/// apps run is read once, by its real path, and named as [`Read::name`] says. A program that
+/// is not there or is not Mach-O (a script) is left out: the item already says so. One that
+/// cannot be read fails its [`InventorySource::LoadCommands`].
 pub(super) fn scan(
     inventory: &mut Inventory,
     programs: Vec<Program>,
     account: &Account,
 ) -> Vec<Hijackable> {
     let mut found = Vec::new();
-    for (real, (used_by, runs_as_root)) in by_real_path(programs) {
+    for (real, read) in by_real_path(programs) {
         let images = match macho::read(&real) {
             Ok(images) => images,
             Err(macho::ReadError::NotMachO) => continue,
@@ -126,7 +132,9 @@ pub(super) fn scan(
                 continue;
             }
             Err(macho::ReadError::Io(e)) => {
-                let source = InventorySource::LoadCommands { path: text(&real) };
+                let source = InventorySource::LoadCommands {
+                    path: text(&read.name),
+                };
                 inventory.fail(source, InventoryError::io(&real, e));
                 continue;
             }
@@ -146,9 +154,9 @@ pub(super) fn scan(
             .collect();
         if !plants.is_empty() {
             found.push(Hijackable {
-                path: text(&real),
-                used_by,
-                runs_as_root,
+                path: text(&read.name),
+                used_by: read.used_by,
+                runs_as_root: read.runs_as_root,
                 plants,
             });
         }
@@ -159,23 +167,46 @@ pub(super) fn scan(
 /// Records the programs in `programs` as not read, when where this user could plant a library
 /// is not known: their issues carry over instead of reading as resolved.
 pub(super) fn not_scanned(inventory: &mut Inventory, programs: Vec<Program>) {
-    for real in by_real_path(programs).into_keys() {
-        let path = text(&real);
+    for read in by_real_path(programs).into_values() {
+        let path = text(&read.name);
         inventory
             .failed
             .insert(InventorySource::LoadCommands { path });
     }
 }
 
-/// `programs` by their real paths, each with what runs it and whether any of those runs it as
-/// root.
-fn by_real_path(programs: Vec<Program>) -> BTreeMap<PathBuf, (Vec<String>, bool)> {
-    let mut by_file: BTreeMap<PathBuf, (Vec<String>, bool)> = BTreeMap::new();
+/// A program file to read, from every [`Program`] that names it.
+#[derive(Debug)]
+struct Read {
+    /// What its issue names it by. The real path, so the key does not depend on which item
+    /// names it first; for an app's executable, the first path in an app that names it
+    /// ([`Program::in_app`]), which the inventory keeps from sweep to sweep.
+    name: PathBuf,
+    /// What runs it.
+    used_by: Vec<String>,
+    /// Whether any of those runs it as root.
+    runs_as_root: bool,
+    /// Whether `name` is a path in an app.
+    named_in_app: bool,
+}
+
+/// `programs` by their real paths.
+fn by_real_path(programs: Vec<Program>) -> BTreeMap<PathBuf, Read> {
+    let mut by_file: BTreeMap<PathBuf, Read> = BTreeMap::new();
     for program in programs {
-        let real = fs::canonicalize(&program.path).unwrap_or(program.path);
-        let (used_by, as_root) = by_file.entry(real).or_default();
-        used_by.push(program.used_by);
-        *as_root |= program.as_root;
+        let real = fs::canonicalize(&program.path).unwrap_or_else(|_| program.path.clone());
+        let read = by_file.entry(real.clone()).or_insert_with(|| Read {
+            name: real,
+            used_by: Vec::new(),
+            runs_as_root: false,
+            named_in_app: false,
+        });
+        if program.in_app && !read.named_in_app {
+            read.name = program.path;
+            read.named_in_app = true;
+        }
+        read.used_by.push(program.used_by);
+        read.runs_as_root |= program.as_root;
     }
     by_file
 }
@@ -184,7 +215,7 @@ fn by_real_path(programs: Vec<Program>) -> BTreeMap<PathBuf, (Vec<String>, bool)
 /// planted one is refused. The platform claim counts only where only Apple writes (see
 /// `Image::platform`).
 fn validated(image: &Image, real: &Path) -> bool {
-    image.library_validation || image.platform && on_sealed_volume(real)
+    image.library_validation || (image.platform && on_sealed_volume(real))
 }
 
 /// The places a library planted would load from, for the image of a program in `folder`, that
@@ -303,6 +334,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Cancel;
+    use crate::findings::Subject;
     use crate::inventory::host::macho::Load;
 
     fn run(program: &str, args: &[&str], dir: &Path) {
@@ -368,6 +400,7 @@ mod tests {
             path: path.to_owned(),
             used_by: used_by.to_owned(),
             as_root,
+            in_app: false,
         }
     }
 
@@ -543,6 +576,38 @@ mod tests {
         let path = dir.join("tool").display().to_string();
         let expected = BTreeSet::from([InventorySource::LoadCommands { path }]);
         assert_eq!(inventory.failed, expected);
+    }
+
+    #[test]
+    fn an_app_linked_into_its_folder_is_named_in_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = fs::canonicalize(tmp.path()).unwrap();
+        let macos = dir.join("Ext/Foo.app/Contents/MacOS");
+        fs::create_dir_all(&macos).unwrap();
+        fs::write(macos.join("Foo"), "").unwrap();
+        let folder = dir.join("Applications");
+        fs::create_dir(&folder).unwrap();
+        std::os::unix::fs::symlink(dir.join("Ext/Foo.app"), folder.join("Foo.app")).unwrap();
+        let in_folder = folder.join("Foo.app/Contents/MacOS/Foo");
+        // A login item names the real file first; the app's path still names it.
+        let programs = vec![
+            program(&macos.join("Foo"), "/L/item.plist", false),
+            Program {
+                in_app: true,
+                ..program(&in_folder, "/Applications/Foo.app", false)
+            },
+        ];
+        let mut inventory = Inventory::default();
+
+        not_scanned(&mut inventory, programs);
+
+        let path = in_folder.display().to_string();
+        let subject = Subject::Item(path.clone());
+        let expected = BTreeSet::from([InventorySource::LoadCommands { path }]);
+        assert_eq!(inventory.failed, expected);
+        // So a listing failure of the folder carries its issue.
+        let listing = InventorySource::ApplicationFolder { path: folder };
+        assert!(listing.covers_issue(&subject));
     }
 
     #[test]

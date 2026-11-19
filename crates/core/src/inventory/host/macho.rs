@@ -237,7 +237,7 @@ fn image(file: &std::fs::File, base: u64, size: u64) -> Result<Option<Image>, Re
     Ok(Some(Image {
         loads,
         rpaths,
-        library_validation: validation.flagged,
+        library_validation: validation.library_validation,
         platform: validation.platform,
     }))
 }
@@ -245,7 +245,7 @@ fn image(file: &std::fs::File, base: u64, size: u64) -> Result<Option<Image>, Re
 /// What a signature says of library validation: see [`Image`].
 #[derive(Debug, Default)]
 struct Validation {
-    flagged: bool,
+    library_validation: bool,
     platform: bool,
 }
 
@@ -293,12 +293,15 @@ fn read_validation(file: &std::fs::File, at: u64, len: u64) -> Result<Validation
     }
     let flags = be32(&directory, 12);
     let platform = directory[38] != 0;
-    let found = |flagged| Validation { flagged, platform };
+    let validation = |library_validation| Validation {
+        library_validation,
+        platform,
+    };
     if flags & CS_REQUIRE_LV != 0 {
-        return Ok(found(true));
+        return Ok(validation(true));
     }
     if flags & CS_RUNTIME == 0 {
-        return Ok(found(false));
+        return Ok(validation(false));
     }
 
     // The entitlements come as XML and, from recent `codesign`, also as DER. Either one
@@ -331,18 +334,18 @@ fn read_validation(file: &std::fs::File, at: u64, len: u64) -> Result<Validation
         }
         None => false,
     };
-    let der_disables = der.is_some_and(|der| der_sets_true(&der, DISABLE_LIBRARY_VALIDATION));
-    Ok(found(!(xml_disables || der_disables)))
+    let der_disables = der.is_some_and(|der| disables_validation(&der));
+    Ok(validation(!(xml_disables || der_disables)))
 }
 
-/// Whether DER entitlements set `key` to true: its `UTF8String` (tag 0x0c, a one-byte length,
-/// as every entitlement name is under 128 bytes) followed at once by `BOOLEAN TRUE` (01 01 ff),
-/// the pair each entitlement's `SEQUENCE` holds. A search for that byte run is enough: the
-/// key's own bytes cannot hold it.
-fn der_sets_true(der: &[u8], key: &str) -> bool {
-    let Ok(len) = u8::try_from(key.len()) else {
-        return false;
-    };
+/// Whether DER entitlements set [`DISABLE_LIBRARY_VALIDATION`] to true: its `UTF8String` (tag
+/// 0x0c, a one-byte length, as the name is under 128 bytes) followed at once by `BOOLEAN TRUE`
+/// (01 01 ff), the pair each entitlement's `SEQUENCE` holds. A search for that byte run is
+/// enough: the name's own bytes cannot hold it.
+fn disables_validation(der: &[u8]) -> bool {
+    const _: () = assert!(DISABLE_LIBRARY_VALIDATION.len() < 0x80, "DER short form");
+    let key = DISABLE_LIBRARY_VALIDATION;
+    let len = u8::try_from(key.len()).expect("the name is under 128 bytes, asserted above");
     let pattern: Vec<u8> = [0x0c, len]
         .into_iter()
         .chain(key.bytes())

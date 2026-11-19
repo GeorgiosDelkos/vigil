@@ -274,6 +274,7 @@ fn dylib_programs(items: &[Item], apps: &[PathBuf]) -> Vec<dylibs::Program> {
                     path: program.path.clone(),
                     used_by: item.path.clone(),
                     as_root,
+                    in_app: false,
                 })
         });
     let app_programs = apps.iter().filter_map(|app| match bundle_executable(app) {
@@ -281,6 +282,7 @@ fn dylib_programs(items: &[Item], apps: &[PathBuf]) -> Vec<dylibs::Program> {
             path,
             used_by: app.to_string_lossy().into_owned(),
             as_root: false,
+            in_app: true,
         }),
         // An app whose executable cannot be named runs nothing to read.
         Ok(Bundled::Codeless(_)) | Err(_) => None,
