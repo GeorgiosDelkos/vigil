@@ -590,8 +590,8 @@ mod tests {
 
         let xml = |value: &str| {
             format!(
-                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>{DISABLE_LIBRARY_VALIDATION}\
-                 </key>{value}</dict></plist>"
+                "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+                 <key>{DISABLE_LIBRARY_VALIDATION}</key>{value}</dict></plist>"
             )
         };
         let disabled = superblob(&[
