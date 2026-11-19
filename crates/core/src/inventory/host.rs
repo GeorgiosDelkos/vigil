@@ -37,7 +37,6 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt as _;
@@ -477,11 +476,11 @@ struct Item {
     /// What macOS records of a system extension.
     #[serde(skip_serializing_if = "Option::is_none")]
     system_extension: Option<extensions::Record>,
-    /// A codeless kext's `Info.plist`, in hex, which keys it: the only part of it read, so a
-    /// kext replaced at the same path shows again. Not in the bundle: the agent judges the
-    /// path, and the file can be large.
+    /// A codeless kext's `Info.plist` as read (at most [`PLIST_LIMIT`] bytes), which keys it:
+    /// the only part of it read, so a kext replaced at the same path shows again. Not in the
+    /// bundle: the agent judges the path. `Debug` prints it whole.
     #[serde(skip)]
-    codeless_info: Option<String>,
+    codeless_info: Option<Vec<u8>>,
 }
 
 /// A file an item runs, with its signature.
@@ -736,13 +735,7 @@ fn bundle_item(
     };
     let (program, codeless_info) = match bundle_executable(bundle) {
         Ok(Bundled::Program(program)) => (Some(checked(program, cancel, failures)), None),
-        Ok(Bundled::Codeless(info)) if kind == ItemKind::KernelExtension => {
-            let hex = info.iter().fold(String::new(), |mut hex, byte| {
-                write!(hex, "{byte:02x}").expect("writing to a String does not fail");
-                hex
-            });
-            (None, Some(hex))
-        }
+        Ok(Bundled::Codeless(info)) if kind == ItemKind::KernelExtension => (None, Some(info)),
         Ok(Bundled::Codeless(_)) => {
             return unread("its Info.plist names no CFBundleExecutable".to_owned());
         }
