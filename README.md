@@ -413,7 +413,8 @@ and the app take it from there.
 
 1. Bump `version` in `Cargo.toml`, run `cargo check` so `Cargo.lock` follows, and merge that
    change to `main`.
-2. Tag the merge commit and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+2. Tag the merge commit with `v` plus that version and push the tag, as for 0.3.0:
+   `git tag -a v0.3.0 -m "Vigil 0.3.0" && git push origin v0.3.0`.
 3. Approve the `release` environment's deployment in the Actions run.
 
 `release.yml` then checks that the tag is `v` plus that version, builds a universal app, signs
