@@ -25,8 +25,7 @@
 //!
 //! Each program is one line, by path, with its signature, its taps and its grants. A tap or a
 //! path grant on an app's main executable is the app's, so an app's taps and grants are one
-//! line. An issue
-//! names it as `{"keyboard": path}` and is keyed by [`Access::identity`].
+//! line. An issue names it as `{"keyboard": path}` and is keyed by [`Access::identity`].
 //!
 //! Not read: taps that see no key presses (mouse only); grants denied or not yet answered;
 //! grants in other users' databases; the grants a configuration profile allows
@@ -369,12 +368,12 @@ fn add_grants(
         let Some(path) = path else { continue };
         let rows = match grants(&path, cancel) {
             Ok(rows) => rows,
-            Err(e) => {
-                let cancelled = matches!(e, InventoryError::Cancelled { .. });
+            Err(e @ InventoryError::Cancelled { .. }) => {
                 inventory.fail(InventorySource::KeyboardAccess, e);
-                if cancelled {
-                    return;
-                }
+                return;
+            }
+            Err(e) => {
+                inventory.fail(InventorySource::KeyboardAccess, e);
                 continue;
             }
         };
