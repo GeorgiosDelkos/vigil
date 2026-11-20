@@ -899,6 +899,13 @@ pub enum InventoryError {
         /// The largest lockfile read, in bytes.
         limit: u64,
     },
+    /// The event taps could not be listed: this process has no connection to the window
+    /// server, as in an ssh session or a launchd daemon.
+    #[error(
+        "the keyboard event taps are not listed: this process has no window server connection; \
+         sweep from a logged-in user's session to list them"
+    )]
+    NoWindowServer,
     /// macOS refused to read a file or list a folder only a process with Full Disk Access may
     /// read.
     #[error(
@@ -955,7 +962,11 @@ impl InventoryError {
             // Full Disk Access is the user's choice, which lasts: a Mac whose owner declines it
             // could otherwise never be clear. Accepted downside, as for `Io` above: when access
             // is taken away, the issues of what is in the folder read as resolved.
-            | Self::FullDiskAccess { .. } => false,
+            | Self::FullDiskAccess { .. }
+            // Where a sweep runs lasts too: one from an ssh session would fail on every run and
+            // keep the keyboard issues open forever. Accepted downside, as for Full Disk Access:
+            // the tap issues read as resolved on such a sweep.
+            | Self::NoWindowServer => false,
         }
     }
 

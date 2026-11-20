@@ -1004,15 +1004,16 @@ fn a_program_that_taps_the_keyboard_is_an_issue_with_its_grant() {
         .output()
         .unwrap();
     assert!(out.status.success(), "{}", text(&out.stderr));
-    // A listen-only session tap on every program's key down, held by process 77, as the
-    // tap list's script prints it: `CGEventTapInformation` records in hex, and each process's
-    // file.
+    // A listen-only session tap on every program's key down, as the tap list's script prints
+    // it: `CGEventTapInformation` records in hex, and each process's file in hex. Held by
+    // process 99999, one macOS never gives out (its highest is 99998), so `ps` finds no
+    // command line of a real process for it.
     let mut record = Vec::new();
     for field in [1_u32, 1, 1, 0] {
         record.extend(field.to_le_bytes());
     }
     record.extend((1_u64 << 10).to_le_bytes());
-    record.extend(77_i32.to_le_bytes());
+    record.extend(99_999_i32.to_le_bytes());
     record.extend(0_i32.to_le_bytes());
     record.push(1);
     record.resize(48, 0);
@@ -1020,7 +1021,15 @@ fn a_program_that_taps_the_keyboard_is_an_issue_with_its_grant() {
         write!(hex, "{b:02x}").expect("a String takes any text");
         hex
     });
-    let listed = serde_json::json!({"records": hex, "paths": {"77": tapper}});
+    let path = tapper
+        .to_str()
+        .unwrap()
+        .bytes()
+        .fold(String::new(), |mut hex, b| {
+            write!(hex, "{b:02x}").expect("a String takes any text");
+            hex
+        });
+    let listed = serde_json::json!({"records": hex, "paths": {"99999": path}});
     fs::write(sandbox.path().join("event-taps.json"), listed.to_string()).unwrap();
     // And Input Monitoring allowed for it in the system's TCC database.
     let tcc = sandbox

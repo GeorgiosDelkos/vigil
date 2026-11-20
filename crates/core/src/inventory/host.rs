@@ -473,34 +473,15 @@ impl Host {
     ) -> Self {
         let settings_json =
             serde_json::to_string_pretty(settings).expect("a map of strings serializes");
-        let mut lines = String::new();
-        let items_shown = items.iter().map(serde_json::to_string);
-        let files_shown = files.iter().map(serde_json::to_string);
-        let browsers_shown = browsers.iter().map(serde_json::to_string);
-        for line in items_shown.chain(files_shown).chain(browsers_shown) {
-            let line =
-                line.expect("an item holds only strings, booleans, and lists and maps of them");
-            lines.push_str(&line);
-            lines.push('\n');
-        }
-        let mut dylib_lines = String::new();
-        for program in hijackable {
-            let line = serde_json::to_string(program).expect("strings, booleans and lists");
-            dylib_lines.push_str(&line);
-            dylib_lines.push('\n');
-        }
-        let mut keyboard_lines = String::new();
-        for program in keyboard {
-            let line = serde_json::to_string(program).expect("strings, booleans and lists");
-            keyboard_lines.push_str(&line);
-            keyboard_lines.push('\n');
-        }
+        let mut lines = jsonl(items);
+        lines.push_str(&jsonl(files));
+        lines.push_str(&jsonl(browsers));
         Self {
             files: vec![
                 ("mac/settings.json".to_owned(), settings_json),
                 ("mac/persistence.jsonl".to_owned(), lines),
-                ("mac/dylibs.jsonl".to_owned(), dylib_lines),
-                ("mac/keyboard.jsonl".to_owned(), keyboard_lines),
+                ("mac/dylibs.jsonl".to_owned(), jsonl(hijackable)),
+                ("mac/keyboard.jsonl".to_owned(), jsonl(keyboard)),
             ],
             settings: settings.keys().map(|key| (*key).to_owned()).collect(),
             items: items
@@ -528,6 +509,17 @@ impl Host {
                 .collect(),
         }
     }
+}
+
+/// `rows` as JSON lines, each ending in a newline.
+fn jsonl<T: Serialize>(rows: &[T]) -> String {
+    rows.iter().fold(String::new(), |mut lines, row| {
+        let line = serde_json::to_string(row)
+            .expect("a line holds only strings, numbers, booleans, and lists and maps of them");
+        lines.push_str(&line);
+        lines.push('\n');
+        lines
+    })
 }
 
 /// The state each [`POSTURE`] tool prints, by key. A tool that cannot run is left out and

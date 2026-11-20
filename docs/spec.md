@@ -735,41 +735,62 @@ taps):
 - **How.** `CGGetEventTapList` is a C function and `unsafe` is forbidden, so one
   `/usr/bin/osascript -l JavaScript` run calls it through the Objective-C bridge
   (`ObjC.bindFunction`) and prints the `CGEventTapInformation` records as hex, which Vigil
-  decodes (`inventory/host/keyboard.rs`). The same script names each process by
-  `proc_pidpath`, the file the kernel started: `ps` prints `argv[0]`, which a process sets
-  itself (checked: `exec -a /System/Library/fake /bin/sleep` shows as that). The grants come
-  from `/usr/bin/sqlite3 -readonly -json`. A grant TCC records by bundle identifier is placed
-  at the app the inventory found with that identifier, or named `(unplaced) <identifier>`. Each
-  program is one line with its signature (an app's executable is checked), its taps
-  (`location`, `listen_only`, `target`, `enabled`) and its grants (`service`, `database`, and
-  the code `requirement` TCC holds the grant to, as `/usr/bin/csreq -r- -t` prints it). The
-  requirement says whose an unplaced grant is: Screen Sharing's agent, outside
-  `/Applications`, holds Post Event as `identifier "com.apple.screensharing.agent" and anchor
-  apple`, which the prompt leaves out as Apple's own.
+  decodes (`inventory/host/keyboard.rs`; the 48-byte layout checked with `_Static_assert`
+  against the SDK for arm64 and x86_64). The list is asked for with room to spare, and again
+  while it fills it, so a tap opened meanwhile is not cut off. The same script names each
+  process by `proc_pidpath`, the file the kernel started: `ps` prints `argv[0]`, which a
+  process sets itself (checked: `exec -a /System/Library/fake /bin/sleep` shows as that).
+  `proc_pidpath` fails once the file is deleted, so a running process without one is named by
+  `proc_name` as `(no file) <name>` (checked on a running program after `rm`), and paths are
+  passed as bytes, so a name that is not UTF-8 still shows. `ps` then gives each tapping
+  process's command line, as the process tells it, which shows the script an interpreter
+  runs. A tap on an app's main executable is filed under the app, so its tap and its grant are
+  one line.
+- **Grants.** From `/usr/bin/sqlite3 -init /dev/null -readonly -json` (`-init` keeps a
+  `~/.sqliterc` from running in a process that may have Full Disk Access), `auth_value` 2
+  only (0 is denied: five of the eight keyboard rows on the Mac this was built on). Each
+  grant's code requirement is read with `/usr/bin/csreq -r- -t`; `apple_only` marks one
+  with an `anchor apple` clause (not `anchor apple generic`, which every Developer ID meets).
+  A grant TCC records by bundle identifier is placed at the first app the inventory found with
+  that identifier whose signature satisfies the requirement (`codesign --verify -R`), since
+  TCC gives the grant only to such a program: a look-alike with another app's identifier does
+  not lend that app's signature to its own grant, and with no such app the grant is
+  `(unplaced) <identifier>`. Screen Sharing's agent, outside `/Applications`, holds Post Event
+  as `identifier "com.apple.screensharing.agent" and anchor apple`, which the prompt leaves
+  out as Apple's own.
 - **Issues.** `{"keyboard": "<path>"}`, a subject of its own: a tapping program can also be a
   dylib subject, and an app with a grant can also open at login, which would put two lines on
-  one key of the item map. Keyed by the path, the signature's identity, what each tap can do
-  (its location, whether it only listens, its target) and the grants, so a tap turned off and
-  on keeps a dismissal. The prompt rates a program not signed by Apple or a known developer
-  that taps every program's keys or holds Accessibility or Input Monitoring high, an
-  unplaced grant not held to Apple's anchor medium, and a Developer ID app known for keyboard
-  features low.
-- **Failures.** The tap list, a database that does not read, and a signature check that cannot
-  run fail `keyboard_access`, which carries every keyboard issue. Accepted downside: a failed
-  tap list carries the issues of grants too for that sweep, as a subject does not say which
-  gave it. Without Full Disk Access the system database is a note
-  (`InventoryError::FullDiskAccess`), as Background Task Management's records are. A database
-  that is not there has no grants (this user's often is not).
+  one key of the item map. Keyed by the path, the signature's identity and the grants. The
+  taps are left out: they exist only while the program runs, so a program with a grant would
+  get a new key whenever a sweep found it not running. Accepted downside: a dismissed program
+  that starts an active filter where it held a listen-only tap keeps the dismissal. The prompt
+  rates a program that deleted its file high; one not signed by Apple or a known developer
+  with a tap or an Accessibility or Input Monitoring grant high (Post Event alone medium); an
+  Apple interpreter's tap by the script it runs, an interpreter's grant medium and a
+  terminal's low; other Apple programs and grants held to `anchor apple` not at all; another
+  unplaced grant medium; and a Developer ID or App Store app low when known for keyboard
+  features, medium otherwise. A tap on one program counts as one on all.
+- **Failures.** The tap list, a database that does not read, a signature or requirement check
+  that cannot run, and a `csreq` that fails fail `keyboard_access`, which carries every
+  keyboard issue; a requirement that did not decode keeps its hex, so the issue's key does not
+  change with the failure. Accepted downside: a failed tap list carries the issues of grants
+  too for that sweep, as a subject does not say which gave it. Two lasting states are notes:
+  no Full Disk Access (the system database), as for Background Task Management's records,
+  and no window server connection (`CGGetEventTapList` returns `0x10000003` in an ssh session
+  or a daemon), which would otherwise fail every sweep there and keep the keyboard issues open
+  forever. A database that is not there has no grants (this user's often is not).
 - **Testing.** A debug build reads the tap list from the file `VIGIL_TEST_EVENT_TAPS` names
   (none: no taps), so the CLI's end-to-end sweeps neither list the taps of the machine they run
   on nor check their programs; the TCC databases are under `VIGIL_TEST_LAUNCH_ROOT` and the
-  sandbox's home. `this_macs_taps_are_listed` runs the real script.
-- **Not read:** taps that see no key presses, grants denied or not yet answered, and other
-  users' databases. Whether a placed app still satisfies its grant's requirement is not
-  checked: the line shows both, and macOS denies a program that does not.
-  A tap is a moment's state: one opened after the sweep is seen at the next. A process that
-  exits while the list is read is left out. On the Mac this was built on, four taps saw key
-  presses (Siri, its notification service, `universalaccessd`, `ViewBridgeAuxiliary`, all
+  sandbox's home. `this_macs_taps_are_listed_with_who_holds_them` runs the real script.
+- **Not read:** taps that see no key presses, grants denied or not yet answered, other users'
+  databases, and the grants a configuration profile allows
+  (`/Library/Application Support/com.apple.TCC/MDMOverrides.plist`). Whether the running
+  image still matches the file (`csops`) is not checked: a program replaced on disk while it
+  runs shows the new file's signature. A tap is a moment's state: one opened after the sweep
+  is seen at the next. A process id reused between the list and `proc_pidpath` names the
+  wrong program; the window is one script's run. On the Mac this was built on, four taps saw
+  key presses (Siri, its notification service, `universalaccessd`, `ViewBridgeAuxiliary`, all
   Apple's), and three grants were allowed: Accessibility for two apps and Post Event for
   Screen Sharing's agent.
 

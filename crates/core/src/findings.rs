@@ -1254,4 +1254,35 @@ mod tests {
         }
         assert_eq!(item["additionalProperties"], false);
     }
+
+    #[test]
+    fn the_schema_names_every_kind_of_subject() {
+        let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+        let subject = &schema["properties"]["issues"]["items"]["properties"]["subject"];
+        let in_schema: BTreeSet<&str> = subject["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kind| kind["required"][0].as_str().unwrap())
+            .collect();
+        // Exhaustive, so a new kind of subject cannot be left out of this list.
+        let kind = |subject: &Subject| match subject {
+            Subject::Setting(_) => "setting",
+            Subject::File(_) => "file",
+            Subject::Item(_) => "item",
+            Subject::Keyboard(_) => "keyboard",
+        };
+        let all = [
+            Subject::Setting(String::new()),
+            Subject::File(String::new()),
+            Subject::Item(String::new()),
+            Subject::Keyboard(String::new()),
+        ];
+        for subject in &all {
+            let serialized = serde_json::to_value(subject).unwrap();
+            assert!(serialized.get(kind(subject)).is_some(), "{serialized}");
+        }
+        let kinds: BTreeSet<&str> = all.iter().map(kind).collect();
+        assert_eq!(in_schema, kinds);
+    }
 }

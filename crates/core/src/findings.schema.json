@@ -56,7 +56,7 @@
         "required": ["subject", "severity", "evidence", "explanation", "fix"],
         "properties": {
           "subject": {
-            "description": "A key of github/settings.json or mac/settings.json, a path in the bundle such as github/workflows/ci.yml, or the path of a startup item (a launch item, login item, app, kernel, system, Safari or browser extension, shell startup file, crontab or periodic script) in mac/persistence.jsonl.",
+            "description": "A key of github/settings.json or mac/settings.json, a path in the bundle such as github/workflows/ci.yml, the path of a startup item (a launch item, login item, app, kernel, system, Safari or browser extension, shell startup file, crontab or periodic script) in mac/persistence.jsonl or of a program in mac/dylibs.jsonl, or the path of a program that can read the keyboard in mac/keyboard.jsonl.",
             "oneOf": [
               {
                 "type": "object",
@@ -75,6 +75,12 @@
                 "additionalProperties": false,
                 "required": ["item"],
                 "properties": { "item": { "type": "string" } }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["keyboard"],
+                "properties": { "keyboard": { "type": "string" } }
               }
             ]
           },
