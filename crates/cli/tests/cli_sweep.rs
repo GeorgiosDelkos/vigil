@@ -5,6 +5,7 @@
 //! chosen by `CLAUDE_FAKE_MODE`; it counts its runs in `CLAUDE_FAKE_COUNTER`. Both carry Claude
 //! Code's prefix, since a sweep passes on only the variables in its allowlist.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
@@ -66,6 +67,11 @@ case "$CLAUDE_FAKE_MODE:$n" in
     program=$(grep -o '"path":"[^"]*/MacOS/Hijack"' mac/dylibs.jsonl | head -n 1 | cut -d'"' -f4)
     echo '{"findings": [], "issues": [{"subject": {"item": "'"$program"'"},
       "severity": "medium", "evidence": "e", "explanation": "x",
+      "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
+  keyboard:*)
+    program=$(grep -o '"path":"[^"]*/tapper"' mac/keyboard.jsonl | head -n 1 | cut -d'"' -f4)
+    echo '{"findings": [], "issues": [{"subject": {"keyboard": "'"$program"'"},
+      "severity": "high", "evidence": "e", "explanation": "x",
       "fix": {"summary": "s", "steps": [], "commands": []}}]}' > findings.json ;;
   browser:*)
     ext=$(grep -o '"path":"[^"]*/Extensions/abc"' mac/persistence.jsonl | cut -d'"' -f4)
@@ -254,6 +260,9 @@ impl Sandbox {
             // `system_root`), and its apps would be components. A folder of its own: under the
             // home, its Library/LaunchAgents would be the user's too, and each agent read twice.
             .env("VIGIL_TEST_LAUNCH_ROOT", self.path().join("system"))
+            // The machine's event taps are not this test's either, and checking their programs'
+            // signatures would slow every sweep the same way. No file lists none.
+            .env("VIGIL_TEST_EVENT_TAPS", self.path().join("event-taps.json"))
             .env("PATH", self.bin())
             .env("SHELL", self.path().join("login-shell"))
             .env("CLAUDE_FAKE_MODE", mode)
@@ -979,6 +988,77 @@ fn an_app_that_would_load_a_planted_library_is_an_issue() {
     assert_eq!(
         report["issues"][0]["subject"],
         serde_json::json!({"item": named}),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_program_that_taps_the_keyboard_is_an_issue_with_its_grant() {
+    let sandbox = Sandbox::new("agent = \"claude\"\n");
+    let root = fs::canonicalize(sandbox.path()).unwrap();
+    fs::write(root.join("main.c"), "int main(void) { return 0; }\n").unwrap();
+    let tapper = root.join("tapper");
+    let out = Command::new("/usr/bin/cc")
+        .args(["main.c", "-o", "tapper"])
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    // A listen-only session tap on every program's key down, held by process 77, as the
+    // tap list's script prints it: `CGEventTapInformation` records in hex, and each process's
+    // file.
+    let mut record = Vec::new();
+    for field in [1_u32, 1, 1, 0] {
+        record.extend(field.to_le_bytes());
+    }
+    record.extend((1_u64 << 10).to_le_bytes());
+    record.extend(77_i32.to_le_bytes());
+    record.extend(0_i32.to_le_bytes());
+    record.push(1);
+    record.resize(48, 0);
+    let hex = record.iter().fold(String::new(), |mut hex, b| {
+        write!(hex, "{b:02x}").expect("a String takes any text");
+        hex
+    });
+    let listed = serde_json::json!({"records": hex, "paths": {"77": tapper}});
+    fs::write(sandbox.path().join("event-taps.json"), listed.to_string()).unwrap();
+    // And Input Monitoring allowed for it in the system's TCC database.
+    let tcc = sandbox
+        .path()
+        .join("system/Library/Application Support/com.apple.TCC");
+    fs::create_dir_all(&tcc).unwrap();
+    let sql = format!(
+        "create table access (service text, client text, client_type integer, \
+         auth_value integer, csreq blob); \
+         insert into access values ('kTCCServiceListenEvent', '{}', 1, 2, null);",
+        tapper.display()
+    );
+    let out = Command::new("/usr/bin/sqlite3")
+        .arg(tcc.join("TCC.db"))
+        .arg(sql)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", text(&out.stderr));
+
+    let out = sandbox.sweep("keyboard");
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let lines = fs::read_to_string(sandbox.sweep_dir().join("bundle/mac/keyboard.jsonl")).unwrap();
+    let line: serde_json::Value = serde_json::from_str(lines.trim()).unwrap();
+    assert_eq!(line["path"], tapper.to_str().unwrap(), "{lines}");
+    assert_eq!(line["signature"]["status"], "ad_hoc", "{lines}");
+    assert_eq!(
+        line["taps"],
+        serde_json::json!([{"location": "session", "listen_only": true, "enabled": true}])
+    );
+    assert_eq!(
+        line["grants"],
+        serde_json::json!([{"service": "input_monitoring", "database": "system"}])
+    );
+
+    let report = sandbox.newest_report("mac");
+    assert_eq!(
+        report["issues"][0]["subject"],
+        serde_json::json!({"keyboard": tapper.to_str().unwrap()}),
         "{report}"
     );
 }

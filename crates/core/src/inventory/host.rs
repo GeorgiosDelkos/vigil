@@ -1,7 +1,7 @@
 //! This Mac's protections and the programs it starts on its own, for the agent to judge beside
 //! the inventory.
 //!
-//! Three bundle files, under `mac/`:
+//! Four bundle files, under `mac/`:
 //!
 //! - `mac/settings.json`: System Integrity Protection, Gatekeeper, `FileVault` and the
 //!   application firewall, each as the line its tool prints. An issue names one by its key.
@@ -17,6 +17,8 @@
 //!   property list's, the app bundle's, the extension's, or the file's.
 //! - `mac/dylibs.jsonl`: the programs those items run, and the apps' executables, that would
 //!   load a library this user could plant ([`dylibs`]). An issue names one by its path.
+//! - `mac/keyboard.jsonl`: the programs that hold a keyboard event tap now, or that TCC lets
+//!   read or send key presses ([`keyboard`]). An issue names one as `{"keyboard": path}`.
 //!
 //! Vigil reads signatures itself because a sweep's agent runs no commands. Every tool is called
 //! by its absolute path: these checks decide whether a program is trusted, and a `codesign`
@@ -67,6 +69,7 @@ mod background;
 mod browsers;
 mod dylibs;
 mod extensions;
+mod keyboard;
 mod macho;
 mod startup;
 
@@ -80,6 +83,9 @@ pub(crate) struct Host {
     /// Each launch item's path, which an issue may name, and the identity of what it runs,
     /// which keys that issue (see the module docs).
     pub(crate) items: BTreeMap<String, String>,
+    /// Each program that can read the keyboard, by path, with the identity that keys its issue
+    /// ([`keyboard::Access::identity`]).
+    pub(crate) keyboard: BTreeMap<String, String>,
 }
 
 /// The settings read, by key: the tool and its arguments. Each prints one line of state.
@@ -233,7 +239,9 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
         mark_replaceable(&mut items, account);
     }
     let files = startup::collect(&root, home.as_deref(), account.as_ref());
-    let support = home.map(|home| home.join("Library/Application Support"));
+    let support = home
+        .as_ref()
+        .map(|home| home.join("Library/Application Support"));
     let browsers = support.map_or_else(Vec::new, |support| browsers::collect(inventory, &support));
     // Without the account, where this user could plant a library is not known: every
     // program is recorded as not read, which carries its issue.
@@ -245,7 +253,12 @@ pub(crate) fn collect(inventory: &mut Inventory, cancel: &Cancel) -> Host {
             Vec::new()
         }
     };
-    Host::new(&settings, &items, &files, &browsers, &hijackable)
+    let keyboard = if cancel.is_cancelled() {
+        Vec::new()
+    } else {
+        keyboard::collect(inventory, &root, home.as_deref(), cancel)
+    };
+    Host::new(&settings, &items, &files, &browsers, &hijackable, &keyboard)
 }
 
 /// The programs the dylib check reads: what each startup item runs, then the main executable of
@@ -446,12 +459,17 @@ pub(crate) fn may_come_from_records(path: &Path) -> bool {
 }
 
 impl Host {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per kind of line the host checks read, each used once"
+    )]
     fn new(
         settings: &BTreeMap<&str, String>,
         items: &[Item],
         files: &[StartupFile],
         browsers: &[BrowserExtension],
         hijackable: &[dylibs::Hijackable],
+        keyboard: &[keyboard::Access],
     ) -> Self {
         let settings_json =
             serde_json::to_string_pretty(settings).expect("a map of strings serializes");
@@ -471,11 +489,18 @@ impl Host {
             dylib_lines.push_str(&line);
             dylib_lines.push('\n');
         }
+        let mut keyboard_lines = String::new();
+        for program in keyboard {
+            let line = serde_json::to_string(program).expect("strings, booleans and lists");
+            keyboard_lines.push_str(&line);
+            keyboard_lines.push('\n');
+        }
         Self {
             files: vec![
                 ("mac/settings.json".to_owned(), settings_json),
                 ("mac/persistence.jsonl".to_owned(), lines),
                 ("mac/dylibs.jsonl".to_owned(), dylib_lines),
+                ("mac/keyboard.jsonl".to_owned(), keyboard_lines),
             ],
             settings: settings.keys().map(|key| (*key).to_owned()).collect(),
             items: items
@@ -496,6 +521,10 @@ impl Host {
                         .iter()
                         .map(|program| (program.path.clone(), program.identity())),
                 )
+                .collect(),
+            keyboard: keyboard
+                .iter()
+                .map(|program| (program.path.clone(), program.identity()))
                 .collect(),
         }
     }
@@ -2658,7 +2687,12 @@ TeamIdentifier=not set
             .any(|e| matches!(e, InventoryError::FullDiskAccess { .. }));
         assert_eq!(noted, needs_full_disk_access());
         assert_eq!(host.settings.len(), POSTURE.len());
-        assert_eq!(host.files.len(), 3);
+        assert_eq!(host.files.len(), 4);
+        assert!(
+            !inventory.failed.contains(&InventorySource::KeyboardAccess),
+            "{:?}",
+            inventory.problems
+        );
         assert!(host.files[0].1.contains("system_integrity_protection"));
     }
 
@@ -2677,7 +2711,7 @@ TeamIdentifier=not set
         let mut inventory = Inventory::default();
         let browsers = browsers::collect(&mut inventory, &support);
         let extension = browsers[0].path.clone();
-        let host = Host::new(&settings, &[item], &[], &browsers, &[]);
+        let host = Host::new(&settings, &[item], &[], &browsers, &[], &[]);
 
         assert_eq!(host.settings, ["filevault"]);
         assert_eq!(host.items[path.to_str().unwrap()], identity);
@@ -2687,10 +2721,12 @@ TeamIdentifier=not set
             [
                 "mac/settings.json",
                 "mac/persistence.jsonl",
-                "mac/dylibs.jsonl"
+                "mac/dylibs.jsonl",
+                "mac/keyboard.jsonl",
             ]
         );
         assert_eq!(host.files[2].1, "", "no program to list");
+        assert_eq!(host.files[3].1, "", "no program can read the keyboard");
         assert!(host.files[0].1.contains("FileVault is On."));
         assert_eq!(host.files[1].1.lines().count(), 2);
         assert!(host.files[1].1.contains(r#""kind":"browser_extension""#));

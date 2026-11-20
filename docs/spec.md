@@ -444,12 +444,14 @@ entitlement, which needs an Apple Developer account. Between sweeps, the lifecyc
 the last sweep" stands in for BlockBlock's alerts, late by one sweep.
 
 The app collects and the agent judges, as for servers. The sweep's agent runs no commands, so
-the app reads code signatures itself (`inventory/host.rs`) and writes two bundle files:
+the app reads code signatures itself (`inventory/host.rs`) and writes four bundle files:
 
 | File | What it holds | An issue names it as |
 |---|---|---|
 | `mac/settings.json` | `csrutil status`, `spctl --status`, `fdesetup status`, `socketfilterfw --getglobalstate`, each as printed | `{"setting": "<key>"}` |
 | `mac/persistence.jsonl` | Every property list in `/Library/LaunchDaemons`, `/Library/LaunchAgents` and `~/Library/LaunchAgents`: label, program, arguments, the script an interpreter runs (its first path argument unless inline code such as `-c` comes first), run-at-load, keep-alive, user, environment variable names (values only for `DYLD_` and `PATH`), and the signature of the program and script. A property list is opened refusing links and FIFOs; one that cannot be read is an item with its `error`. Then what Background Task Management records that no launch folder shows: login items inside apps, the agents and daemons apps registered from their own bundle, and the apps that open at login, each with its Login Items switches (`enabled`, `allowed`). Then each `.kext` in `/Library/Extensions` and each system extension `/Library/SystemExtensions/db.plist` records, with what it records. Then Safari's extensions (`pluginkit`). Then shell startup files, crontabs and `periodic` scripts as their lines, secrets hidden. Then the extensions of Chromium browsers and Firefox, with their permissions and hosts | `{"item": "<path of the property list, app bundle, extension or file>"}` |
+| `mac/dylibs.jsonl` | The programs startup items run, and apps' executables, that a planted library could take over (see "Dylib hijacking" below) | `{"item": "<program path>"}` |
+| `mac/keyboard.jsonl` | The programs that hold a keyboard event tap now, or that TCC lets read or send key presses (see "Keyboard access" below) | `{"keyboard": "<program or app path>"}` |
 
 - A debug build reads the two system folders under `VIGIL_TEST_LAUNCH_ROOT` when it is set,
   so the CLI's end-to-end tests check no launch item of the machine they run on (each sweep
@@ -659,7 +661,6 @@ Accepted gaps, in the order planned:
 - A changed file inside a program's bundle, such as a framework it loads, is not seen, since
   signatures skip the bundle's resources. The dylib check (below) finds where a library could
   be planted, not a library already replaced.
-- Keyboard event taps.
 
 Dylib hijacking (added 2026-11-19, phase 6 of the KnockKnock and Dylib Hijack Scanner review;
 the owner asked for it to be designed and built without a further stop):
@@ -719,6 +720,58 @@ the owner asked for it to be designed and built without a further stop):
   shown), and ACLs, as for replaceability. `..` in a
   place is resolved by name. On the Mac this was built on (15 apps, every startup program),
   nothing was listed.
+
+Keyboard access (added 2026-11-20, phase 7, the last of the KnockKnock and Dylib Hijack
+Scanner review; designed with the owner, who chose to read TCC's grants as well as the live
+taps):
+
+- **What is read.** ReiKey's check: the event taps running programs hold now
+  (`CGGetEventTapList`), kept when they see key down or key up (modifier keys alone, or the
+  mouse, do not count), and the grants TCC allows that let a program hold such a tap or send
+  key presses whenever it runs: Accessibility, Input Monitoring (`kTCCServiceListenEvent`)
+  and Post Event, from the system's database
+  (`/Library/Application Support/com.apple.TCC/TCC.db`) and this user's (under the home
+  folder). A grant finds a keylogger that is not running at the sweep.
+- **How.** `CGGetEventTapList` is a C function and `unsafe` is forbidden, so one
+  `/usr/bin/osascript -l JavaScript` run calls it through the Objective-C bridge
+  (`ObjC.bindFunction`) and prints the `CGEventTapInformation` records as hex, which Vigil
+  decodes (`inventory/host/keyboard.rs`). The same script names each process by
+  `proc_pidpath`, the file the kernel started: `ps` prints `argv[0]`, which a process sets
+  itself (checked: `exec -a /System/Library/fake /bin/sleep` shows as that). The grants come
+  from `/usr/bin/sqlite3 -readonly -json`. A grant TCC records by bundle identifier is placed
+  at the app the inventory found with that identifier, or named `(unplaced) <identifier>`. Each
+  program is one line with its signature (an app's executable is checked), its taps
+  (`location`, `listen_only`, `target`, `enabled`) and its grants (`service`, `database`, and
+  the code `requirement` TCC holds the grant to, as `/usr/bin/csreq -r- -t` prints it). The
+  requirement says whose an unplaced grant is: Screen Sharing's agent, outside
+  `/Applications`, holds Post Event as `identifier "com.apple.screensharing.agent" and anchor
+  apple`, which the prompt leaves out as Apple's own.
+- **Issues.** `{"keyboard": "<path>"}`, a subject of its own: a tapping program can also be a
+  dylib subject, and an app with a grant can also open at login, which would put two lines on
+  one key of the item map. Keyed by the path, the signature's identity, what each tap can do
+  (its location, whether it only listens, its target) and the grants, so a tap turned off and
+  on keeps a dismissal. The prompt rates a program not signed by Apple or a known developer
+  that taps every program's keys or holds Accessibility or Input Monitoring high, an
+  unplaced grant not held to Apple's anchor medium, and a Developer ID app known for keyboard
+  features low.
+- **Failures.** The tap list, a database that does not read, and a signature check that cannot
+  run fail `keyboard_access`, which carries every keyboard issue. Accepted downside: a failed
+  tap list carries the issues of grants too for that sweep, as a subject does not say which
+  gave it. Without Full Disk Access the system database is a note
+  (`InventoryError::FullDiskAccess`), as Background Task Management's records are. A database
+  that is not there has no grants (this user's often is not).
+- **Testing.** A debug build reads the tap list from the file `VIGIL_TEST_EVENT_TAPS` names
+  (none: no taps), so the CLI's end-to-end sweeps neither list the taps of the machine they run
+  on nor check their programs; the TCC databases are under `VIGIL_TEST_LAUNCH_ROOT` and the
+  sandbox's home. `this_macs_taps_are_listed` runs the real script.
+- **Not read:** taps that see no key presses, grants denied or not yet answered, and other
+  users' databases. Whether a placed app still satisfies its grant's requirement is not
+  checked: the line shows both, and macOS denies a program that does not.
+  A tap is a moment's state: one opened after the sweep is seen at the next. A process that
+  exits while the list is read is left out. On the Mac this was built on, four taps saw key
+  presses (Siri, its notification service, `universalaccessd`, `ViewBridgeAuxiliary`, all
+  Apple's), and three grants were allowed: Accessibility for two apps and Post Event for
+  Screen Sharing's agent.
 
 ### GitHub repositories (decided 2026-11-06)
 

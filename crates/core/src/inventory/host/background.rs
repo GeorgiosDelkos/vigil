@@ -102,6 +102,7 @@ pub(super) fn read(folder: &Path, failures: &mut Vec<InventoryError>) -> Vec<Ent
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Vec::new(),
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
             failures.push(InventoryError::FullDiskAccess {
+                unread: "login items and the agents apps registered",
                 path: folder.to_owned(),
             });
             return Vec::new();

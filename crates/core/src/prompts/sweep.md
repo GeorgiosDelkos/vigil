@@ -113,13 +113,29 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   line. Vigil read the program each startup item runs and the main executable of each app in
   `/Applications` and `~/Applications`, and lists one only when it does not enforce library
   validation (the loader would load a library someone else signed) and this user could create
-  a file where it would load one. Each has its `path` (the program's, links followed),
+  a file where it would load one. Each has its `path` (the program's with links followed, or
+  an app's executable by its path in the app),
   `used_by` (the startup items, by their path in `mac/persistence.jsonl`, and apps that run
   it), `runs_as_root`, and `plants`: each
   with the install name it `load`s, whether the load is `weak`, the `path` where a planted
   library would load, and `why`: `weak_missing` (a weak load of a library that is not there:
   the program starts without it and loads one put there) or `earlier_rpath` (an `@rpath/`
   library found only in a later rpath folder: one put in this earlier folder loads instead).
+- `mac/keyboard.jsonl`: programs that can read the keyboard, one per line. Each has its `path`
+  (the program's; for an app TCC names by bundle `identifier`, the app's, or
+  `(unplaced) <identifier>` when Vigil found no app with it), its `signature` (as in
+  `mac/persistence.jsonl`; none when unplaced), and either or both of:
+  - `taps`: the event taps it holds now that see key presses, each with its `location`
+    (`hid`, `session`, `annotated_session`), whether it is `listen_only` (otherwise it can
+    also change or drop key presses), the `target` program it watches (absent: every
+    program's), and whether it is `enabled`;
+  - `grants`: what macOS's privacy settings let it do whenever it runs, by `service`
+    (`accessibility`: control the Mac, including reading and changing key presses;
+    `input_monitoring`: read key presses; `post_event`: type into other programs), the
+    `database` it is in (`system`, or `user` for this user's own), and the code `requirement`
+    macOS holds it to: only a program that satisfies it gets the grant, so it says whose the
+    grant is (`anchor apple` is Apple's; `certificate leaf[subject.OU] = "<team>"` a
+    developer's).
 
 ## Version matches
 
@@ -322,8 +338,21 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     run as root. The fix steps name the developer to report it to (the program
     should enforce library validation or not load from that place) and, until a fixed
     release, removing the program or the startup item that runs it if it is not needed.
-  - Never an issue for a file of the bundle on this Mac: use `setting` or `item`. Every
-    issue on this Mac has `commands` empty.
+  - A program in `mac/keyboard.jsonl`: `{"keyboard": "<its path>"}`, one issue per program.
+    Apple's own (`apple`) are not issues. A program that is `unsigned`, `ad_hoc`,
+    `other_issuer`, `invalid`, `missing` or `unreadable`, or `apple_issued` with an `other`
+    certificate, and that taps every program's key presses or holds `accessibility` or
+    `input_monitoring` is high: it can record what the user types, passwords included, unless
+    the evidence shows it is the user's own tool. An unplaced grant whose `requirement` is
+    `anchor apple` is Apple's own and not an issue; any other unplaced grant is medium: say the
+    app is not in `/Applications` and name the identifier and the requirement's team. A
+    Developer ID or App Store app known for keyboard features (remappers, launchers, text
+    expanders, remote desktop, accessibility tools) is low, and worth reporting only when
+    nothing on this Mac explains it. The fix steps say to turn the grant off in System
+    Settings > Privacy & Security (Accessibility, Input Monitoring) or quit and remove the
+    program.
+  - Never an issue for a file of the bundle on this Mac: use `setting`, `item` or `keyboard`.
+    Every issue on this Mac has `commands` empty.
 
 If nothing is affected and nothing is risky, write `{"findings": [], "issues": []}`.
 

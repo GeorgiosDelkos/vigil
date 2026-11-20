@@ -581,6 +581,8 @@ struct Collected {
     settings: Vec<String>,
     /// The launch items an issue may name, by path, with the identity of what each runs.
     items: BTreeMap<String, String>,
+    /// The programs that can read the keyboard an issue may name, by path, with identities.
+    keyboard: BTreeMap<String, String>,
     /// What its issues may name and carry.
     scope: IssueScope,
     problems: Vec<String>,
@@ -606,6 +608,7 @@ fn collect_mac(project_dirs: &[PathBuf], cancel: &Cancel) -> Collected {
         files: host.files,
         settings: host.settings,
         items: host.items,
+        keyboard: host.keyboard,
         scope: IssueScope::Host,
         problems,
         failed: inventory.failed,
@@ -645,6 +648,7 @@ impl Shared<'_> {
             files: collected.files,
             settings: collected.settings,
             items: BTreeMap::new(),
+            keyboard: BTreeMap::new(),
             scope: IssueScope::Bundle,
             problems: collected.problems,
             failed: collected.failed,
@@ -679,6 +683,7 @@ impl Shared<'_> {
             files: collected.files,
             settings: Vec::new(),
             items: BTreeMap::new(),
+            keyboard: BTreeMap::new(),
             scope: IssueScope::Bundle,
             problems: collected.problems,
             failed: collected.failed,
@@ -754,6 +759,7 @@ impl Shared<'_> {
             files: &collected.files,
             settings: &collected.settings,
             items: &collected.items,
+            keyboard: &collected.keyboard,
             scope: collected.scope,
         };
         let known = bundle::write(&dir.join("bundle"), &contents, self.sources.kev)?;
@@ -1000,7 +1006,10 @@ impl Shared<'_> {
             .map(|issue| {
                 let key = issue_key(target, &issue.subject, known);
                 let name = match &issue.subject {
-                    Subject::Setting(name) | Subject::File(name) | Subject::Item(name) => name,
+                    Subject::Setting(name)
+                    | Subject::File(name)
+                    | Subject::Item(name)
+                    | Subject::Keyboard(name) => name,
                 };
                 ReportIssue {
                     key,
@@ -1031,6 +1040,13 @@ fn issue_key(target: &str, subject: &Subject, known: &Known) -> FindingKey {
                 .get(path)
                 .expect("validation keeps only items the bundle lists");
             FindingKey::new(&[target, "item", path, runs])
+        }
+        Subject::Keyboard(path) => {
+            let identity = known
+                .keyboard
+                .get(path)
+                .expect("validation keeps only programs the bundle lists");
+            FindingKey::new(&[target, "keyboard", path, identity])
         }
     }
 }
@@ -2811,6 +2827,7 @@ mod tests {
                 files: Vec::new(),
                 settings: Vec::new(),
                 items: BTreeMap::new(),
+                keyboard: BTreeMap::new(),
                 scope: IssueScope::Host,
                 problems: Vec::new(),
                 failed: BTreeSet::new(),
@@ -2907,6 +2924,7 @@ mod tests {
                 files: Vec::new(),
                 settings: Vec::new(),
                 items: BTreeMap::new(),
+                keyboard: BTreeMap::new(),
                 scope: IssueScope::Host,
                 problems: Vec::new(),
                 failed,
@@ -3027,6 +3045,7 @@ mod tests {
                 files: Vec::new(),
                 settings: Vec::new(),
                 items: [(plist.to_owned(), identity.to_owned())].into(),
+                keyboard: BTreeMap::new(),
                 scope: IssueScope::Host,
                 problems: Vec::new(),
                 failed,

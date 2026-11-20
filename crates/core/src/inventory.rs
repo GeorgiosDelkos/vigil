@@ -497,6 +497,10 @@ pub enum InventorySource {
     },
     /// The listing of a GitHub repository's `.github/workflows`.
     Workflows,
+    /// The keyboard taps or grants on this Mac, or a signature of a program that holds one:
+    /// listed together, since a tap's program and a grant's are told apart only by the line
+    /// that names them.
+    KeyboardAccess,
     /// One workflow file that `gh` could not fetch, by its file name.
     Workflow {
         /// The file name (`ci.yml`).
@@ -550,6 +554,7 @@ impl InventorySource {
             | Self::SafariExtensions
             | Self::BrowserProfile { .. }
             | Self::Account
+            | Self::KeyboardAccess
             | Self::Alerts { .. }
             | Self::Workflows
             | Self::Workflow { .. }
@@ -614,7 +619,7 @@ impl InventorySource {
             Self::Alerts { name } => match subject {
                 Subject::Setting(key) => *key == github::alerts_key(name),
                 Subject::File(path) => *path == github::alerts_file(name),
-                Subject::Item(_) => false,
+                Subject::Item(_) | Subject::Keyboard(_) => false,
             },
             Self::Workflows => {
                 matches!(subject, Subject::File(path) if path.starts_with(github::WORKFLOWS))
@@ -625,6 +630,10 @@ impl InventorySource {
             ),
             // What only the account lets the sweep read: this user's crontab.
             Self::Account => matches!(subject, Subject::Item(item) if host::needs_account(item)),
+            // Accepted downside: a failed tap list carries the issues of grants too, and a
+            // failed grant read those of taps, for that sweep. A subject does not say which
+            // gave it, and both fail rarely.
+            Self::KeyboardAccess => matches!(subject, Subject::Keyboard(_)),
             // These give components, not issues.
             Self::MacOs
             | Self::CaskApps { .. }
@@ -677,6 +686,7 @@ impl InventorySource {
             | Self::SystemExtensions
             | Self::SafariExtensions
             | Self::Account
+            | Self::KeyboardAccess
             | Self::Unknown => None,
         }
     }
@@ -709,6 +719,7 @@ impl std::fmt::Display for InventorySource {
             Self::BrowserProfile { path } => write!(f, "browser profile {path}"),
             Self::LoadCommands { path } => write!(f, "the load commands of {path}"),
             Self::Account => f.write_str("this user's account"),
+            Self::KeyboardAccess => f.write_str("the programs that can read the keyboard"),
             Self::LaunchFolder { path } => write!(f, "startup folder {path}"),
             Self::LaunchItem { path } => write!(f, "startup item {path}"),
             Self::Alerts { name } => write!(f, "{name} alerts"),
@@ -888,15 +899,17 @@ pub enum InventoryError {
         /// The largest lockfile read, in bytes.
         limit: u64,
     },
-    /// macOS refused to list a folder only a process with Full Disk Access may list.
+    /// macOS refused to read a file or list a folder only a process with Full Disk Access may
+    /// read.
     #[error(
-        "login items and the agents apps registered are not read: {} needs Full Disk Access; \
-         allow Vigil, or the terminal that runs it, in System Settings > Privacy & Security > \
-         Full Disk Access",
+        "{unread} are not read: {} needs Full Disk Access; allow Vigil, or the terminal that \
+         runs it, in System Settings > Privacy & Security > Full Disk Access",
         path.display()
     )]
     FullDiskAccess {
-        /// The folder.
+        /// What was not read, for the message: "login items and the agents apps registered".
+        unread: &'static str,
+        /// The file or folder.
         path: PathBuf,
     },
 }
@@ -1471,6 +1484,11 @@ mod tests {
                 "Safari extensions",
                 "safari_extensions",
             ),
+            (
+                InventorySource::KeyboardAccess,
+                "the programs that can read the keyboard",
+                "keyboard_access",
+            ),
         ];
         for (source, text, kind) in names {
             assert_eq!(source.to_string(), text);
@@ -1478,6 +1496,20 @@ mod tests {
             assert_eq!(value, serde_json::json!({ "kind": kind }));
             assert_eq!(InventorySource::deserialize(&value).unwrap(), source);
         }
+    }
+
+    #[test]
+    fn a_failed_keyboard_read_covers_only_keyboard_issues() {
+        let keyboard = InventorySource::KeyboardAccess;
+        let tap = Subject::Keyboard("/Applications/Tool.app".to_owned());
+        assert!(keyboard.covers_issue(&tap));
+        assert!(keyboard.covers_issue(&Subject::Keyboard("(unplaced) com.x".to_owned())));
+        assert!(!keyboard.covers_issue(&Subject::Item("/Applications/Tool.app".to_owned())));
+        let records = InventorySource::BackgroundItems;
+        assert!(
+            !records.covers_issue(&tap),
+            "an app's keyboard access is not one of its login items"
+        );
     }
 
     #[test]

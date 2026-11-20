@@ -57,6 +57,9 @@ pub(crate) struct Contents<'a> {
     pub(crate) settings: &'a [String],
     /// The launch items an issue may name, by path, each with the identity of what it runs.
     pub(crate) items: &'a BTreeMap<String, String>,
+    /// The programs that can read the keyboard an issue may name, by path, each with the
+    /// identity that keys its issue.
+    pub(crate) keyboard: &'a BTreeMap<String, String>,
     /// What the target's issues may name and carry: on this Mac, no bundle file.
     pub(crate) scope: IssueScope,
 }
@@ -81,6 +84,7 @@ pub(crate) fn write(
         files,
         settings,
         items,
+        keyboard,
         scope,
     } = *contents;
     let io_err = |path: &Path| {
@@ -169,6 +173,7 @@ pub(crate) fn write(
     known.scope = scope;
     known.settings = settings.iter().cloned().collect();
     known.items = items.clone();
+    known.keyboard = keyboard.clone();
     Ok(known)
 }
 
@@ -393,6 +398,7 @@ mod tests {
             files: &[],
             settings: &[],
             items: &NO_ITEMS,
+            keyboard: &NO_ITEMS,
             scope: IssueScope::Bundle,
         }
     }
