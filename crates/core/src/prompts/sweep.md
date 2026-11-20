@@ -113,13 +113,33 @@ You are checking {{target}} for known vulnerabilities. Everything you need is in
   line. Vigil read the program each startup item runs and the main executable of each app in
   `/Applications` and `~/Applications`, and lists one only when it does not enforce library
   validation (the loader would load a library someone else signed) and this user could create
-  a file where it would load one. Each has its `path` (the program's, links followed),
+  a file where it would load one. Each has its `path` (the program's with links followed, or
+  an app's executable by its path in the app),
   `used_by` (the startup items, by their path in `mac/persistence.jsonl`, and apps that run
   it), `runs_as_root`, and `plants`: each
   with the install name it `load`s, whether the load is `weak`, the `path` where a planted
   library would load, and `why`: `weak_missing` (a weak load of a library that is not there:
   the program starts without it and loads one put there) or `earlier_rpath` (an `@rpath/`
   library found only in a later rpath folder: one put in this earlier folder loads instead).
+- `mac/keyboard.jsonl`: programs that can read the keyboard, one per line. Each has its `path`:
+  the program's, or its app's when it is the app's main executable; for a grant TCC records
+  by bundle `identifier`, the app with that identifier whose signature satisfies the grant's
+  requirement, or `(unplaced) <identifier>` when Vigil found none; `(no file) <name>` for a
+  running process whose file was deleted after it started. It has its `signature` (as in
+  `mac/persistence.jsonl`; none when there is no file), and either or both of:
+  - `taps`: the event taps it holds now that see key presses, each with its `location`
+    (`hid`, `session`, `annotated_session`), whether it is `listen_only` (otherwise it can
+    also change or drop key presses), the `target` program it watches (absent: every
+    program's), whether it is `enabled`, and the process's `command` line (what the process
+    says about itself, which it can make up, but which shows the script an interpreter runs);
+  - `grants`: what macOS's privacy settings let it do whenever it runs, by `service`
+    (`accessibility`: control the Mac, including reading and changing key presses;
+    `input_monitoring`: read key presses; `post_event`: type into other programs), the
+    `database` it is in (`system`, or `user` for this user's own), the code `requirement`
+    macOS holds it to (only a program that satisfies it gets the grant, so it says whose the
+    grant is: `certificate leaf[subject.OU] = <team>` names a developer's team), and
+    `apple_only` when only Apple's own code satisfies it. `anchor apple generic` alone is not
+    Apple's: every Developer ID meets it.
 
 ## Version matches
 
@@ -322,8 +342,32 @@ Write `findings.json` in this folder, following `findings.schema.json`:
     run as root. The fix steps name the developer to report it to (the program
     should enforce library validation or not load from that place) and, until a fixed
     release, removing the program or the startup item that runs it if it is not needed.
-  - Never an issue for a file of the bundle on this Mac: use `setting` or `item`. Every
-    issue on this Mac has `commands` empty.
+  - A program in `mac/keyboard.jsonl`: `{"keyboard": "<its path>"}`, one issue per program.
+    A tap on one program (`target`) counts as much as one on every program: a keylogger aimed
+    at a browser or a password manager is one. Rate it by the first rule that holds:
+    - `(no file)`: high. A program that deletes itself while it reads the keyboard is hiding.
+    - Not signed by Apple or a known developer (`unsigned`, `ad_hoc`, `other_issuer`,
+      `invalid`, `missing`, `unreadable`, or `apple_issued` with an `other` certificate), with
+      a tap or an `accessibility` or `input_monitoring` grant: high, since it can record what
+      the user types, passwords included, unless the evidence shows it is the user's own
+      tool. With only `post_event`: medium.
+    - An interpreter or terminal signed by Apple (`python3`, `Python`, `perl`, `ruby`,
+      `osascript`, `node`, `swift`, a shell, Terminal, iTerm) is not exempt: every script it
+      runs gets its tap or grant. A tap: judge the script its `command` runs, high unless it is
+      plainly a known tool. A grant to a terminal: low, as many users give one to their
+      terminal; to an interpreter: medium.
+    - Any other program signed by Apple (`apple`), and an unplaced grant that is `apple_only`:
+      not an issue.
+    - Another unplaced grant: medium. Say the app is not where Vigil looks for apps, and name
+      the identifier and the requirement's team.
+    - A Developer ID or App Store app: low when it is known for keyboard features (remappers,
+      launchers, text expanders, remote desktop, password managers, accessibility tools),
+      medium when nothing about it explains why it reads or types keys.
+
+    The fix steps say to turn the grant off in System Settings > Privacy & Security
+    (Accessibility, Input Monitoring) or to quit and remove the program.
+  - Never an issue for a file of the bundle on this Mac: use `setting`, `item` or `keyboard`.
+    Every issue on this Mac has `commands` empty.
 
 If nothing is affected and nothing is risky, write `{"findings": [], "issues": []}`.
 

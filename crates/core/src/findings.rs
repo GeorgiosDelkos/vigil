@@ -85,6 +85,8 @@ pub enum Subject {
     /// A launch agent or daemon, by its property list's path on this Mac
     /// (`/Library/LaunchDaemons/com.example.plist`), as `mac/persistence.jsonl` lists it.
     Item(String),
+    /// A program that can read the keyboard, by its path as `mac/keyboard.jsonl` lists it.
+    Keyboard(String),
 }
 
 impl fmt::Display for Subject {
@@ -93,6 +95,7 @@ impl fmt::Display for Subject {
             Self::Setting(key) => write!(f, "setting {key}"),
             Self::File(path) => write!(f, "file {path}"),
             Self::Item(path) => write!(f, "startup item {path}"),
+            Self::Keyboard(path) => write!(f, "keyboard access of {path}"),
         }
     }
 }
@@ -182,6 +185,9 @@ pub(crate) struct Known {
     /// The launch items an issue may name, by path on this Mac, each with the identity of what
     /// it runs, which goes into the issue's key.
     pub(crate) items: BTreeMap<String, String>,
+    /// The programs that can read the keyboard an issue may name, by path, each with the
+    /// identity that goes into the issue's key.
+    pub(crate) keyboard: BTreeMap<String, String>,
     /// What the target's issues may name and carry (see [`IssueScope`]).
     pub(crate) scope: IssueScope,
 }
@@ -314,13 +320,14 @@ pub(crate) fn validate(text: &str, known: &Known) -> Result<Verdict, Vec<String>
             Subject::Setting(key) => known.settings.contains(key),
             Subject::File(path) => known.files.contains(path),
             Subject::Item(path) => known.items.contains_key(path),
+            Subject::Keyboard(path) => known.keyboard.contains_key(path),
         };
         if !known_subject {
             problems.push(format!(
                 "{at}.subject: {} is not in this bundle (settings are the keys of \
                  github/settings.json or mac/settings.json, files are bundle paths such as \
                  github/workflows/ci.yml, items are the paths in mac/persistence.jsonl and \
-                 mac/dylibs.jsonl)",
+                 mac/dylibs.jsonl, keyboard subjects the paths in mac/keyboard.jsonl)",
                 plain_subject(&issue.subject)
             ));
         }
@@ -361,6 +368,7 @@ fn plain_subject(subject: &Subject) -> String {
         Subject::Setting(key) => format!("setting {key:?}"),
         Subject::File(path) => format!("file {path:?}"),
         Subject::Item(path) => format!("startup item {path:?}"),
+        Subject::Keyboard(path) => format!("keyboard access of {path:?}"),
     }
 }
 
@@ -666,7 +674,7 @@ mod tests {
                 "missing none".to_owned(),
             )]
             .into(),
-
+            keyboard: [("/usr/local/bin/tap".to_owned(), "tap".to_owned())].into(),
             scope: IssueScope::Bundle,
         }
     }
@@ -705,6 +713,31 @@ mod tests {
     }
 
     #[test]
+    fn a_keyboard_issue_names_a_program_the_bundle_lists() {
+        let known = known(None);
+        let keyboard = json!({"keyboard": "/usr/local/bin/tap"});
+        let text = json!({"findings": [], "issues": [issue(&keyboard)]});
+        let verdict = validate(&text.to_string(), &known).unwrap();
+        assert!(matches!(
+            &verdict.issues[0].subject,
+            Subject::Keyboard(path) if path == "/usr/local/bin/tap"
+        ));
+        let unknown = json!({"keyboard": "/Library/LaunchDaemons/x.plist"});
+        let text = json!({"findings": [], "issues": [issue(&unknown)]});
+        assert_eq!(
+            validate(&text.to_string(), &known).unwrap_err(),
+            [
+                "issues[0].subject: keyboard access of \"/Library/LaunchDaemons/x.plist\" is \
+                 not in this bundle (settings are the keys of github/settings.json or \
+                 mac/settings.json, files are bundle paths such as github/workflows/ci.yml, \
+                 items are the paths in mac/persistence.jsonl and mac/dylibs.jsonl, keyboard \
+                 subjects the paths in mac/keyboard.jsonl)"
+            ],
+            "a launch item's path is not a keyboard subject"
+        );
+    }
+
+    #[test]
     fn issues_name_a_setting_or_a_bundle_file() {
         let known = known(None);
         let text = json!({
@@ -734,11 +767,13 @@ mod tests {
                 "issues[0].subject: setting \"made_up\" is not in this bundle (settings are the \
                  keys of github/settings.json or mac/settings.json, files are bundle paths such \
                  as github/workflows/ci.yml, items are the paths in mac/persistence.jsonl and \
-                 mac/dylibs.jsonl)",
+                 mac/dylibs.jsonl, keyboard subjects the paths \
+                 in mac/keyboard.jsonl)",
                 "issues[1].subject: file \"../etc/passwd\" is not in this bundle (settings are \
                  the keys of github/settings.json or mac/settings.json, files are bundle paths \
                  such as github/workflows/ci.yml, items are the paths in \
-                 mac/persistence.jsonl and mac/dylibs.jsonl)",
+                 mac/persistence.jsonl and mac/dylibs.jsonl, keyboard subjects the paths \
+                 in mac/keyboard.jsonl)",
                 "issues[1].explanation has control or invisible characters",
             ]
         );
@@ -776,7 +811,8 @@ mod tests {
                 "issues[1].subject: startup item \"/Library/LaunchDaemons/y.plist\" is not in this \
                  bundle (settings are the keys of github/settings.json or mac/settings.json, \
                  files are bundle paths such as github/workflows/ci.yml, items are the paths in \
-                 mac/persistence.jsonl and mac/dylibs.jsonl)",
+                 mac/persistence.jsonl and mac/dylibs.jsonl, keyboard subjects the paths \
+                 in mac/keyboard.jsonl)",
             ]
         );
 
@@ -1217,5 +1253,36 @@ mod tests {
             assert!(required.iter().any(|r| *r == field), "{field}");
         }
         assert_eq!(item["additionalProperties"], false);
+    }
+
+    #[test]
+    fn the_schema_names_every_kind_of_subject() {
+        let schema: serde_json::Value = serde_json::from_str(SCHEMA).unwrap();
+        let subject = &schema["properties"]["issues"]["items"]["properties"]["subject"];
+        let in_schema: BTreeSet<&str> = subject["oneOf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kind| kind["required"][0].as_str().unwrap())
+            .collect();
+        // Exhaustive, so a new kind of subject cannot be left out of this list.
+        let kind = |subject: &Subject| match subject {
+            Subject::Setting(_) => "setting",
+            Subject::File(_) => "file",
+            Subject::Item(_) => "item",
+            Subject::Keyboard(_) => "keyboard",
+        };
+        let all = [
+            Subject::Setting(String::new()),
+            Subject::File(String::new()),
+            Subject::Item(String::new()),
+            Subject::Keyboard(String::new()),
+        ];
+        for subject in &all {
+            let serialized = serde_json::to_value(subject).unwrap();
+            assert!(serialized.get(kind(subject)).is_some(), "{serialized}");
+        }
+        let kinds: BTreeSet<&str> = all.iter().map(kind).collect();
+        assert_eq!(in_schema, kinds);
     }
 }
