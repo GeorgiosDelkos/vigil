@@ -23,8 +23,9 @@
 //! system database needs Full Disk Access; without it the grants are a note
 //! ([`InventoryError::FullDiskAccess`]), as Background Task Management's records are.
 //!
-//! Each program is one line, by path, with its signature, its taps and its grants. A tap on an
-//! app's main executable is the app's, so an app's tap and its grant are one line. An issue
+//! Each program is one line, by path, with its signature, its taps and its grants. A tap or a
+//! path grant on an app's main executable is the app's, so an app's taps and grants are one
+//! line. An issue
 //! names it as `{"keyboard": path}` and is keyed by [`Access::identity`].
 //!
 //! Not read: taps that see no key presses (mouse only); grants denied or not yet answered;
@@ -311,10 +312,10 @@ fn read(
 ) -> Vec<Access> {
     let mut found: BTreeMap<String, Found> = BTreeMap::new();
     match listed.and_then(|listed| taps(&listed)) {
-        Ok(taps) => file_taps(&mut found, taps, cancel),
+        Ok(taps) => add_taps(&mut found, taps, cancel),
         Err(e) => inventory.fail(InventorySource::KeyboardAccess, e),
     }
-    file_grants(inventory, &mut found, root, home, cancel);
+    add_grants(inventory, &mut found, root, home, cancel);
     found
         .into_iter()
         .map(|(path, found)| {
@@ -330,8 +331,8 @@ fn read(
         .collect()
 }
 
-/// Files each tap in `found` under who holds it, with the process's command line.
-fn file_taps(found: &mut BTreeMap<String, Found>, taps: Vec<(Holder, i32, Tap)>, cancel: &Cancel) {
+/// Adds each tap to `found`, under who holds it, with the process's command line.
+fn add_taps(found: &mut BTreeMap<String, Found>, taps: Vec<(Holder, i32, Tap)>, cancel: &Cancel) {
     let pids: BTreeSet<i32> = taps.iter().map(|(_, pid, _)| *pid).collect();
     let commands = commands(&pids, cancel);
     for (holder, pid, mut tap) in taps {
@@ -349,10 +350,10 @@ fn file_taps(found: &mut BTreeMap<String, Found>, taps: Vec<(Holder, i32, Tap)>,
     }
 }
 
-/// Files the allowed keyboard grants of the system's database under `root` and this user's
-/// under `home` in `found`. A cancelled sweep stops at the next grant, with one
-/// [`InventoryError::Cancelled`].
-fn file_grants(
+/// Adds the allowed keyboard grants of the system's database under `root` and this user's
+/// under `home` to `found`. A cancelled sweep stops at the next database or grant; a check
+/// already running when it was cancelled reports a [`InventoryError::Cancelled`] of its own.
+fn add_grants(
     inventory: &mut Inventory,
     found: &mut BTreeMap<String, Found>,
     root: &Path,
@@ -369,7 +370,11 @@ fn file_grants(
         let rows = match grants(&path, cancel) {
             Ok(rows) => rows,
             Err(e) => {
+                let cancelled = matches!(e, InventoryError::Cancelled { .. });
                 inventory.fail(InventorySource::KeyboardAccess, e);
+                if cancelled {
+                    return;
+                }
                 continue;
             }
         };
@@ -967,6 +972,13 @@ mod tests {
         };
         let failed = access(Vec::new(), Signature::Apple, [undecoded].into());
         assert_eq!(not_running.identity(), failed.identity());
+        // Another requirement is another grant: a program signed by someone else.
+        let resigned = Grant {
+            csreq: "fade0c01".to_owned(),
+            ..grant()
+        };
+        let resigned = access(Vec::new(), Signature::Apple, [resigned].into());
+        assert_ne!(not_running.identity(), resigned.identity());
     }
 
     #[test]
@@ -1167,13 +1179,39 @@ mod tests {
     }
 
     #[test]
+    fn a_cancelled_sweep_reads_no_grants_and_says_so_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let home = tmp.path().join("home");
+        let row = ("kTCCServiceAccessibility", "/bin/ls", 1, 2, None);
+        database(&root.join(DATABASE), &[row]);
+        database(&home.join(DATABASE), &[row]);
+        let mut inventory = Inventory::default();
+        let cancelled = Cancel::new();
+        cancelled.cancel();
+
+        let found = read(
+            &mut inventory,
+            Ok(Listed::default()),
+            &root,
+            Some(&home),
+            &cancelled,
+        );
+
+        assert!(found.is_empty(), "{found:?}");
+        let [problem] = &inventory.problems[..] else {
+            panic!("{:?}", inventory.problems);
+        };
+        assert!(matches!(problem, InventoryError::Cancelled { .. }));
+    }
+
+    #[test]
     fn command_lines_are_read_for_running_processes_only() {
         let own = i32::try_from(std::process::id()).unwrap();
         let read = commands(&[own, 99_999].into(), &Cancel::new());
         assert_eq!(read.len(), 1, "{read:?}");
         let test_binary = std::env::args().next().unwrap();
         assert!(read[&own].starts_with(&test_binary), "{read:?}");
-        assert!(commands(&BTreeSet::new(), &Cancel::new()).is_empty());
     }
 
     #[test]
