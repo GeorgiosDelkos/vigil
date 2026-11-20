@@ -1302,6 +1302,10 @@ mod tests {
         fs::write(&broken, "not a database").unwrap();
         let e = grants(&broken, &Cancel::new()).unwrap_err();
         assert!(e.is_failure(), "{e}");
+
+        // A path through a file cannot be looked at, which is not the same as no database.
+        let e = grants(&broken.join("TCC.db"), &Cancel::new()).unwrap_err();
+        assert!(e.is_failure(), "{e}");
     }
 
     #[test]
