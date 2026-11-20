@@ -749,8 +749,11 @@ taps):
 - **Grants.** From `/usr/bin/sqlite3 -init /dev/null -readonly -json` (`-init` keeps a
   `~/.sqliterc` from running in a process that may have Full Disk Access), `auth_value` 2
   only (0 is denied: five of the eight keyboard rows on the Mac this was built on). Each
-  grant's code requirement is read with `/usr/bin/csreq -r- -t`; `apple_only` marks one
-  with an `anchor apple` clause (not `anchor apple generic`, which every Developer ID meets).
+  grant's code requirement is read with `/usr/bin/csreq -r- -t`; `apple_only` marks one of
+  the shapes Apple's own designated requirements take, `anchor apple` alone or after one
+  `identifier`. Nothing looser counts: a developer chooses an app's designated requirement,
+  so `(anchor apple) or identifier "com.evil"` holds for an ad hoc signed `com.evil`, and
+  `anchor apple generic` is every Developer ID's.
   A grant TCC records by bundle identifier is placed at the first app the inventory found with
   that identifier whose signature satisfies the requirement (`codesign --verify -R`), since
   TCC gives the grant only to such a program: a look-alike with another app's identifier does
@@ -760,7 +763,8 @@ taps):
   out as Apple's own.
 - **Issues.** `{"keyboard": "<path>"}`, a subject of its own: a tapping program can also be a
   dylib subject, and an app with a grant can also open at login, which would put two lines on
-  one key of the item map. Keyed by the path, the signature's identity and the grants. The
+  one key of the item map. Keyed by the path, the signature's identity and the grants (each
+  by its service, database and compiled requirement). The
   taps are left out: they exist only while the program runs, so a program with a grant would
   get a new key whenever a sweep found it not running. Accepted downside: a dismissed program
   that starts an active filter where it held a listen-only tap keeps the dismissal. The prompt
@@ -772,8 +776,9 @@ taps):
   features, medium otherwise. A tap on one program counts as one on all.
 - **Failures.** The tap list, a database that does not read, a signature or requirement check
   that cannot run, and a `csreq` that fails fail `keyboard_access`, which carries every
-  keyboard issue; a requirement that did not decode keeps its hex, so the issue's key does not
-  change with the failure. Accepted downside: a failed tap list carries the issues of grants
+  keyboard issue. A grant is keyed by its compiled requirement, which reads the same whether
+  `csreq` decoded it or not, so a failure does not change the issue's key. Accepted downside:
+  a failed tap list carries the issues of grants
   too for that sweep, as a subject does not say which gave it. Two lasting states are notes:
   no Full Disk Access (the system database), as for Background Task Management's records,
   and no window server connection (`CGGetEventTapList` returns `0x10000003` in an ssh session

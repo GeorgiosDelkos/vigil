@@ -13,7 +13,8 @@
 //! `osascript`'s JavaScript bridge calls it ([`TAP_LIST`]). The same script names each
 //! process by `proc_pidpath`, the file the kernel started: `ps` shows `argv[0]`, which a
 //! process sets itself (`exec -a /System/Library/x` makes `ps` print that). A process whose
-//! file was deleted has no path, so it is named by `proc_name` as `(no file) <name>`: a
+//! file was deleted has no path (checked on macOS 27.2: `proc_pidpath` fails once the file is
+//! removed, `proc_name` does not), so it is named by `proc_name` as `(no file) <name>`: a
 //! keylogger that deletes itself after starting still shows. `ps` gives only each tapping
 //! process's command line, as the process tells it, which says what script an interpreter
 //! runs.
@@ -176,7 +177,12 @@ impl Access {
     /// where it held a listen-only tap keeps the dismissal.
     pub(super) fn identity(&self) -> String {
         let signature = self.signature.as_ref().map(Signature::identity);
-        serde_json::to_string(&(signature, &self.grants)).expect("strings and enums serialize")
+        let grants: Vec<_> = self
+            .grants
+            .iter()
+            .map(|grant| (grant.service, grant.database, &grant.csreq))
+            .collect();
+        serde_json::to_string(&(signature, grants)).expect("strings and enums serialize")
     }
 }
 
@@ -227,14 +233,17 @@ impl Location {
 struct Grant {
     service: Service,
     database: Database,
+    /// The code requirement as TCC keeps it, compiled, as hex: what keys the grant, since it
+    /// reads the same whether `csreq` decoded it on this sweep or not.
+    #[serde(skip)]
+    csreq: String,
     /// The code requirement TCC holds the grant to, as `csreq -t` prints it
     /// (`identifier "com.apple.screensharing.agent" and anchor apple`): only a program that
     /// satisfies it gets the grant, so it says whose the grant is. `(not decoded) <hex>` when
     /// `csreq` could not decode it. Absent when TCC keeps none.
     #[serde(skip_serializing_if = "Option::is_none")]
     requirement: Option<String>,
-    /// Whether only Apple's own code satisfies the requirement: it has an `anchor apple`
-    /// clause. `anchor apple generic` is not one, as every Developer ID meets it.
+    /// Whether only Apple's own code satisfies the requirement ([`apple_only`]).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     apple_only: bool,
 }
@@ -302,26 +311,54 @@ fn read(
 ) -> Vec<Access> {
     let mut found: BTreeMap<String, Found> = BTreeMap::new();
     match listed.and_then(|listed| taps(&listed)) {
-        Ok(taps) => {
-            let pids: BTreeSet<i32> = taps.iter().map(|(_, pid, _)| *pid).collect();
-            let commands = commands(&pids, cancel);
-            for (holder, pid, mut tap) in taps {
-                tap.command = commands.get(&pid).cloned();
-                let (name, file) = match holder {
-                    Holder::File(program) => {
-                        let file = app_of(&program).unwrap_or(program);
-                        (text(&file), Some(file))
-                    }
-                    Holder::NoFile(name) => (format!("(no file) {name}"), None),
-                };
-                let entry = found.entry(name).or_default();
-                entry.file = file;
-                entry.taps.push(tap);
-            }
-        }
+        Ok(taps) => file_taps(&mut found, taps, cancel),
         Err(e) => inventory.fail(InventorySource::KeyboardAccess, e),
     }
+    file_grants(inventory, &mut found, root, home, cancel);
+    found
+        .into_iter()
+        .map(|(path, found)| {
+            let signature = found.file.map(|file| signature(inventory, file, cancel));
+            Access {
+                path,
+                identifier: found.identifier,
+                signature,
+                taps: found.taps,
+                grants: found.grants,
+            }
+        })
+        .collect()
+}
 
+/// Files each tap in `found` under who holds it, with the process's command line.
+fn file_taps(found: &mut BTreeMap<String, Found>, taps: Vec<(Holder, i32, Tap)>, cancel: &Cancel) {
+    let pids: BTreeSet<i32> = taps.iter().map(|(_, pid, _)| *pid).collect();
+    let commands = commands(&pids, cancel);
+    for (holder, pid, mut tap) in taps {
+        tap.command = commands.get(&pid).cloned();
+        let (name, file) = match holder {
+            Holder::File(program) => {
+                let file = app_of(&program).unwrap_or(program);
+                (text(&file), Some(file))
+            }
+            Holder::NoFile(name) => (format!("(no file) {name}"), None),
+        };
+        let entry = found.entry(name).or_default();
+        entry.file = file;
+        entry.taps.push(tap);
+    }
+}
+
+/// Files the allowed keyboard grants of the system's database under `root` and this user's
+/// under `home` in `found`. A cancelled sweep stops at the next grant, with one
+/// [`InventoryError::Cancelled`].
+fn file_grants(
+    inventory: &mut Inventory,
+    found: &mut BTreeMap<String, Found>,
+    root: &Path,
+    home: Option<&Path>,
+    cancel: &Cancel,
+) {
     let databases = [
         (Database::System, Some(root.join(DATABASE))),
         (Database::User, home.map(|home| home.join(DATABASE))),
@@ -337,6 +374,14 @@ fn read(
             }
         };
         for row in rows {
+            if cancel.is_cancelled() {
+                let what = "reading the keyboard grants".to_owned();
+                inventory.fail(
+                    InventorySource::KeyboardAccess,
+                    InventoryError::Cancelled { what },
+                );
+                return;
+            }
             let Some(service) = Service::ALL
                 .iter()
                 .find(|(name, _)| *name == row.service)
@@ -346,25 +391,24 @@ fn read(
             };
             let requirement = match requirement(&row.csreq, cancel) {
                 Ok(requirement) => requirement,
-                // The hex keeps the issue's key from changing with a failure.
                 Err(e) => {
                     inventory.fail(InventorySource::KeyboardAccess, e);
                     Some(format!("(not decoded) {}", row.csreq))
                 }
             };
-            let (name, file, identifier) = match row.client_type {
-                // A bundle identifier.
-                0 => {
-                    let apps = apps.get_or_insert_with(|| identifiers(&inventory.apps));
-                    let candidates = apps.get(&row.client).map_or(&[][..], Vec::as_slice);
-                    let placed = place(inventory, candidates, requirement.as_deref(), cancel);
-                    match placed {
-                        Some(app) => (text(&app), Some(app), Some(row.client)),
-                        None => (format!("(unplaced) {}", row.client), None, Some(row.client)),
-                    }
+            // `client_type` 0: a bundle identifier; 1: an absolute path, where an app's main
+            // executable is the app, as for a tap.
+            let (name, file, identifier) = if row.client_type == 0 {
+                let apps = apps.get_or_insert_with(|| identifiers(&inventory.apps));
+                let candidates = apps.get(&row.client).map_or(&[][..], Vec::as_slice);
+                match place(inventory, candidates, requirement.as_deref(), cancel) {
+                    Some(app) => (text(&app), Some(app), Some(row.client)),
+                    None => (format!("(unplaced) {}", row.client), None, Some(row.client)),
                 }
-                // An absolute path.
-                _ => (row.client.clone(), Some(PathBuf::from(&row.client)), None),
+            } else {
+                let program = PathBuf::from(&row.client);
+                let file = app_of(&program).unwrap_or(program);
+                (text(&file), Some(file), None)
             };
             let apple_only = requirement.as_deref().is_some_and(apple_only);
             let entry = found.entry(name).or_default();
@@ -373,25 +417,12 @@ fn read(
             entry.grants.insert(Grant {
                 service,
                 database,
+                csreq: row.csreq,
                 requirement,
                 apple_only,
             });
         }
     }
-
-    found
-        .into_iter()
-        .map(|(path, found)| {
-            let signature = found.file.map(|file| signature(inventory, file, cancel));
-            Access {
-                path,
-                identifier: found.identifier,
-                signature,
-                taps: found.taps,
-                grants: found.grants,
-            }
-        })
-        .collect()
 }
 
 /// The first app in `candidates` (the inventory's apps with the grant's bundle identifier)
@@ -420,15 +451,18 @@ fn place(
     )
 }
 
-/// Whether `requirement` holds only for Apple's own code: a clause `anchor apple` that is not
-/// `anchor apple generic`.
+/// Whether `requirement` holds only for Apple's own code: `anchor apple`, alone or after one
+/// `identifier`, the shapes Apple's own designated requirements take
+/// (`identifier "com.apple.screensharing.agent" and anchor apple`). Nothing looser: a
+/// developer chooses an app's designated requirement (`codesign -r`), so
+/// `(anchor apple) or identifier "com.evil"` holds for an ad hoc signed `com.evil` too, and the
+/// words can sit inside a quoted identifier. `anchor apple generic` is every Developer ID's.
 fn apple_only(requirement: &str) -> bool {
-    requirement
-        .match_indices("anchor apple")
-        .any(|(at, clause)| {
-            let rest = &requirement[at + clause.len()..];
-            !rest.starts_with(" generic") && (rest.is_empty() || rest.starts_with([' ', ')']))
-        })
+    let identified = requirement
+        .strip_prefix("identifier \"")
+        .and_then(|rest| rest.strip_suffix("\" and anchor apple"))
+        .is_some_and(|identifier| !identifier.contains('"'));
+    requirement == "anchor apple" || identified
 }
 
 /// The app whose main executable is `program`: the `.app` it is directly in, as
@@ -914,8 +948,9 @@ mod tests {
         let grant = || Grant {
             service: Service::PostEvent,
             database: Database::User,
-            requirement: None,
-            apple_only: false,
+            csreq: "fade0c00".to_owned(),
+            requirement: Some("anchor apple".to_owned()),
+            apple_only: true,
         };
         let running = access(vec![tap()], Signature::Apple, [grant()].into());
         let not_running = access(Vec::new(), Signature::Apple, [grant()].into());
@@ -924,13 +959,28 @@ mod tests {
         assert_ne!(not_running.identity(), replaced.identity());
         let ungranted = access(Vec::new(), Signature::Apple, BTreeSet::new());
         assert_ne!(not_running.identity(), ungranted.identity());
+        // A requirement `csreq` could not decode on one sweep keeps the key.
+        let undecoded = Grant {
+            requirement: Some("(not decoded) fade0c00".to_owned()),
+            apple_only: false,
+            ..grant()
+        };
+        let failed = access(Vec::new(), Signature::Apple, [undecoded].into());
+        assert_eq!(not_running.identity(), failed.identity());
     }
 
     #[test]
     fn only_an_anchor_apple_clause_holds_a_grant_to_apples_code() {
         assert!(apple_only("anchor apple"));
         assert!(apple_only(r#"identifier "com.apple.x" and anchor apple"#));
-        assert!(apple_only(r#"(anchor apple) or identifier "x""#));
+        // Looser shapes a developer can choose, which code other than Apple's satisfies.
+        assert!(!apple_only(r#"(anchor apple) or identifier "com.evil""#));
+        assert!(!apple_only(
+            r#"identifier "x anchor apple y" and anchor apple generic"#
+        ));
+        assert!(!apple_only(
+            r#"identifier "a" or identifier "b" and anchor apple"#
+        ));
         assert!(!apple_only(concat!(
             r#"identifier "x" and anchor apple generic and "#,
             r#"certificate leaf[subject.OU] = Q6L2SF6YDW"#,
@@ -1076,6 +1126,54 @@ mod tests {
                 }),
             ]
         );
+    }
+
+    #[test]
+    fn an_apps_tap_and_its_grants_are_one_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let tool = tmp.path().join("Tool.app");
+        app(&tool, "com.example.tool", Path::new("/bin/ls"));
+        let executable = tool.join("Contents/MacOS/Tool");
+        let executable_text = executable.to_str().unwrap();
+        database(
+            &root.join(DATABASE),
+            &[
+                ("kTCCServiceAccessibility", "com.example.tool", 0, 2, None),
+                ("kTCCServicePostEvent", executable_text, 1, 2, None),
+            ],
+        );
+        let mut inventory = Inventory {
+            apps: vec![tool.clone()],
+            ..Inventory::default()
+        };
+        // Held by a process id macOS never gives out, so `ps` has no command line for it.
+        let tap = listed(
+            &[record(1, 1, 1 << 10, 99_999, 0)],
+            &[(99_999, executable_text.as_bytes())],
+            &[],
+        );
+
+        let found = read(&mut inventory, Ok(tap), &root, None, &Cancel::new());
+
+        assert!(inventory.problems.is_empty(), "{:?}", inventory.problems);
+        let [line] = &found[..] else {
+            panic!("{found:#?}");
+        };
+        assert_eq!(line.path, tool.to_str().unwrap());
+        assert_eq!(line.taps.len(), 1);
+        let services: Vec<Service> = line.grants.iter().map(|grant| grant.service).collect();
+        assert_eq!(services, [Service::Accessibility, Service::PostEvent]);
+    }
+
+    #[test]
+    fn command_lines_are_read_for_running_processes_only() {
+        let own = i32::try_from(std::process::id()).unwrap();
+        let read = commands(&[own, 99_999].into(), &Cancel::new());
+        assert_eq!(read.len(), 1, "{read:?}");
+        let test_binary = std::env::args().next().unwrap();
+        assert!(read[&own].starts_with(&test_binary), "{read:?}");
+        assert!(commands(&BTreeSet::new(), &Cancel::new()).is_empty());
     }
 
     #[test]
